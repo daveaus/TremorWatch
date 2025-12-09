@@ -1,0 +1,126 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- ===== Permissions ===== -->
+    <!-- Sensors & background access -->
+    <uses-permission android:name="android.permission.BODY_SENSORS" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+
+    <!-- Network access for InfluxDB and MQTT -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+
+    <!-- Optional for Android 13+ notifications -->
+    <uses-permission
+        android:name="android.permission.POST_NOTIFICATIONS"
+        android:required="false" />
+
+    <!-- Boot permission for auto-start -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
+    <!-- Schedule exact alarm permission for Android 12+ to keep service alive -->
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
+
+    <!-- Battery optimization exemption for 24/7 monitoring -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
+    <!-- Declare this is a Wear OS app -->
+    <uses-feature android:name="android.hardware.type.watch" />
+
+    <!-- Declare gyroscope requirement -->
+    <uses-feature
+        android:name="android.hardware.sensor.gyroscope"
+        android:required="true" />
+
+    <application
+        android:name=".TremorWatchApplication"
+        android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@android:style/Theme.DeviceDefault"
+        android:usesCleartextTraffic="true"
+        android:networkSecurityConfig="@xml/network_security_config">
+
+        <!-- ===== Wear OS support ===== -->
+        <uses-library
+            android:name="com.google.android.wearable"
+            android:required="false" />
+
+        <meta-data
+            android:name="com.google.android.wearable.standalone"
+            android:value="true" />
+
+        <!-- ===== Main Activity ===== -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:label="@string/app_name">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- ===== Foreground Tremor Service ===== -->
+        <service
+            android:name="com.opensource.tremorwatch.service.TremorService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
+        <!-- ===== Watch Message Listener Service ===== -->
+        <service
+            android:name="com.opensource.tremorwatch.service.WatchMessageListenerService"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.google.android.gms.wearable.MESSAGE_RECEIVED" />
+                <data android:scheme="wear" android:host="*" />
+            </intent-filter>
+        </service>
+
+        <!-- ===== Boot Receiver ===== -->
+        <receiver
+            android:name="com.opensource.tremorwatch.receivers.BootReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </receiver>
+
+        <!-- ===== Service Watchdog Receiver ===== -->
+        <receiver
+            android:name="com.opensource.tremorwatch.receivers.ServiceWatchdogReceiver"
+            android:enabled="true"
+            android:exported="false" />
+
+        <!-- ===== Upload Alarm Receiver ===== -->
+        <receiver
+            android:name="com.opensource.tremorwatch.receivers.UploadAlarmReceiver"
+            android:enabled="true"
+            android:exported="false" />
+
+        <!-- ===== Batch Retry Alarm Receiver ===== -->
+        <receiver
+            android:name="com.opensource.tremorwatch.receivers.BatchRetryAlarmReceiver"
+            android:enabled="true"
+            android:exported="false" />
+
+        <!-- ===== Upload Broadcast Receiver ===== -->
+        <receiver
+            android:name=".UploadReceiver"
+            android:enabled="true"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.opensource.tremorwatch.ACTION_UPLOAD" />
+            </intent-filter>
+        </receiver>
+
+    </application>
+
+</manifest>

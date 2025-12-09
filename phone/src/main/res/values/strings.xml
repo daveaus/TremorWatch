@@ -1,0 +1,114 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- App Info -->
+    <string name="app_name">TremorWatch Phone</string>
+    <string name="app_title">TremorWatch Companion</string>
+    <string name="version_format">Version %s</string>
+
+    <!-- Watch Status -->
+    <string name="watch_connected">Watch Connected</string>
+    <string name="watch_disconnected">Watch Disconnected</string>
+    <string name="watch_status">Watch Status</string>
+    <string name="watch_status_active">Active</string>
+    <string name="watch_status_paused_charging">Paused (charging)</string>
+    <string name="watch_status_paused_not_worn">Paused (not worn)</string>
+    <string name="watch_status_unknown">Unknown</string>
+    <string name="last_heartbeat">Last Heartbeat</string>
+    <string name="last_data">Last Data</string>
+
+    <!-- Time Formats -->
+    <string name="time_never">Never</string>
+    <string name="time_just_now">Just now</string>
+    <string name="time_minutes_ago">%dm ago</string>
+    <string name="time_hours_ago">%dh ago</string>
+    <string name="time_days_ago">%dd ago</string>
+
+    <!-- Upload Status -->
+    <string name="batches_pending">Batches Pending: %d</string>
+    <string name="last_upload">Last Upload: %s</string>
+    <string name="upload_now">Upload Now</string>
+    <string name="upload_status">Upload Status</string>
+    <string name="upload_pending">Pending</string>
+    <string name="upload_today">Uploaded Today</string>
+    <string name="uploading">Uploading tremor data…</string>
+    <string name="upload_failed">Upload Failed</string>
+
+    <!-- Navigation & Settings -->
+    <string name="settings">Settings</string>
+    <string name="status">Status</string>
+    <string name="back">Back</string>
+    <string name="save">Save</string>
+    <string name="cancel">Cancel</string>
+    <string name="confirm">Confirm</string>
+
+    <!-- Permissions -->
+    <string name="permissions_required">⚠️ Permissions Required</string>
+    <string name="permissions_wifi_explanation">WiFi detection requires location permissions to identify your home network.</string>
+    <string name="permission_location">Location Permission</string>
+    <string name="permission_background_location">Background Location (Allow all the time)</string>
+    <string name="permission_location_services">Location Services Enabled</string>
+    <string name="background_location_needed_title">Background Location Needed</string>
+    <string name="background_location_needed_message">To detect your home WiFi network for automatic uploads, please select \'Allow all the time\' on the next screen.\n\nThis allows the app to check WiFi even when running in the background.</string>
+    <string name="continue_button">Continue</string>
+    <string name="not_now">Not Now</string>
+    <string name="app_settings">App Settings</string>
+    <string name="enable_location">Enable Location</string>
+
+    <!-- Battery Optimization -->
+    <string name="battery_optimization_phone_title">⚠️ Phone Battery Optimization Enabled</string>
+    <string name="battery_optimization_phone_message">May affect background data reception</string>
+    <string name="battery_optimization_watch_title">⚠️ Watch Battery Optimization Enabled</string>
+    <string name="battery_optimization_watch_message">May affect watch monitoring. Disable via adb:</string>
+    <string name="fix">Fix</string>
+
+    <!-- Charts -->
+    <string name="tremor_severity">Tremor Severity</string>
+    <string name="tremor_events">Tremor Events</string>
+    <string name="tremor_activity">Tremor Activity</string>
+    <string name="data_points">%d data points</string>
+    <string name="no_data_available">No data available</string>
+
+    <!-- Statistics -->
+    <string name="stat_max">Max</string>
+    <string name="stat_min">Min</string>
+    <string name="stat_avg">Avg</string>
+    <string name="stat_total">Total</string>
+    <string name="stat_peak_per_hour">Peak/hr</string>
+    <string name="stat_avg_per_hour">Avg/hr</string>
+    <string name="stat_samples">Samples</string>
+
+    <!-- Data Export -->
+    <string name="export_data">Export Data</string>
+    <string name="export_time_range">Time Range</string>
+    <string name="export_format">Export Format</string>
+    <string name="export_summary">Summary (hourly)</string>
+    <string name="export_detailed">Detailed</string>
+    <string name="export_raw">Raw Data</string>
+
+    <!-- Settings Sections -->
+    <string name="local_storage">Local Storage</string>
+    <string name="local_storage_enabled">Local storage enabled</string>
+    <string name="retention_hours">Retention: %d hours</string>
+    <string name="influxdb_configuration">InfluxDB Configuration</string>
+    <string name="influxdb_url">InfluxDB URL</string>
+    <string name="influxdb_database">Database</string>
+    <string name="influxdb_username">Username</string>
+    <string name="influxdb_password">Password</string>
+    <string name="wifi_configuration">WiFi Configuration</string>
+    <string name="upload_on_home_wifi_only">Upload on home WiFi only</string>
+
+    <!-- Notifications -->
+    <string name="notification_channel_name">Upload Service</string>
+    <string name="notification_channel_description">TremorWatch data upload service</string>
+
+    <!-- Logs -->
+    <string name="view_phone_logs">View Phone Logs</string>
+    <string name="view_watch_logs">View Watch Logs</string>
+    <string name="share_logs">Share Logs</string>
+    <string name="clear_logs">Clear Logs</string>
+
+    <!-- Errors -->
+    <string name="error_generic">An error occurred</string>
+    <string name="error_network">Network error</string>
+    <string name="error_upload">Upload error</string>
+</resources>
