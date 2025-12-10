@@ -95,6 +95,81 @@ A Wear OS and Android application for experimental tremor monitoring and analysi
 
 ---
 
+## Using the App
+
+### First Time Setup - Calibration (IMPORTANT)
+
+**What is calibration?**
+Calibration teaches the app what your "baseline" movement looks like when you're NOT having tremors. This helps it accurately detect when actual tremor activity occurs.
+
+**When to calibrate:**
+- **Critical:** Do this when you're at your STILLEST
+- If you can't stay perfectly still, calibrate during your calmest period (e.g., after medication, when resting)
+- The stiller you are during calibration, the more accurate the detection will be
+
+**How to calibrate:**
+
+1. **On your watch:**
+   - Open TremorWatch
+   - Tap the settings icon (gear)
+   - Select "Calibrate Baseline"
+   - Rest your arm/hand in your normal resting position
+   - Stay as still as possible for 30 seconds
+   - The watch will collect baseline data
+
+2. **After calibration:**
+   - The app will now monitor continuously
+   - It compares current movement to your baseline
+   - Tremor events are detected when movement exceeds baseline patterns
+
+**Re-calibration:**
+- Recalibrate if your tremor patterns change significantly
+- Recalibrate if medication dosage changes
+- Recalibrate if the app seems too sensitive or not sensitive enough
+
+### Watch App Features
+
+**Main Screen:**
+- **Status**: Shows if monitoring is active
+- **Current Severity**: Real-time tremor severity (0-100)
+- **Tremor Type**: Resting, Postural, or Action tremor detected
+- **Settings**: Access calibration and monitoring options
+
+**Settings Options:**
+- **Calibrate Baseline**: Set your baseline movement pattern
+- **Pause When Not Worn**: Automatically stops monitoring when watch is removed (saves battery)
+- **Store Locally**: Keep tremor data on the watch (syncs to phone when connected)
+
+### Phone App Features
+
+**Main Screen:**
+- **Watch Status**: Connection status, last heartbeat, battery optimization status
+- **Interactive Charts**:
+  - **Tremor Activity**: 15-minute blocks showing tremor intensity
+  - **Tremor Severity**: Continuous severity over time
+  - **Tremor Events**: Individual tremor episodes detected
+- **Pull to Refresh**: Swipe down to update all data
+
+**Data Management:**
+- **Time Range Selector**: View data from last 12 hours, 24 hours, 48 hours, or 7 days
+- **Scroll Through History**: Swipe left/right on charts to see earlier data
+- **CSV Export**: Export all data
+- **Local Storage Settings**: Configure how long to keep data (default: 7 days)
+
+**Algorithm Customization** (Advanced):
+- Access via Settings → "Algorithm Customization"
+- Adjust frequency ranges for different tremor types
+- Fine-tune detection sensitivity
+- Customize severity calculation
+- **Note:** Default settings work for most users - only adjust if needed
+
+**Optional InfluxDB Upload:**
+- Configure remote database for long-term storage
+- Set WiFi-only uploads to save cellular data
+- Requires location permission (to detect home WiFi only)
+
+---
+
 ## Permissions Explained
 
 ### Phone App Permissions
@@ -132,55 +207,6 @@ The phone app provides all configuration options:
 - **Algorithm Customization**: Tune tremor detection parameters
 - **InfluxDB Upload**: Optional remote database integration
 - **Settings**: Configure retention, WiFi-only uploads, etc.
-
----
-
-## Building from Source
-
-<details>
-<summary>Click to expand build instructions</summary>
-
-### Prerequisites
-
-- Android Studio Hedgehog or newer
-- JDK 17
-- Android SDK with API 30+
-
-### Build Steps
-
-1. **Clone the repository:**
-   ```bash
-   git clone https://github.com/daveaus/TremorWatch.git
-   cd TremorWatch
-   ```
-
-2. **Build APKs:**
-   ```bash
-   # Build both phone and watch apps
-   ./gradlew app:assembleDebug phone:assembleDebug
-   
-   # Or build individually:
-   ./gradlew phone:assembleDebug  # Phone app only
-   ./gradlew app:assembleDebug    # Watch app only
-   ```
-
-3. **Install Phone App:**
-   ```bash
-   adb install phone/build/outputs/apk/debug/phone-debug.apk
-   ```
-
-4. **Install Watch App:**
-   ```bash
-   # Connect to watch first
-   adb connect <WATCH_IP>:PORT
-   
-   # Install on watch
-   adb -s <WATCH_IP>:PORT install app/build/outputs/apk/debug/app-debug.apk
-   ```
-
-5. **Configure Battery Optimization** (see Installation section above)
-
-</details>
 
 ---
 
@@ -263,6 +289,55 @@ The phone app includes a **Tremor Detection Settings** screen where you can cust
 - Network/Bluetooth communication
 
 **This is intentional** for continuous monitoring. Battery optimization MUST be disabled or the app will stop working.
+
+---
+
+## Building from Source
+
+<details>
+<summary>Click to expand build instructions</summary>
+
+### Prerequisites
+
+- Android Studio Hedgehog or newer
+- JDK 17
+- Android SDK with API 30+
+
+### Build Steps
+
+1. **Clone the repository:**
+   ```bash
+   git clone https://github.com/daveaus/TremorWatch.git
+   cd TremorWatch
+   ```
+
+2. **Build APKs:**
+   ```bash
+   # Build both phone and watch apps
+   ./gradlew app:assembleDebug phone:assembleDebug
+   
+   # Or build individually:
+   ./gradlew phone:assembleDebug  # Phone app only
+   ./gradlew app:assembleDebug    # Watch app only
+   ```
+
+3. **Install Phone App:**
+   ```bash
+   adb install phone/build/outputs/apk/debug/phone-debug.apk
+   ```
+
+4. **Install Watch App:**
+   ```bash
+   # Connect to watch first
+   adb connect <WATCH_IP>:PORT
+   
+   # Install on watch
+   adb -s <WATCH_IP>:PORT install app/build/outputs/apk/debug/app-debug.apk
+   ```
+
+5. **Configure Battery Optimization** (see Installation section above)
+
+</details>
 
 ---
 
