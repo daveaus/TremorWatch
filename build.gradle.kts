@@ -6,5 +6,5 @@ plugins {
 }
 
 // Shared version properties across all modules
-extra["appVersionName"] = "0.1.1"  // SQLite database migration
-extra["appVersionCode"] = 2
+extra["appVersionName"] = "0.1.2"  // Full SQLite migration (no JSONL)
+extra["appVersionCode"] = 3

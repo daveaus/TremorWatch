@@ -130,6 +130,43 @@ class TremorDatabaseHelper(private val context: Context) {
             DatabaseStats(0, null, null)
         }
     }
+    
+    /**
+     * Get all samples for export (no time limit).
+     * Use with caution on large datasets.
+     */
+    suspend fun getAllSamples(): List<TremorSample> = withContext(Dispatchers.IO) {
+        try {
+            dao.getSamplesAfter(0L)  // Get all samples
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to get all samples: ${e.message}", e)
+            emptyList()
+        }
+    }
+    
+    /**
+     * Get samples after specified timestamp.
+     */
+    suspend fun getSamplesAfter(cutoffTime: Long): List<TremorSample> = withContext(Dispatchers.IO) {
+        try {
+            dao.getSamplesAfter(cutoffTime)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to get samples after $cutoffTime: ${e.message}", e)
+            emptyList()
+        }
+    }
+    
+    /**
+     * Get samples in specific time range for export.
+     */
+    suspend fun getSamplesInRange(startTime: Long, endTime: Long): List<TremorSample> = withContext(Dispatchers.IO) {
+        try {
+            dao.getSamplesInRange(startTime, endTime)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to get samples in range: ${e.message}", e)
+            emptyList()
+        }
+    }
 }
 
 data class DatabaseStats(

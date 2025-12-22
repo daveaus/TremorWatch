@@ -104,8 +104,8 @@ class TremorDataRepository(private val context: Context) {
     }
 
     /**
-     * Save a tremor batch to consolidated storage.
-     * DUAL-WRITE: Saves to both JSONL (backup) and SQLite (fast queries).
+     * Save a tremor batch to database storage.
+     * SQLite-only for efficient storage and fast queries.
      * Thread-safe and invalidates cache automatically.
      *
      * @param batch The tremor batch to save
@@ -113,22 +113,19 @@ class TremorDataRepository(private val context: Context) {
      */
     suspend fun saveTremorBatch(batch: TremorBatch): Result<Unit> = withContext(Dispatchers.IO) {
         try {
-            // 1. Save to JSONL (backup/legacy)
-            val storageFile = File(context.filesDir, CONSOLIDATED_FILE)
-            storageFile.appendText(batch.toJsonString() + "\n")
-
-            // 2. Save to SQLite database (fast queries!)
-            try {
-                val dbHelper = com.opensource.tremorwatch.phone.database.TremorDatabaseHelper(context)
-                dbHelper.saveBatch(batch)
-            } catch (e: Exception) {
-                Log.w(TAG, "Failed to save to database (JSONL saved OK): ${e.message}")
+            // Save to SQLite database only (fast queries, ~60% less storage)
+            val dbHelper = com.opensource.tremorwatch.phone.database.TremorDatabaseHelper(context)
+            val saved = dbHelper.saveBatch(batch)
+            
+            if (!saved) {
+                Log.w(TAG, "Failed to save batch ${batch.batchId} to database")
+                return@withContext Result.failure(Exception("Database save failed"))
             }
 
             // Invalidate cache so next load picks up new data
             invalidateCache()
 
-            Log.d(TAG, "Saved batch ${batch.batchId} to consolidated storage (JSONL + SQLite)")
+            Log.d(TAG, "Saved batch ${batch.batchId} to database")
             Result.success(Unit)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to save batch ${batch.batchId}: ${e.message}", e)
