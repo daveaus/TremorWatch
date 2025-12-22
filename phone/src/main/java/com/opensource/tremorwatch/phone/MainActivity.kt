@@ -437,12 +437,26 @@ fun MainScreen(
     }
     
     // Load 48h of data for the unified chart (supports scrolling back)
-    LaunchedEffect(dataLoadTrigger) {
+    LaunchedEffect(dataLoadTrigger, localStorageEnabled) {
+        Log.d("MainActivity", "=== Chart Data Loading ===")
+        Log.d("MainActivity", "LaunchedEffect triggered: trigger=$dataLoadTrigger, localStorage=$localStorageEnabled")
+        
+        if (!localStorageEnabled) {
+            Log.d("MainActivity", "Local storage disabled, skipping data load")
+            isDataLoading = false
+            allChartDataState = emptyList()
+            gapEventsState = emptyList()
+            return@LaunchedEffect
+        }
+        
         if (dataLoadTrigger == 0) {
             isDataLoading = true  // Only show loading on initial load
         }
         try {
-            val rawData = withContext(Dispatchers.IO) {
+            Log.d("MainActivity", "Starting data load (12 hours)...")
+            // Use NonCancellable to ensure data loading completes even if composition leaves
+            // This prevents LeftCompositionCancellationException when app is opened after being idle
+            val rawData = withContext(kotlinx.coroutines.NonCancellable + Dispatchers.IO) {
                 try {
                     loadLocalData(context, 12)  // Load 12 hours (reduced from 48 to prevent OOM)
                 } catch (e: OutOfMemoryError) {
@@ -450,6 +464,7 @@ fun MainScreen(
                     emptyList()
                 }
             }
+            Log.d("MainActivity", "Raw data loaded: ${rawData.size} points")
             allChartDataState = rawData
             
             // Detect gaps in the data with improved classification
@@ -509,10 +524,11 @@ fun MainScreen(
                 Log.i("MainActivity", "Loaded ${rawData.size} data points, detected ${gaps.size} gaps")
                 Log.i("MainActivity", "Data range: $minDate to $maxDate (most recent data is $daysAgo days ago)")
             } else {
+                Log.w("MainActivity", "No data loaded - empty result from loadLocalData")
                 Log.i("MainActivity", "Loaded ${rawData.size} data points, detected ${gaps.size} gaps")
             }
         } catch (e: Exception) {
-            Log.e("MainActivity", "Error loading chart data: ${e.message}")
+            Log.e("MainActivity", "Error loading chart data: ${e.message}", e)
             isDataLoading = false
         }
     }

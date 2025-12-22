@@ -105,6 +105,7 @@ class TremorDataRepository(private val context: Context) {
 
     /**
      * Save a tremor batch to consolidated storage.
+     * DUAL-WRITE: Saves to both JSONL (backup) and SQLite (fast queries).
      * Thread-safe and invalidates cache automatically.
      *
      * @param batch The tremor batch to save
@@ -112,13 +113,22 @@ class TremorDataRepository(private val context: Context) {
      */
     suspend fun saveTremorBatch(batch: TremorBatch): Result<Unit> = withContext(Dispatchers.IO) {
         try {
+            // 1. Save to JSONL (backup/legacy)
             val storageFile = File(context.filesDir, CONSOLIDATED_FILE)
             storageFile.appendText(batch.toJsonString() + "\n")
+
+            // 2. Save to SQLite database (fast queries!)
+            try {
+                val dbHelper = com.opensource.tremorwatch.phone.database.TremorDatabaseHelper(context)
+                dbHelper.saveBatch(batch)
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to save to database (JSONL saved OK): ${e.message}")
+            }
 
             // Invalidate cache so next load picks up new data
             invalidateCache()
 
-            Log.d(TAG, "Saved batch ${batch.batchId} to consolidated storage")
+            Log.d(TAG, "Saved batch ${batch.batchId} to consolidated storage (JSONL + SQLite)")
             Result.success(Unit)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to save batch ${batch.batchId}: ${e.message}", e)
@@ -235,6 +245,7 @@ class TremorDataRepository(private val context: Context) {
 
     /**
      * Load data from consolidated JSONL file.
+     * Optimized to read from END of file backwards for much faster loading of recent data.
      * Aggregates into 1-minute buckets to manage memory.
      */
     private suspend fun loadFromFile(hoursBack: Int): Pair<List<ChartData>, List<GapEvent>> = 
@@ -251,51 +262,71 @@ class TremorDataRepository(private val context: Context) {
             try {
                 var batchesProcessed = 0
                 var recentBatchesFound = 0
-
-                storageFile.bufferedReader().use { reader ->
-                    var line: String?
-
-                    while (reader.readLine().also { line = it } != null) {
-                        if (line.isNullOrBlank()) continue
-
-                        batchesProcessed++
-
-                        // Stop conditions for efficiency
-                        if (recentBatchesFound > MAX_RECENT_BATCHES && batchesProcessed > 1000) {
-                            Log.d(TAG, "Found $recentBatchesFound recent batches, stopping scan")
-                            break
-                        }
-
-                        if (batchesProcessed > MAX_BATCHES_TO_PROCESS) {
-                            Log.w(TAG, "Reached max batches limit ($MAX_BATCHES_TO_PROCESS)")
-                            break
-                        }
-
-                        try {
-                            val batch = TremorBatch.fromJsonString(line!!)
-
-                            val hasRecentData = batch.samples.any { it.timestamp >= cutoffTime }
-                            if (hasRecentData) {
-                                recentBatchesFound++
+                val lines = mutableListOf<String>()
+                
+               // Read file BACKWARDS using RandomAccessFile for efficiency
+                val raf = java.io.RandomAccessFile(storageFile, "r")
+                val fileLength = raf.length()
+                var currentPos = fileLength - 1
+                val sb = StringBuilder()
+                
+                // Read backwards, collecting complete lines
+                while (currentPos >= 0 && recentBatchesFound < MAX_RECENT_BATCHES && batchesProcessed < MAX_BATCHES_TO_PROCESS) {
+                    raf.seek(currentPos)
+                    val b = raf.read()
+                    
+                    if (b == '\n'.code || currentPos == 0L) {
+                        if (sb.isNotEmpty() || currentPos == 0L) {
+                            if (currentPos == 0L && b != '\n'.code) {
+                                sb.insert(0, b.toChar())
                             }
-
-                            batch.samples.forEach { sample ->
-                                if (sample.timestamp >= cutoffTime) {
-                                    val bucketKey = (sample.timestamp / BUCKET_SIZE_MS) * BUCKET_SIZE_MS
-                                    val bucket = dataBuckets.getOrPut(bucketKey) { mutableListOf() }
-                                    bucket.add(
-                                        ChartData(
-                                            timestamp = sample.timestamp,
-                                            severity = sample.severity,
-                                            tremorCount = sample.tremorCount,
-                                            metadata = sample.metadata
-                                        )
-                                    )
+                            val line = sb.reverse().toString().trim()
+                            if (line.isNotEmpty()) {
+                                lines.add(line)
+                                batchesProcessed++
+                                
+                                // Quick check if this batch has recent data
+                                try {
+                                    val batch = TremorBatch.fromJsonString(line)
+                                    if (batch.samples.any { it.timestamp >= cutoffTime }) {
+                                        recentBatchesFound++
+                                    }
+                                } catch (e: Exception) {
+                                    // Skip invalid lines
                                 }
                             }
-                        } catch (e: Exception) {
-                            // Skip invalid lines silently
+                            sb.clear()
                         }
+                    } else {
+                        sb.insert(0, b.toChar())
+                    }
+                    currentPos--
+                }
+                raf.close()
+                
+                Log.d(TAG, "Read $batchesProcessed batches from end of file, found $recentBatchesFound with recent data")
+
+                // Now process the collected lines
+                lines.forEach { line ->
+                    try {
+                        val batch = TremorBatch.fromJsonString(line)
+                        
+                        batch.samples.forEach { sample ->
+                            if (sample.timestamp >= cutoffTime) {
+                                val bucketKey = (sample.timestamp / BUCKET_SIZE_MS) * BUCKET_SIZE_MS
+                                val bucket = dataBuckets.getOrPut(bucketKey) { mutableListOf() }
+                                bucket.add(
+                                    ChartData(
+                                        timestamp = sample.timestamp,
+                                        severity = sample.severity,
+                                        tremorCount = sample.tremorCount,
+                                        metadata = sample.metadata
+                                    )
+                                )
+                            }
+                        }
+                    } catch (e: Exception) {
+                        // Skip invalid lines silently
                     }
                 }
 
@@ -314,9 +345,6 @@ class TremorDataRepository(private val context: Context) {
 
                 val totalSamples = dataBuckets.values.sumOf { it.size }
                 Log.i(TAG, "Loaded ${aggregatedData.size} aggregated points from $totalSamples samples ($batchesProcessed batches)")
-
-                // GC hint for large datasets
-                if (totalSamples > 1000) System.gc()
 
                 Pair(aggregatedData, gaps)
 
