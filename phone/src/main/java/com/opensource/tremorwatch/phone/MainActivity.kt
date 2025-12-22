@@ -449,6 +449,17 @@ fun MainScreen(
             return@LaunchedEffect
         }
         
+        // Quick database check to skip loading state if empty
+        val dbHelper = com.opensource.tremorwatch.phone.database.TremorDatabaseHelper(context)
+        val stats = withContext(Dispatchers.IO) { dbHelper.getStats() }
+        if (stats.totalSamples == 0) {
+            Log.d("MainActivity", "Database empty (0 samples), showing empty state immediately")
+            isDataLoading = false
+            allChartDataState = emptyList()
+            gapEventsState = emptyList()
+            return@LaunchedEffect
+        }
+        
         if (dataLoadTrigger == 0) {
             isDataLoading = true  // Only show loading on initial load
         }
