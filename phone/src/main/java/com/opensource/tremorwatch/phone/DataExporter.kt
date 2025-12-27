@@ -2,15 +2,14 @@ package com.opensource.tremorwatch.phone
 
 import android.content.Context
 import android.util.Log
-import com.opensource.tremorwatch.shared.models.TremorBatch
-import java.io.BufferedReader
+import com.opensource.tremorwatch.phone.database.TremorDatabaseHelper
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.*
 
 /**
  * Utility for exporting tremor data to CSV format.
- * Reads data from consolidated_tremor_data.jsonl and exports to CSV.
+ * Queries SQLite database for efficient data retrieval.
  */
 object DataExporter {
 
@@ -25,17 +24,18 @@ object DataExporter {
     )
 
     /**
-     * Export all local storage data to CSV
+     * Export all local storage data to CSV from database
      */
-    fun exportToCSV(context: Context): ExportResult {
+    suspend fun exportToCSV(context: Context): ExportResult {
         return try {
-            val storageFile = File(context.filesDir, "consolidated_tremor_data.jsonl")
+            val dbHelper = TremorDatabaseHelper(context)
+            val samples = dbHelper.getAllSamples()
 
-            if (!storageFile.exists()) {
-                Log.w(TAG, "No local storage file found")
+            if (samples.isEmpty()) {
+                Log.w(TAG, "No data in database")
                 return ExportResult(
                     success = false,
-                    message = "No data to export. Enable local storage and upload some batches first."
+                    message = "No data to export. Start collecting tremor data first."
                 )
             }
 
@@ -45,41 +45,18 @@ object DataExporter {
 
             Log.d(TAG, "Exporting data to ${csvFile.absolutePath}")
 
-            // Read JSONL and convert to CSV
+            // Build CSV content
             val csvLines = mutableListOf<String>()
-            val csvHeader = "Timestamp,Unix Timestamp (ms),Severity,Tremor Count,Sample Index"
+            val csvHeader = "Timestamp,Unix Timestamp (ms),Severity,Tremor Count"
             csvLines.add(csvHeader)
 
             var recordCount = 0
-            var skipCount = 0
 
-            try {
-                storageFile.bufferedReader().use { reader ->
-                    reader.forEachLine { line ->
-                        if (line.isNotBlank()) {
-                            try {
-                                val batch = TremorBatch.fromJsonString(line)
-
-                                // Export each sample in the batch
-                                batch.samples.forEachIndexed { index, sample ->
-                                    val dateStr = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US).format(Date(sample.timestamp))
-                                    val csvLine = "$dateStr,${sample.timestamp},${sample.severity},${sample.tremorCount},$index"
-                                    csvLines.add(csvLine)
-                                    recordCount++
-                                }
-                            } catch (e: Exception) {
-                                Log.w(TAG, "Failed to parse batch line: ${e.message}")
-                                skipCount++
-                            }
-                        }
-                    }
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "Error reading JSONL file: ${e.message}", e)
-                return ExportResult(
-                    success = false,
-                    message = "Error reading data: ${e.message}"
-                )
+            samples.sortedBy { it.timestamp }.forEach { sample ->
+                val dateStr = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US).format(Date(sample.timestamp))
+                val csvLine = "$dateStr,${sample.timestamp},${sample.severity},${sample.tremorCount}"
+                csvLines.add(csvLine)
+                recordCount++
             }
 
             // Write CSV file
@@ -88,9 +65,6 @@ object DataExporter {
                 val fileSize = csvFile.length()
 
                 Log.i(TAG, "Successfully exported $recordCount records to ${csvFile.name}")
-                if (skipCount > 0) {
-                    Log.w(TAG, "Skipped $skipCount malformed entries")
-                }
 
                 return ExportResult(
                     success = true,
@@ -116,16 +90,17 @@ object DataExporter {
     }
 
     /**
-     * Export data within a specific time range
+     * Export data within a specific time range from database
      */
-    fun exportToCSVByTimeRange(context: Context, startTimeMs: Long, endTimeMs: Long): ExportResult {
+    suspend fun exportToCSVByTimeRange(context: Context, startTimeMs: Long, endTimeMs: Long): ExportResult {
         return try {
-            val storageFile = File(context.filesDir, "consolidated_tremor_data.jsonl")
+            val dbHelper = TremorDatabaseHelper(context)
+            val samples = dbHelper.getSamplesInRange(startTimeMs, endTimeMs)
 
-            if (!storageFile.exists()) {
+            if (samples.isEmpty()) {
                 return ExportResult(
                     success = false,
-                    message = "No local storage file found"
+                    message = "No data found in specified time range"
                 )
             }
 
@@ -133,35 +108,16 @@ object DataExporter {
             val csvFile = File(context.getExternalFilesDir(null) ?: context.filesDir, "tremorwatch_export_${timestamp}_filtered.csv")
 
             val csvLines = mutableListOf<String>()
-            val csvHeader = "Timestamp,Unix Timestamp (ms),Severity,Tremor Count,Sample Index"
+            val csvHeader = "Timestamp,Unix Timestamp (ms),Severity,Tremor Count"
             csvLines.add(csvHeader)
 
             var recordCount = 0
 
-            try {
-                storageFile.bufferedReader().use { reader ->
-                    reader.forEachLine { line ->
-                        if (line.isNotBlank()) {
-                            try {
-                                val batch = TremorBatch.fromJsonString(line)
-
-                                batch.samples.forEachIndexed { index, sample ->
-                                    if (sample.timestamp in startTimeMs..endTimeMs) {
-                                        val dateStr = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US).format(Date(sample.timestamp))
-                                        val csvLine = "$dateStr,${sample.timestamp},${sample.severity},${sample.tremorCount},$index"
-                                        csvLines.add(csvLine)
-                                        recordCount++
-                                    }
-                                }
-                            } catch (e: Exception) {
-                                Log.w(TAG, "Failed to parse batch line: ${e.message}")
-                            }
-                        }
-                    }
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "Error reading JSONL file: ${e.message}", e)
-                return ExportResult(success = false, message = "Error reading data: ${e.message}")
+            samples.sortedBy { it.timestamp }.forEach { sample ->
+                val dateStr = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US).format(Date(sample.timestamp))
+                val csvLine = "$dateStr,${sample.timestamp},${sample.severity},${sample.tremorCount}"
+                csvLines.add(csvLine)
+                recordCount++
             }
 
             try {
@@ -186,13 +142,14 @@ object DataExporter {
     }
 
     /**
-     * Get storage statistics for export
+     * Get storage statistics from database
      */
-    fun getStorageStats(context: Context): StorageExportStats {
+    suspend fun getStorageStats(context: Context): StorageExportStats {
         return try {
-            val storageFile = File(context.filesDir, "consolidated_tremor_data.jsonl")
+            val dbHelper = TremorDatabaseHelper(context)
+            val stats = dbHelper.getStats()
 
-            if (!storageFile.exists()) {
+            if (stats.totalSamples == 0) {
                 return StorageExportStats(
                     fileExists = false,
                     batchCount = 0,
@@ -203,46 +160,16 @@ object DataExporter {
                 )
             }
 
-            var batchCount = 0
-            var sampleCount = 0
-            var oldestTimestamp = Long.MAX_VALUE
-            var newestTimestamp = 0L
-
-            try {
-                storageFile.bufferedReader().use { reader ->
-                    reader.forEachLine { line ->
-                        if (line.isNotBlank()) {
-                            try {
-                                val batch = TremorBatch.fromJsonString(line)
-                                batchCount++
-                                sampleCount += batch.samples.size
-
-                                batch.samples.forEach { sample ->
-                                    if (sample.timestamp < oldestTimestamp) {
-                                        oldestTimestamp = sample.timestamp
-                                    }
-                                    if (sample.timestamp > newestTimestamp) {
-                                        newestTimestamp = sample.timestamp
-                                    }
-                                }
-                            } catch (e: Exception) {
-                                Log.w(TAG, "Failed to parse batch: ${e.message}")
-                            }
-                        }
-                    }
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "Error reading storage file: ${e.message}", e)
-            }
-
-            val fileSizeKB = storageFile.length() / 1024.0
+            // Estimate database size (can't get exact size easily on Android)
+            val dbFile = context.getDatabasePath("tremor_data.db")
+            val fileSizeKB = if (dbFile.exists()) dbFile.length() / 1024.0 else 0.0
 
             StorageExportStats(
                 fileExists = true,
-                batchCount = batchCount,
-                sampleCount = sampleCount,
-                oldestTimestamp = if (oldestTimestamp == Long.MAX_VALUE) 0 else oldestTimestamp,
-                newestTimestamp = newestTimestamp,
+                batchCount = 0,  // Not tracked in new schema
+                sampleCount = stats.totalSamples,
+                oldestTimestamp = stats.earliestTimestamp ?: 0,
+                newestTimestamp = stats.latestTimestamp ?: 0,
                 fileSizeKB = fileSizeKB
             )
         } catch (e: Exception) {

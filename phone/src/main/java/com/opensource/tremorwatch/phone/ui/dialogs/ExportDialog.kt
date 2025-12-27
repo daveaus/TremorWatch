@@ -283,47 +283,41 @@ private fun writeDetailedCsv(writer: FileWriter, data: List<ChartData>) {
 }
 
 /**
- * Write raw data CSV with all available fields from stored batches
+ * Write raw data CSV with all available fields from database
  */
-private fun writeRawDataCsv(writer: FileWriter, context: Context, hoursBack: Int) {
+private suspend fun writeRawDataCsv(writer: FileWriter, context: Context, hoursBack: Int) {
     // Write experimental disclaimer
     writer.write("# EXPERIMENTAL DATA - NOT FOR MEDICAL USE\n")
     writer.write("# This data is from experimental software and should not be used for diagnosis or treatment\n")
     writer.write("#\n")
     // Write header with all possible fields
     writer.write("Timestamp,DateTime,Severity,Tremor Count,")
-    writer.write("X,Y,Z,Magnitude,Confidence,")
+    writer.write("X,Y,Z,Magnitude,Accel Magnitude,Confidence,")
     writer.write("Is Worn,Is Charging,Dominant Freq,Tremor Band Power,")
-    writer.write("Tremor Type,Tremor Type Confidence,Is Resting State\n")
+    writer.write("Total Power,Band Ratio,Peak Prominence,Watch ID\n")
 
-    val storageFile = File(context.filesDir, "consolidated_tremor_data.jsonl")
-    if (!storageFile.exists()) return
-
+    // Query database instead of reading JSONL
+    val dbHelper = com.opensource.tremorwatch.phone.database.TremorDatabaseHelper(context)
     val cutoffTime = if (hoursBack == Int.MAX_VALUE) 0L else System.currentTimeMillis() - (hoursBack.toLong() * 60 * 60 * 1000)
+    
+    val samples = if (hoursBack == Int.MAX_VALUE) {
+        dbHelper.getAllSamples()
+    } else {
+        dbHelper.getSamplesAfter(cutoffTime)
+    }
 
-    storageFile.bufferedReader().useLines { lines ->
-        lines.forEach { line ->
-            try {
-                val batch = TremorBatch.fromJsonString(line)
-                batch.samples
-                    .filter { it.timestamp >= cutoffTime }
-                    .forEach { sample ->
-                        val dateStr = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US)
-                            .format(Date(sample.timestamp))
-                        val metadata = sample.metadata
+    samples.sortedBy { it.timestamp }.forEach { sample ->
+        val dateStr = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US)
+            .format(Date(sample.timestamp))
 
-                        writer.write("${sample.timestamp},$dateStr,")
-                        writer.write("${String.format("%.6f", sample.severity)},${sample.tremorCount},")
-                        writer.write("${metadata["x"] ?: ""},${metadata["y"] ?: ""},${metadata["z"] ?: ""},")
-                        writer.write("${metadata["magnitude"] ?: ""},${metadata["confidence"] ?: ""},")
-                        writer.write("${metadata["isWorn"] ?: ""},${metadata["isCharging"] ?: ""},")
-                        writer.write("${metadata["dominantFrequency"] ?: ""},${metadata["tremorBandPower"] ?: ""},")
-                        writer.write("${metadata["tremorType"] ?: ""},${metadata["tremorTypeConfidence"] ?: ""},")
-                        writer.write("${metadata["isRestingState"] ?: ""}\n")
-                    }
-            } catch (e: Exception) {
-                // Skip invalid lines
-            }
-        }
+        writer.write("${sample.timestamp},$dateStr,")
+        writer.write("${String.format("%.6f", sample.severity)},${sample.tremorCount},")
+        writer.write("${sample.x ?: ""},${sample.y ?: ""},${sample.z ?: ""},")
+        writer.write("${sample.magnitude ?: ""},${sample.accelMagnitude ?: ""},${sample.confidence ?: ""},")
+        writer.write("${sample.isWorn ?: ""},${sample.isCharging ?: ""},")
+        writer.write("${sample.dominantFrequency ?: ""},${sample.tremorBandPower ?: ""},")
+        writer.write("${sample.totalPower ?: ""},${sample.bandRatio ?: ""},${sample.peakProminence ?: ""},")
+        writer.write("${sample.watchId ?: ""}\n")
     }
 }
+
