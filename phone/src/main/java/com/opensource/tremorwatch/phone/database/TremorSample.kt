@@ -47,3 +47,17 @@ data class TremorSample(
     // Extensibility: Store remaining metadata as JSON
     val metadataJson: String? = null
 )
+
+/**
+ * Data class for aggregated chart data from SQL GROUP BY query.
+ * This is returned by getAggregatedChartData() for fast chart loading.
+ */
+data class AggregatedChartData(
+    val bucketTimestamp: Long,
+    val avgSeverity: Double,
+    val totalTremorCount: Int,
+    val lastIsWorn: Boolean?,
+    val lastIsCharging: Boolean?,
+    val lastConfidence: Double?,
+    val lastWatchId: String?
+)

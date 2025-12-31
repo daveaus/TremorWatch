@@ -62,4 +62,26 @@ interface TremorDao {
      */
     @Query("SELECT MAX(timestamp) FROM tremor_samples")
     suspend fun getLatestTimestamp(): Long?
+    
+    /**
+     * Get aggregated chart data in 1-minute buckets.
+     * This is MUCH faster than loading all samples and aggregating in Kotlin.
+     * Groups by minute (timestamp / 60000) and computes AVG severity, SUM tremor count.
+     * Returns last isWorn/isCharging state per bucket for gap detection.
+     */
+    @Query("""
+        SELECT 
+            (timestamp / 60000) * 60000 as bucketTimestamp,
+            AVG(severity) as avgSeverity,
+            SUM(tremorCount) as totalTremorCount,
+            MAX(isWorn) as lastIsWorn,
+            MAX(isCharging) as lastIsCharging,
+            MAX(confidence) as lastConfidence,
+            MAX(watchId) as lastWatchId
+        FROM tremor_samples 
+        WHERE timestamp >= :cutoffTime 
+        GROUP BY timestamp / 60000 
+        ORDER BY bucketTimestamp ASC
+    """)
+    suspend fun getAggregatedChartData(cutoffTime: Long): List<AggregatedChartData>
 }

@@ -464,12 +464,15 @@ fun MainScreen(
             isDataLoading = true  // Only show loading on initial load
         }
         try {
-            Log.d("MainActivity", "Starting data load (12 hours)...")
+            Log.d("MainActivity", "Starting data load (retention period)...")
+            // Get retention period from settings (default 168 hours = 7 days)
+            val retentionHours = PhoneDataConfig.getLocalStorageRetentionHours(context)
+            Log.d("MainActivity", "Loading $retentionHours hours of data based on retention setting")
             // Use NonCancellable to ensure data loading completes even if composition leaves
             // This prevents LeftCompositionCancellationException when app is opened after being idle
             val rawData = withContext(kotlinx.coroutines.NonCancellable + Dispatchers.IO) {
                 try {
-                    loadLocalData(context, 12)  // Load 12 hours (reduced from 48 to prevent OOM)
+                    loadLocalData(context, retentionHours)  // Load based on retention period
                 } catch (e: OutOfMemoryError) {
                     Log.e("MainActivity", "OOM loading chart data: ${e.message}")
                     emptyList()
