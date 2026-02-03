@@ -3,6 +3,9 @@ package com.opensource.tremorwatch.phone
 import android.content.Intent
 import android.util.Log
 import com.opensource.tremorwatch.phone.data.TremorDataRepository
+import com.opensource.tremorwatch.phone.database.CalibrationDataEntity
+import com.opensource.tremorwatch.phone.database.SubjectiveRatingEntity
+import com.opensource.tremorwatch.phone.database.TremorRoomDatabase
 import com.opensource.tremorwatch.shared.Constants
 import com.opensource.tremorwatch.shared.models.TremorBatch
 import com.google.android.gms.wearable.*
@@ -33,6 +36,7 @@ class WatchDataListenerService : WearableListenerService() {
     companion object {
         private const val TAG = "WatchDataListener"
         private const val CHUNK_TIMEOUT_MS = 300000L  // 5 minutes (was 1min) - watch retries with exponential backoff up to 30s
+        private const val CHANNEL_PATH_CALIBRATION = "/calibration_file_channel"
     }
 
     // Coroutine scope for async operations
@@ -52,6 +56,10 @@ class WatchDataListenerService : WearableListenerService() {
             if (channel.path == "/tremor_batch_channel") {
                 serviceScope.launch(Dispatchers.IO) {
                     handleChannelBatch(channel)
+                }
+            } else if (channel.path == CHANNEL_PATH_CALIBRATION) {
+                serviceScope.launch(Dispatchers.IO) {
+                    handleCalibrationChannel(channel)
                 }
             }
         }
@@ -174,6 +182,14 @@ class WatchDataListenerService : WearableListenerService() {
                 Log.d(TAG, "Processing log response message")
                 handleLogResponse(messageEvent.data)
             }
+            messageEvent.path.startsWith(Constants.MESSAGE_PATH_RATING) -> {
+                Log.d(TAG, "Processing subjective rating message")
+                handleSubjectiveRating(messageEvent.data)
+            }
+            messageEvent.path.startsWith(Constants.MESSAGE_PATH_CALIBRATION_DATA) -> {
+                Log.d(TAG, "Processing calibration data message")
+                handleCalibrationData(messageEvent.data)
+            }
             else -> {
                 Log.w(TAG, "Unknown message path: ${messageEvent.path}")
             }
@@ -218,6 +234,10 @@ class WatchDataListenerService : WearableListenerService() {
         if (channel.path == "/tremor_batch_channel") {
             serviceScope.launch(Dispatchers.IO) {
                 handleChannelBatch(channel)
+            }
+        } else if (channel.path == CHANNEL_PATH_CALIBRATION) {
+            serviceScope.launch(Dispatchers.IO) {
+                handleCalibrationChannel(channel)
             }
         }
     }
@@ -292,6 +312,103 @@ class WatchDataListenerService : WearableListenerService() {
                 Log.w(TAG, "Failed to close channel after error: ${closeError.message}")
             }
         }
+    }
+
+    /**
+     * Handle calibration file received from watch via ChannelClient.
+     *
+     * Protocol:
+     * 1. Filename length (4 bytes, big-endian)
+     * 2. Filename (UTF-8 bytes)
+     * 3. Compressed data length (4 bytes, big-endian)
+     * 4. GZIP compressed file data
+     */
+    private suspend fun handleCalibrationChannel(channel: ChannelClient.Channel) {
+        try {
+            Log.i(TAG, "★ Receiving calibration file via channel: ${channel.path}")
+
+            val inputStream = channelClient.getInputStream(channel).await()
+
+            // Read filename length (4 bytes, big-endian)
+            val filenameLenBytes = ByteArray(4)
+            if (inputStream.read(filenameLenBytes) != 4) {
+                Log.e(TAG, "Failed to read filename length from calibration channel")
+                inputStream.close()
+                return
+            }
+            val filenameLen = readInt(filenameLenBytes)
+
+            // Read filename
+            val filenameBytes = ByteArray(filenameLen)
+            var totalRead = 0
+            while (totalRead < filenameLen) {
+                val bytesRead = inputStream.read(filenameBytes, totalRead, filenameLen - totalRead)
+                if (bytesRead == -1) break
+                totalRead += bytesRead
+            }
+            val filename = String(filenameBytes, Charsets.UTF_8)
+            Log.d(TAG, "Calibration filename: $filename")
+
+            // Read compressed data length (4 bytes, big-endian)
+            val dataLenBytes = ByteArray(4)
+            if (inputStream.read(dataLenBytes) != 4) {
+                Log.e(TAG, "Failed to read data length from calibration channel")
+                inputStream.close()
+                return
+            }
+            val compressedLen = readInt(dataLenBytes)
+
+            // Read compressed data
+            val compressedData = ByteArray(compressedLen)
+            totalRead = 0
+            while (totalRead < compressedLen) {
+                val bytesRead = inputStream.read(compressedData, totalRead, compressedLen - totalRead)
+                if (bytesRead == -1) break
+                totalRead += bytesRead
+            }
+
+            inputStream.close()
+
+            Log.d(TAG, "Read $totalRead bytes of compressed calibration data")
+
+            // Decompress data
+            val calibrationData = decompressData(compressedData)
+            val calibrationJson = String(calibrationData, Charsets.UTF_8)
+
+            Log.i(TAG, "✓ Received calibration file: $filename (${calibrationData.size} bytes decompressed)")
+
+            // Save to local calibration directory
+            val calibrationDir = java.io.File(applicationContext.filesDir, "calibration")
+            if (!calibrationDir.exists()) {
+                calibrationDir.mkdirs()
+            }
+            val calibrationFile = java.io.File(calibrationDir, filename)
+            calibrationFile.writeText(calibrationJson)
+
+            Log.i(TAG, "✓ Saved calibration file to: ${calibrationFile.absolutePath}")
+
+            // Close channel
+            channelClient.close(channel).await()
+            Log.d(TAG, "Calibration channel closed")
+
+        } catch (e: Exception) {
+            Log.e(TAG, "Error handling calibration channel: ${e.message}", e)
+            try {
+                channelClient.close(channel).await()
+            } catch (closeError: Exception) {
+                Log.w(TAG, "Failed to close channel after error: ${closeError.message}")
+            }
+        }
+    }
+
+    /**
+     * Read 4 bytes as big-endian integer
+     */
+    private fun readInt(bytes: ByteArray): Int {
+        return ((bytes[0].toInt() and 0xFF) shl 24) or
+                ((bytes[1].toInt() and 0xFF) shl 16) or
+                ((bytes[2].toInt() and 0xFF) shl 8) or
+                (bytes[3].toInt() and 0xFF)
     }
 
     /**
@@ -649,6 +766,112 @@ class WatchDataListenerService : WearableListenerService() {
             Log.d(TAG, "Cached watch logs to SharedPreferences")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to handle log response: ${e.message}", e)
+        }
+    }
+
+    /**
+     * Handle subjective rating from watch.
+     * Parse the rating JSON and save to local database immediately.
+     */
+    private fun handleSubjectiveRating(data: ByteArray) {
+        serviceScope.launch(Dispatchers.IO) {
+            try {
+                val json = JSONObject(String(data, Charsets.UTF_8))
+                Log.i(TAG, "★ Received subjective rating: rating=${json.optInt("rating", 0)}")
+                
+                // Parse rating from JSON
+                val ratingEntity = SubjectiveRatingEntity(
+                    id = json.getString("id"),
+                    timestamp = json.getLong("timestamp"),
+                    rating = json.getInt("rating"),
+                    source = json.getString("source"),
+                    watchId = json.optString("watchId", null),
+                    detectedSeverity = if (json.has("detectedSeverity")) json.getDouble("detectedSeverity") else null,
+                    detectedConfidence = if (json.has("detectedConfidence")) json.getDouble("detectedConfidence").toFloat() else null,
+                    detectedFrequency = if (json.has("detectedFrequency")) json.getDouble("detectedFrequency").toFloat() else null,
+                    calibrationModeEnabled = json.optBoolean("calibrationModeEnabled", false),
+                    calibrationDurationSeconds = json.optInt("calibrationDurationSeconds", 60),
+                    notes = json.optString("notes", null),
+                    schemaVersion = json.optInt("schemaVersion", 1)
+                )
+                
+                // Save to database immediately
+                val db = TremorRoomDatabase.getDatabase(this@WatchDataListenerService)
+                db.tremorDao().insertRating(ratingEntity)
+                
+                Log.i(TAG, "✓ Saved subjective rating ${ratingEntity.id} (rating: ${ratingEntity.rating}, source: ${ratingEntity.source})")
+                
+                // Notify UI of new rating
+                val prefs = getSharedPreferences("rating_prefs", MODE_PRIVATE)
+                prefs.edit()
+                    .putLong("last_rating_time", System.currentTimeMillis())
+                    .putInt("last_rating_value", ratingEntity.rating)
+                    .apply()
+                    
+                NotificationHelper.recordDataReceived(this@WatchDataListenerService)
+                
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to handle subjective rating: ${e.message}", e)
+            }
+        }
+    }
+
+    /**
+     * Handle calibration data from watch.
+     * Calibration data is streamed as chunks, each containing multiple sensor samples.
+     * Must be parsed and linked to an existing SubjectiveRatingEntity.
+     */
+    private fun handleCalibrationData(data: ByteArray) {
+        serviceScope.launch(Dispatchers.IO) {
+            try {
+                val json = JSONObject(String(data, Charsets.UTF_8))
+                val ratingId = json.getString("ratingId")
+                val samplesArray = json.getJSONArray("samples")
+                
+                Log.i(TAG, "★ Received calibration data: ratingId=$ratingId, samples=${samplesArray.length()}")
+                
+                // Parse calibration samples
+                val calibrationEntities = mutableListOf<CalibrationDataEntity>()
+                for (i in 0 until samplesArray.length()) {
+                    val sample = samplesArray.getJSONObject(i)
+                    calibrationEntities.add(
+                        CalibrationDataEntity(
+                            ratingId = ratingId,
+                            timestamp = sample.getLong("timestamp"),
+                            x = sample.getDouble("x").toFloat(),
+                            y = sample.getDouble("y").toFloat(),
+                            z = sample.getDouble("z").toFloat(),
+                            magnitude = sample.getDouble("magnitude").toFloat(),
+                            dominantFrequency = sample.getDouble("dominantFrequency").toFloat(),
+                            tremorBandPower = sample.getDouble("tremorBandPower").toFloat(),
+                            totalPower = sample.getDouble("totalPower").toFloat(),
+                            bandRatio = sample.getDouble("bandRatio").toFloat(),
+                            peakProminence = sample.getDouble("peakProminence").toFloat(),
+                            confidence = sample.getDouble("confidence").toFloat(),
+                            severity = sample.getDouble("severity"),
+                            isWorn = sample.optBoolean("isWorn", true),
+                            isCharging = sample.optBoolean("isCharging", false)
+                        )
+                    )
+                }
+                
+                // Save to database in batch
+                val db = TremorRoomDatabase.getDatabase(this@WatchDataListenerService)
+                db.tremorDao().insertCalibrationData(calibrationEntities)
+                
+                Log.i(TAG, "✓ Saved ${calibrationEntities.size} calibration samples for rating $ratingId")
+                
+                // Update status for UI
+                val prefs = getSharedPreferences("calibration_prefs", MODE_PRIVATE)
+                prefs.edit()
+                    .putLong("last_calibration_time", System.currentTimeMillis())
+                    .putString("last_calibration_rating_id", ratingId)
+                    .putInt("last_calibration_sample_count", calibrationEntities.size)
+                    .apply()
+                    
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to handle calibration data: ${e.message}", e)
+            }
         }
     }
 

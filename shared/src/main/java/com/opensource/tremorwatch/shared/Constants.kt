@@ -17,6 +17,9 @@ object Constants {
     const val MESSAGE_PATH_DIAGNOSTIC_EVENT = "/diagnostic_event"
     const val MESSAGE_PATH_LOG_REQUEST = "/log_request"
     const val MESSAGE_PATH_LOG_RESPONSE = "/log_response"
+    const val MESSAGE_PATH_RATING = "/subjective_rating"
+    const val MESSAGE_PATH_CALIBRATION_DATA = "/calibration_data"
+    const val MESSAGE_PATH_RATING_CONFIG = "/rating_config"
 
     // Capability names for device discovery
     const val CAPABILITY_TREMOR_RECEIVER = "tremor_watch_receiver"

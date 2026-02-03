@@ -11,6 +11,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
+import java.io.File
+import java.io.FileInputStream
 import java.io.IOException
 import java.util.zip.GZIPOutputStream
 
@@ -30,6 +32,7 @@ class WatchChannelSender(private val context: Context) {
     companion object {
         private const val TAG = "WatchChannelSender"
         private const val CHANNEL_PATH_TREMOR_BATCH = "/tremor_batch_channel"
+        private const val CHANNEL_PATH_CALIBRATION = "/calibration_file_channel"
     }
 
     private val channelClient: ChannelClient = Wearable.getChannelClient(context)
@@ -119,6 +122,94 @@ class WatchChannelSender(private val context: Context) {
                 false
             }
         }
+    }
+
+    /**
+     * Send a calibration file to the phone via ChannelClient.
+     *
+     * Protocol:
+     * 1. Filename length (4 bytes, big-endian)
+     * 2. Filename (UTF-8 bytes)
+     * 3. Compressed data length (4 bytes, big-endian)
+     * 4. GZIP compressed file data
+     *
+     * @param file The calibration file to send
+     * @param phoneNode The phone node to send to
+     * @return true if sent successfully, false otherwise
+     */
+    suspend fun sendCalibrationFile(file: File, phoneNode: Node): Boolean {
+        return withContext(Dispatchers.IO) {
+            var channelToken: ChannelClient.Channel? = null
+
+            try {
+                Log.i(TAG, "Opening calibration channel to send file: ${file.name} (${file.length()} bytes)")
+
+                // Open channel to phone
+                channelToken = channelClient
+                    .openChannel(phoneNode.id, CHANNEL_PATH_CALIBRATION)
+                    .await()
+
+                Log.d(TAG, "Calibration channel opened: ${channelToken.path}")
+
+                // Read and compress file
+                val fileBytes = FileInputStream(file).use { it.readBytes() }
+                val compressedData = compressData(fileBytes)
+
+                Log.d(TAG, "Calibration file ${file.name}: ${fileBytes.size} bytes -> ${compressedData.size} bytes compressed")
+
+                // Get output stream and write data with protocol header
+                val outputStream = channelClient.getOutputStream(channelToken!!).await()
+                outputStream.use { stream ->
+                    // Write filename length (4 bytes, big-endian)
+                    val filenameBytes = file.name.toByteArray(Charsets.UTF_8)
+                    writeInt(stream, filenameBytes.size)
+
+                    // Write filename
+                    stream.write(filenameBytes)
+
+                    // Write compressed data length (4 bytes, big-endian)
+                    writeInt(stream, compressedData.size)
+
+                    // Write compressed data
+                    stream.write(compressedData)
+                    stream.flush()
+                }
+
+                Log.i(TAG, "✓ Successfully sent calibration file ${file.name} via channel")
+
+                // Close channel
+                channelClient.close(channelToken).await()
+                true
+
+            } catch (e: IOException) {
+                Log.e(TAG, "✗ IO error sending calibration file ${file.name}: ${e.message}", e)
+                try {
+                    channelToken?.let { channelClient.close(it).await() }
+                } catch (closeError: Exception) {
+                    Log.w(TAG, "Failed to close channel after error: ${closeError.message}")
+                }
+                false
+
+            } catch (e: Exception) {
+                Log.e(TAG, "✗ Error sending calibration file ${file.name}: ${e.message}", e)
+                try {
+                    channelToken?.let { channelClient.close(it).await() }
+                } catch (closeError: Exception) {
+                    Log.w(TAG, "Failed to close channel after error: ${closeError.message}")
+                }
+                false
+            }
+        }
+    }
+
+    /**
+     * Write integer as 4 bytes big-endian
+     */
+    private fun writeInt(stream: java.io.OutputStream, value: Int) {
+        stream.write(value shr 24)
+        stream.write(value shr 16)
+        stream.write(value shr 8)
+        stream.write(value)
     }
 
     /**

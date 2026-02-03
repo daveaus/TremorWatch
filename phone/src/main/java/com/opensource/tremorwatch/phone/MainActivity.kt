@@ -115,6 +115,7 @@ import com.opensource.tremorwatch.phone.ui.dialogs.LogViewerDialog
 import com.opensource.tremorwatch.phone.ui.dialogs.DisclaimerDialog
 import com.opensource.tremorwatch.phone.ui.dialogs.DisclaimerManager
 import com.opensource.tremorwatch.phone.ui.TremorDetectionSettingsScreen
+import com.opensource.tremorwatch.phone.ui.RatingConfigScreen
 
 class MainActivity : AppCompatActivity() {
     companion object {
@@ -280,9 +281,13 @@ fun TremorWatchApp() {
             "settings" -> SettingsScreen(
                 onNavigateBack = { currentScreen = "main" },
                 onNavigateToAlgorithmSettings = { currentScreen = "algorithm_settings" },
+                onNavigateToRatingSettings = { currentScreen = "rating_settings" },
                 locationPermissionLauncher = locationPermissionLauncher
             )
             "algorithm_settings" -> TremorDetectionSettingsScreen(
+                onNavigateBack = { currentScreen = "settings" }
+            )
+            "rating_settings" -> RatingConfigScreen(
                 onNavigateBack = { currentScreen = "settings" }
             )
         }
@@ -425,6 +430,8 @@ fun MainScreen(
     // Load data with OOM protection - load 48h of data for the unified chart
     var allChartDataState by remember { mutableStateOf(emptyList<ChartData>()) }
     var gapEventsState by remember { mutableStateOf(emptyList<GapEvent>()) }
+    var ratingsState by remember { mutableStateOf(emptyList<RatingChartPoint>()) }
+    var showRatingsOnGraph by remember { mutableStateOf(false) }
     var isDataLoading by remember { mutableStateOf(true) }  // Track loading state
     var dataLoadTrigger by remember { mutableStateOf(0) }
     
@@ -524,6 +531,33 @@ fun MainScreen(
                 }
             }
             gapEventsState = gaps
+            
+            // Load subjective ratings and preference
+            val ratingPrefs = context.getSharedPreferences("rating_config", Context.MODE_PRIVATE)
+            showRatingsOnGraph = ratingPrefs.getBoolean("show_ratings_on_graph", false)
+            
+            if (showRatingsOnGraph) {
+                try {
+                    val startTime = System.currentTimeMillis() - (retentionHours * 60 * 60 * 1000L)
+                    val rawRatings = withContext(Dispatchers.IO) {
+                        dbHelper.getRatingsAfter(startTime)
+                    }
+                    ratingsState = rawRatings.map { rating ->
+                        RatingChartPoint(
+                            timestamp = rating.timestamp,
+                            rating = rating.rating,
+                            source = rating.source
+                        )
+                    }
+                    Log.d("MainActivity", "Loaded ${ratingsState.size} subjective ratings")
+                } catch (e: Exception) {
+                    Log.e("MainActivity", "Error loading ratings: ${e.message}", e)
+                    ratingsState = emptyList()
+                }
+            } else {
+                ratingsState = emptyList()
+            }
+            
             isDataLoading = false  // Done loading
             
             // Log data range for debugging
@@ -549,6 +583,7 @@ fun MainScreen(
     
     val allChartData = allChartDataState
     val gapEvents = gapEventsState
+    val ratings = ratingsState
     
     // Keep legacy data for backward compatibility (can be removed later)
     val data1Hour = ChartDataSet(0, emptyList<ChartData>())
@@ -967,7 +1002,9 @@ fun MainScreen(
                     ChartsSection(
                         data = allChartData,
                         gapEvents = gapEvents,
-                        hoursBack = 12
+                        hoursBack = 12,
+                        ratings = ratings,
+                        showRatingsOnGraph = showRatingsOnGraph
                     )
                 }
             }
@@ -1006,6 +1043,7 @@ fun MainScreen(
 fun SettingsScreen(
     onNavigateBack: () -> Unit,
     onNavigateToAlgorithmSettings: () -> Unit,
+    onNavigateToRatingSettings: () -> Unit,
     locationPermissionLauncher: androidx.activity.result.ActivityResultLauncher<Array<String>>
 ) {
     val context = LocalContext.current
@@ -1334,6 +1372,38 @@ fun SettingsScreen(
                     )
                     Text(
                         text = "Customize tremor detection parameters",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer
+                    )
+                }
+                Icon(
+                    imageVector = Icons.Filled.Settings,
+                    contentDescription = "Configure",
+                    tint = MaterialTheme.colorScheme.onPrimaryContainer
+                )
+            }
+        }
+
+        // Rating Settings Card
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { onNavigateToRatingSettings() }
+                    .padding(16.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Rating Settings",
+                        style = MaterialTheme.typography.titleMedium
+                    )
+                    Text(
+                        text = "Configure subjective tremor rating prompts",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onPrimaryContainer
                     )

@@ -84,4 +84,55 @@ interface TremorDao {
         ORDER BY bucketTimestamp ASC
     """)
     suspend fun getAggregatedChartData(cutoffTime: Long): List<AggregatedChartData>
+    
+    // ==================== Subjective Ratings ====================
+    
+    /**
+     * Insert or update a subjective rating.
+     */
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertRating(rating: SubjectiveRatingEntity)
+    
+    /**
+     * Insert multiple calibration data samples.
+     */
+    @Insert
+    suspend fun insertCalibrationData(data: List<CalibrationDataEntity>)
+    
+    /**
+     * Get ratings after a timestamp.
+     */
+    @Query("SELECT * FROM subjective_ratings WHERE timestamp >= :startTime ORDER BY timestamp DESC")
+    suspend fun getRatingsAfter(startTime: Long): List<SubjectiveRatingEntity>
+    
+    /**
+     * Get all ratings (for export).
+     */
+    @Query("SELECT * FROM subjective_ratings ORDER BY timestamp DESC")
+    suspend fun getAllRatings(): List<SubjectiveRatingEntity>
+    
+    /**
+     * Get calibration data for a specific rating.
+     */
+    @Query("SELECT * FROM calibration_data WHERE ratingId = :ratingId ORDER BY timestamp ASC")
+    suspend fun getCalibrationDataForRating(ratingId: String): List<CalibrationDataEntity>
+    
+    /**
+     * Get ratings that have calibration data available.
+     */
+    @Query("SELECT * FROM subjective_ratings WHERE calibrationModeEnabled = 1 ORDER BY timestamp DESC")
+    suspend fun getRatingsWithCalibrationData(): List<SubjectiveRatingEntity>
+    
+    /**
+     * Delete rating and cascade to calibration data.
+     */
+    @Query("DELETE FROM subjective_ratings WHERE id = :ratingId")
+    suspend fun deleteRating(ratingId: String)
+    
+    /**
+     * Get rating count for today (for daily limit check).
+     */
+    @Query("SELECT COUNT(*) FROM subjective_ratings WHERE timestamp >= :startOfDay")
+    suspend fun getRatingCountSince(startOfDay: Long): Int
 }
+

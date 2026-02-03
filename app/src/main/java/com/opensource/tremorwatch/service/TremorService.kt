@@ -37,9 +37,12 @@ import com.opensource.tremorwatch.config.ConfigDataListener
 import com.opensource.tremorwatch.receivers.ServiceWatchdogReceiver
 import com.opensource.tremorwatch.receivers.UploadAlarmReceiver
 import com.opensource.tremorwatch.receivers.BatchRetryAlarmReceiver
+import com.opensource.tremorwatch.receivers.RatingPromptReceiver
 import com.opensource.tremorwatch.engine.TremorMonitoringEngine
 import com.opensource.tremorwatch.constants.MonitoringConstants
 import com.opensource.tremorwatch.data.PreferencesRepository
+import com.opensource.tremorwatch.data.CalibrationCaptureManager
+import com.opensource.tremorwatch.data.CalibrationSample
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
@@ -91,6 +94,9 @@ class TremorService : LifecycleService(), SensorEventListener {
         // Preferences repository for state management
         private lateinit var preferencesRepository: PreferencesRepository
         private val serviceScope = CoroutineScope(Dispatchers.IO)
+
+        // Calibration capture manager for subjective rating data collection
+        private lateinit var calibrationCaptureManager: CalibrationCaptureManager
 
     // Periodic status update handler
     private val statusUpdateHandler = Handler(Looper.getMainLooper())
@@ -761,8 +767,14 @@ class TremorService : LifecycleService(), SensorEventListener {
         // Set up batch retry alarm to ensure pending batches get sent even if process is killed
         scheduleBatchRetryAlarm()
 
+        // Set up rating prompt alarm for periodic subjective rating prompts
+        scheduleRatingPromptAlarm()
+
             // Initialize preferences repository
             preferencesRepository = PreferencesRepository(this)
+
+            // Initialize calibration capture manager for subjective rating data collection
+            calibrationCaptureManager = CalibrationCaptureManager(this)
             
             // Initialize watch-to-phone communication
             phoneCommunication = WatchDataSenderCommunication(this)
@@ -777,6 +789,29 @@ class TremorService : LifecycleService(), SensorEventListener {
             onBatchReady = { batch ->
                 // Called when engine has collected a full batch
                 saveBatchLocally(batch)
+                
+                // If calibration is active, record samples for subjective rating calibration
+                if (::calibrationCaptureManager.isInitialized && calibrationCaptureManager.isCapturing()) {
+                    for (data in batch) {
+                        val sample = CalibrationSample(
+                            timestamp = data.timestamp,
+                            x = data.x,
+                            y = data.y,
+                            z = data.z,
+                            magnitude = data.magnitude,
+                            dominantFrequency = data.dominantFrequency,
+                            tremorBandPower = data.tremorBandPower,
+                            totalPower = data.totalPower,
+                            bandRatio = data.bandRatio,
+                            peakProminence = data.peakProminence,
+                            confidence = data.confidence,
+                            severity = data.severity.toDouble(),
+                            isWorn = data.isWorn,
+                            isCharging = data.isCharging
+                        )
+                        calibrationCaptureManager.recordSample(sample)
+                    }
+                }
             },
             onWearStateChanged = { isWorn ->
                 // Called when wear state changes
@@ -1162,6 +1197,76 @@ class TremorService : LifecycleService(), SensorEventListener {
         )
         alarmManager.cancel(pendingIntent)
         Timber.d("Batch retry alarm cancelled")
+    }
+
+    /**
+     * Schedule periodic rating prompts.
+     * 
+     * Uses a 2-3 hour random interval to avoid predictable prompt timing.
+     * The RatingPromptReceiver handles additional checks (active hours, daily limits, etc.).
+     */
+    private fun scheduleRatingPromptAlarm() {
+        val alarmManager = getSystemService(Context.ALARM_SERVICE) as AlarmManager
+        val intent = Intent(this, RatingPromptReceiver::class.java).apply {
+            action = RatingPromptReceiver.ACTION_RATING_PROMPT
+        }
+        val pendingIntent = PendingIntent.getBroadcast(
+            this,
+            3,  // Different request code from watchdog(0), upload(1), and batch retry(2)
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        // Random interval between 2-3 hours for natural prompting
+        val baseIntervalMs = 2 * 60 * 60 * 1000L  // 2 hours
+        val randomExtra = (0..60).random() * 60 * 1000L  // 0-60 minutes extra
+        val intervalMs = baseIntervalMs + randomExtra
+        val triggerAtMillis = SystemClock.elapsedRealtime() + intervalMs
+
+        // Calculate wall clock time for logging
+        val triggerTime = System.currentTimeMillis() + intervalMs
+        val triggerTimeFormatted = SimpleDateFormat("HH:mm:ss", Locale.US).format(Date(triggerTime))
+        val intervalMinutes = intervalMs / (60 * 1000)
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            if (alarmManager.canScheduleExactAlarms()) {
+                alarmManager.setExactAndAllowWhileIdle(
+                    AlarmManager.ELAPSED_REALTIME_WAKEUP,
+                    triggerAtMillis,
+                    pendingIntent
+                )
+                Timber.i("★★★ Rating prompt alarm scheduled (exact) - next prompt in $intervalMinutes minutes at ~$triggerTimeFormatted")
+            } else {
+                alarmManager.setAndAllowWhileIdle(
+                    AlarmManager.ELAPSED_REALTIME_WAKEUP,
+                    triggerAtMillis,
+                    pendingIntent
+                )
+                Timber.w("★★★ Rating prompt alarm scheduled (inexact) - next prompt in ~$intervalMinutes minutes around $triggerTimeFormatted")
+            }
+        } else {
+            alarmManager.setExactAndAllowWhileIdle(
+                AlarmManager.ELAPSED_REALTIME_WAKEUP,
+                triggerAtMillis,
+                pendingIntent
+            )
+            Timber.i("★★★ Rating prompt alarm scheduled (exact) - next prompt in $intervalMinutes minutes at ~$triggerTimeFormatted")
+        }
+    }
+
+    private fun cancelRatingPromptAlarm() {
+        val alarmManager = getSystemService(Context.ALARM_SERVICE) as AlarmManager
+        val intent = Intent(this, RatingPromptReceiver::class.java).apply {
+            action = RatingPromptReceiver.ACTION_RATING_PROMPT
+        }
+        val pendingIntent = PendingIntent.getBroadcast(
+            this,
+            3,
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        alarmManager.cancel(pendingIntent)
+        Timber.d("Rating prompt alarm cancelled")
     }
 
     // ====================== WEAR DETECTION & CHARGING MANAGEMENT ======================

@@ -709,8 +709,46 @@ class WatchDataSender(private val context: Context) {
     }
 
     /**
-     * Clean up resources when sender is no longer needed
+     * Send a subjective rating to the phone for logging to InfluxDB.
+     * Uses MessageClient for lightweight data transfer.
+     *
+     * @param rating The subjective rating (1-5)
+     * @param source Rating source: "MANUAL", "PROMPTED", or "TREMOR_CHANGE"
+     * @param onComplete Callback with success status
      */
+    fun sendSubjectiveRating(rating: Int, source: String, onComplete: (Boolean) -> Unit) {
+        scope.launch {
+            try {
+                val nodes = getConnectedNodes()
+                if (nodes.isEmpty()) {
+                    Log.w(TAG, "✗ No phone connected - cannot send subjective rating")
+                    onComplete(false)
+                    return@launch
+                }
+
+                val ratingData = JSONObject().apply {
+                    put("id", java.util.UUID.randomUUID().toString())
+                    put("timestamp", System.currentTimeMillis())
+                    put("rating", rating)
+                    put("source", source)
+                }.toString().toByteArray()
+
+                // Fire-and-forget: send without blocking
+                messageClient.sendMessage(
+                    nodes.first().id,
+                    Constants.MESSAGE_PATH_RATING,
+                    ratingData
+                )
+
+                Log.i(TAG, "✓ Subjective rating sent: $rating (source: $source)")
+                onComplete(true)
+
+            } catch (e: Exception) {
+                Log.e(TAG, "✗ Failed to send subjective rating: ${e.javaClass.simpleName}: ${e.message}")
+                onComplete(false)
+            }
+        }
+    }
     fun shutdown() {
         scope.cancel()
     }

@@ -121,6 +121,23 @@
             </intent-filter>
         </receiver>
 
+        <!-- ===== Rating Activity ===== -->
+        <activity
+            android:name=".RatingActivity"
+            android:exported="false"
+            android:label="Rate Tremor"
+            android:theme="@android:style/Theme.DeviceDefault" />
+
+        <!-- ===== Rating Prompt Receiver ===== -->
+        <receiver
+            android:name="com.opensource.tremorwatch.receivers.RatingPromptReceiver"
+            android:enabled="true"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.opensource.tremorwatch.ACTION_RATING_PROMPT" />
+            </intent-filter>
+        </receiver>
+
     </application>
 
 </manifest>

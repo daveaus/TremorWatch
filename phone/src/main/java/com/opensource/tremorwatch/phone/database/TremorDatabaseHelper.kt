@@ -167,6 +167,18 @@ class TremorDatabaseHelper(private val context: Context) {
             emptyList()
         }
     }
+    
+    /**
+     * Load subjective ratings for chart display.
+     */
+    suspend fun getRatingsAfter(cutoffTime: Long): List<SubjectiveRatingEntity> = withContext(Dispatchers.IO) {
+        try {
+            dao.getRatingsAfter(cutoffTime)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to get ratings: ${e.message}", e)
+            emptyList()
+        }
+    }
 }
 
 data class DatabaseStats(

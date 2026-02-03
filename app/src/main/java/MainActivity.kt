@@ -48,7 +48,9 @@ import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import androidx.wear.compose.material.*
 import com.opensource.tremorwatch.shared.Constants
+import com.opensource.tremorwatch.shared.models.RatingSource
 import com.opensource.tremorwatch.shared.models.TremorBatch
+import com.opensource.tremorwatch.ui.RatingScreen
 import com.opensource.tremorwatch.ui.theme.TremorWatchTheme
 import com.opensource.tremorwatch.config.MonitoringState
 import com.opensource.tremorwatch.config.DataConfig
@@ -219,6 +221,7 @@ fun TremorMonitorApp(
     var isRecording by remember { mutableStateOf(initialIsRecording) }
     var showConfig by remember { mutableStateOf(false) }
     var showCalibration by remember { mutableStateOf(false) }
+    var showRating by remember { mutableStateOf(false) }
     var showDisclaimer by remember { 
         mutableStateOf(WatchDisclaimerManager.needsToShowDisclaimer(context)) 
     }
@@ -236,6 +239,23 @@ fun TremorMonitorApp(
                             // Close the app if user doesn't agree
                             (context as? android.app.Activity)?.finish()
                         }
+                    )
+                }
+                showRating -> {
+                    RatingScreen(
+                        source = RatingSource.MANUAL,
+                        calibrationModeEnabled = false,
+                        onRatingSubmit = { rating, dontAskToday ->
+                            // Send rating to phone using WatchDataSender
+                            WatchDataSender(context).sendSubjectiveRating(
+                                rating = rating,
+                                source = "MANUAL"
+                            ) { success ->
+                                android.util.Log.i("MainActivity", "Rating sent: $success")
+                            }
+                            showRating = false
+                        },
+                        onCancel = { showRating = false }
                     )
                 }
                 showCalibration -> {
@@ -261,6 +281,7 @@ fun TremorMonitorApp(
                         },
                         onShowConfig = { showConfig = true },
                         onShowCalibration = { showCalibration = true },
+                        onShowRating = { showRating = true },
                         onUpload = onUpload
                     )
                 }
@@ -357,6 +378,7 @@ fun MainScreen(
     onStartStop: () -> Unit,
     onShowConfig: () -> Unit,
     onShowCalibration: () -> Unit,
+    onShowRating: () -> Unit,
     onUpload: () -> Unit
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
@@ -519,6 +541,18 @@ fun MainScreen(
         }
 
         Spacer(modifier = Modifier.height(10.dp))
+        
+        // Rate Tremor button - topmost action button
+        Button(
+            onClick = onShowRating,
+            colors = ButtonDefaults.buttonColors(
+                backgroundColor = MaterialTheme.colors.primary
+            )
+        ) {
+            Text("Rate Tremor")
+        }
+        
+        Spacer(modifier = Modifier.height(8.dp))
         Button(
             onClick = onStartStop,
             colors = ButtonDefaults.buttonColors(

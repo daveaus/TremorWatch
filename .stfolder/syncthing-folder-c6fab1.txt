@@ -1,0 +1,5 @@
+# This directory is a Syncthing folder marker.
+# Do not delete.
+
+folderID: wm9vt-bvslz
+created: 2026-02-03T13:08:27+08:00
