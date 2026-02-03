@@ -81,7 +81,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private val requestPermissionLauncher =
-        registerForActivityResult(ActivityResultContracts.RequestPermission()) {}
+        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {}
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -89,12 +89,29 @@ class MainActivity : ComponentActivity() {
         // Load Home Assistant configuration from file if present
         DataConfig.loadFromFile(this)
 
+        val permissionsToRequest = mutableListOf<String>()
+
         if (ContextCompat.checkSelfPermission(
                 this,
                 Manifest.permission.BODY_SENSORS
             ) != PackageManager.PERMISSION_GRANTED
         ) {
-            requestPermissionLauncher.launch(Manifest.permission.BODY_SENSORS)
+            permissionsToRequest.add(Manifest.permission.BODY_SENSORS)
+        }
+
+        // Request POST_NOTIFICATIONS for Android 13+ (API 33)
+        if (Build.VERSION.SDK_INT >= 33) {
+            if (ContextCompat.checkSelfPermission(
+                    this,
+                    Manifest.permission.POST_NOTIFICATIONS
+                ) != PackageManager.PERMISSION_GRANTED
+            ) {
+                permissionsToRequest.add(Manifest.permission.POST_NOTIFICATIONS)
+            }
+        }
+
+        if (permissionsToRequest.isNotEmpty()) {
+            requestPermissionLauncher.launch(permissionsToRequest.toTypedArray())
         }
 
         // Request SCHEDULE_EXACT_ALARM permission for Android 12+ (needed for watchdog)

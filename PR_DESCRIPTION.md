@@ -23,6 +23,7 @@ Adds functionality for users to rate their tremor severity (1-5 scale) directly 
 - **CalibrationCaptureManager:** Implemented streaming file capture for stability.
 - **Database Schema:** Added `SubjectiveRating` entity and Room DAO.
 - **Migration:** Bumped database version to 2.
+- **Permissions:** Added runtime request for `POST_NOTIFICATIONS` (Android 13+).
 
 ## Verification
 - ✅ Build verification (Debug)
