@@ -35,7 +35,7 @@ class RatingActivity : ComponentActivity() {
                     calibrationModeEnabled = false,
                     onRatingSubmit = { rating, dontAskToday ->
                         Timber.i("Rating submitted: $rating, dontAskToday: $dontAskToday")
-                        
+
                         // Send rating to phone
                         WatchDataSender(this@RatingActivity).sendSubjectiveRating(
                             rating = rating,
@@ -43,14 +43,18 @@ class RatingActivity : ComponentActivity() {
                         ) { success ->
                             Timber.i("Rating sent to phone: $success")
                         }
-                        
+
                         // Handle "don't ask today"
                         if (dontAskToday) {
                             com.opensource.tremorwatch.receivers.RatingPromptReceiver()
                                 .setDontAskToday(this@RatingActivity)
                         }
-                        
+
                         finish()
+                    },
+                    onUndo = {
+                        Timber.d("Rating undone by user")
+                        // No action needed - just goes back to selection screen
                     },
                     onCancel = {
                         Timber.d("Rating cancelled")

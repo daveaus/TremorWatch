@@ -10,7 +10,7 @@ import kotlinx.serialization.Serializable
 data class SubjectiveRating(
     val id: String,                           // UUID
     val timestamp: Long,                      // When rating was entered
-    val rating: Int,                          // 1-5 scale
+    val rating: Int,                          // 0-5 scale (0 = no tremor)
     val source: RatingSource,                 // How the rating was triggered
     val watchId: String? = null,              // Device identifier
     
@@ -32,16 +32,18 @@ data class SubjectiveRating(
         
         // Functional rating labels for consistent user understanding
         val RATING_LABELS = mapOf(
+            0 to "No tremor",
             1 to "Minimal (not bothering me)",
             2 to "Mild (noticeable but not annoying)",
             3 to "Moderate (annoying but manageable)",
             4 to "Strong (interfering with tasks)",
             5 to "Severe (hard to use this hand)"
         )
-        
+
         val RATING_EMOJIS = mapOf(
+            0 to "🎆",
             1 to "😊",
-            2 to "🙂", 
+            2 to "🙂",
             3 to "😐",
             4 to "😕",
             5 to "😣"
