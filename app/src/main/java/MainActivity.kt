@@ -48,7 +48,9 @@ import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import androidx.wear.compose.material.*
 import com.opensource.tremorwatch.shared.Constants
+import com.opensource.tremorwatch.shared.models.RatingSource
 import com.opensource.tremorwatch.shared.models.TremorBatch
+import com.opensource.tremorwatch.ui.RatingScreen
 import com.opensource.tremorwatch.ui.theme.TremorWatchTheme
 import com.opensource.tremorwatch.config.MonitoringState
 import com.opensource.tremorwatch.config.DataConfig
@@ -79,7 +81,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private val requestPermissionLauncher =
-        registerForActivityResult(ActivityResultContracts.RequestPermission()) {}
+        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {}
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -87,12 +89,29 @@ class MainActivity : ComponentActivity() {
         // Load Home Assistant configuration from file if present
         DataConfig.loadFromFile(this)
 
+        val permissionsToRequest = mutableListOf<String>()
+
         if (ContextCompat.checkSelfPermission(
                 this,
                 Manifest.permission.BODY_SENSORS
             ) != PackageManager.PERMISSION_GRANTED
         ) {
-            requestPermissionLauncher.launch(Manifest.permission.BODY_SENSORS)
+            permissionsToRequest.add(Manifest.permission.BODY_SENSORS)
+        }
+
+        // Request POST_NOTIFICATIONS for Android 13+ (API 33)
+        if (Build.VERSION.SDK_INT >= 33) {
+            if (ContextCompat.checkSelfPermission(
+                    this,
+                    Manifest.permission.POST_NOTIFICATIONS
+                ) != PackageManager.PERMISSION_GRANTED
+            ) {
+                permissionsToRequest.add(Manifest.permission.POST_NOTIFICATIONS)
+            }
+        }
+
+        if (permissionsToRequest.isNotEmpty()) {
+            requestPermissionLauncher.launch(permissionsToRequest.toTypedArray())
         }
 
         // Request SCHEDULE_EXACT_ALARM permission for Android 12+ (needed for watchdog)
@@ -219,6 +238,7 @@ fun TremorMonitorApp(
     var isRecording by remember { mutableStateOf(initialIsRecording) }
     var showConfig by remember { mutableStateOf(false) }
     var showCalibration by remember { mutableStateOf(false) }
+    var showRating by remember { mutableStateOf(false) }
     var showDisclaimer by remember { 
         mutableStateOf(WatchDisclaimerManager.needsToShowDisclaimer(context)) 
     }
@@ -236,6 +256,26 @@ fun TremorMonitorApp(
                             // Close the app if user doesn't agree
                             (context as? android.app.Activity)?.finish()
                         }
+                    )
+                }
+                showRating -> {
+                    RatingScreen(
+                        source = RatingSource.MANUAL,
+                        calibrationModeEnabled = false,
+                        onRatingSubmit = { rating, dontAskToday ->
+                            // Send rating to phone using WatchDataSender
+                            WatchDataSender(context).sendSubjectiveRating(
+                                rating = rating,
+                                source = "MANUAL"
+                            ) { success ->
+                                android.util.Log.i("MainActivity", "Rating sent: $success")
+                            }
+                            showRating = false
+                        },
+                        onUndo = {
+                            // No action needed - just goes back to selection screen
+                        },
+                        onCancel = { showRating = false }
                     )
                 }
                 showCalibration -> {
@@ -261,6 +301,7 @@ fun TremorMonitorApp(
                         },
                         onShowConfig = { showConfig = true },
                         onShowCalibration = { showCalibration = true },
+                        onShowRating = { showRating = true },
                         onUpload = onUpload
                     )
                 }
@@ -357,6 +398,7 @@ fun MainScreen(
     onStartStop: () -> Unit,
     onShowConfig: () -> Unit,
     onShowCalibration: () -> Unit,
+    onShowRating: () -> Unit,
     onUpload: () -> Unit
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
@@ -364,18 +406,18 @@ fun MainScreen(
     // Get pending batch count by checking files directory
     // Use mutableStateOf to make it reactive and update periodically
     var pendingBatches by remember { mutableStateOf(0) }
-    
+
     // Get actual monitoring state (paused/active)
     var isMonitoringPaused by remember { mutableStateOf(false) }
     var pauseReason by remember { mutableStateOf("") }
-    
+
     // Calibration status
     var hasCalibrated by remember { mutableStateOf(false) }
     var hoursSinceCalibration by remember { mutableStateOf(-1) }
-    
+
     // Battery optimization status
     var isBatteryOptimized by remember { mutableStateOf(false) }
-    
+
     // Check calibration status
     LaunchedEffect(Unit) {
         val baselineManager = com.opensource.tremorwatch.engine.BaselineManager(context)
@@ -419,7 +461,7 @@ fun MainScreen(
             delay(5000) // Update every 5 seconds
         }
     }
-    
+
     // Check battery optimization status every 5 seconds
     LaunchedEffect(Unit) {
         while (true) {
@@ -435,7 +477,7 @@ fun MainScreen(
         modifier = Modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
-            .padding(16.dp),
+            .padding(horizontal = 8.dp, vertical = 16.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Top
     ) {
@@ -452,7 +494,7 @@ fun MainScreen(
             textAlign = TextAlign.Center,
             color = MaterialTheme.colors.error
         )
-        Spacer(modifier = Modifier.height(6.dp))
+        Spacer(modifier = Modifier.height(4.dp))
         Text(
             when {
                 !isRecording -> "Stopped"
@@ -470,36 +512,21 @@ fun MainScreen(
                 else -> MaterialTheme.colors.primary
             }
         )
-        Spacer(modifier = Modifier.height(5.dp))
 
         // Status display
         if (isRecording) {
+            Spacer(modifier = Modifier.height(2.dp))
             Text(
-                "Pending batches: $pendingBatches",
-                fontSize = 11.sp,
-                color = if (pendingBatches > 0) MaterialTheme.colors.primary else MaterialTheme.colors.secondary,
-                textAlign = TextAlign.Center
-            )
-            Spacer(modifier = Modifier.height(3.dp))
-            val uploadInterval = MonitoringState.getUploadIntervalMinutes(context)
-            Text(
-                "Upload every ${uploadInterval}min",
+                "Batches: $pendingBatches | Upload: ${MonitoringState.getUploadIntervalMinutes(context)}min",
                 fontSize = 9.sp,
-                color = MaterialTheme.colors.secondary,
+                color = if (pendingBatches > 0) MaterialTheme.colors.primary else MaterialTheme.colors.secondary,
                 textAlign = TextAlign.Center
             )
 
             // Battery optimization warning
             if (isBatteryOptimized) {
-                Spacer(modifier = Modifier.height(5.dp))
                 Text(
                     "⚠ Battery optimization ON",
-                    fontSize = 9.sp,
-                    color = MaterialTheme.colors.error,
-                    textAlign = TextAlign.Center
-                )
-                Text(
-                    "(May cause data gaps)",
                     fontSize = 8.sp,
                     color = MaterialTheme.colors.error,
                     textAlign = TextAlign.Center
@@ -508,56 +535,128 @@ fun MainScreen(
 
             // Pause when not worn warning
             if (MonitoringState.isPauseWhenNotWorn(context)) {
-                Spacer(modifier = Modifier.height(3.dp))
                 Text(
                     "⚠ Pause when not worn: ON",
-                    fontSize = 9.sp,
+                    fontSize = 8.sp,
                     color = MaterialTheme.colors.error,
                     textAlign = TextAlign.Center
                 )
             }
         }
 
-        Spacer(modifier = Modifier.height(10.dp))
-        Button(
-            onClick = onStartStop,
-            colors = ButtonDefaults.buttonColors(
-                backgroundColor = if (isRecording)
-                    MaterialTheme.colors.error
-                else
-                    MaterialTheme.colors.primary
-            )
-        ) {
-            Text(if (isRecording) "Stop" else "Start")
-        }
-
-        if (isRecording) {
-            Spacer(modifier = Modifier.height(8.dp))
-            Button(
-                onClick = onUpload,
-                enabled = pendingBatches > 0,
-                colors = ButtonDefaults.buttonColors(
-                    backgroundColor = MaterialTheme.colors.primary
-                )
-            ) {
-                Text("Upload Now")
-            }
-        }
-
-        Spacer(modifier = Modifier.height(10.dp))
-        Button(onClick = onShowConfig) {
-            Text("Settings")
-        }
-        
-        // Calibration status indicator
         Spacer(modifier = Modifier.height(8.dp))
-        com.opensource.tremorwatch.ui.CalibrationStatusIndicator(
-            hasCalibrated = hasCalibrated,
-            hoursSinceCalibration = hoursSinceCalibration,
-            onClick = onShowCalibration
+
+        // Rate Tremor button - full width chip, topmost action
+        Chip(
+            onClick = onShowRating,
+            label = {
+                Text(
+                    "Rate Tremor",
+                    fontSize = 14.sp,
+                    modifier = Modifier.fillMaxWidth(),
+                    textAlign = TextAlign.Center
+                )
+            },
+            icon = { Text("📝", fontSize = 16.sp) },
+            colors = ChipDefaults.primaryChipColors(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 2.dp)
         )
 
-        Spacer(modifier = Modifier.height(6.dp))
+        // Start/Stop button - full width chip
+        Chip(
+            onClick = onStartStop,
+            label = {
+                Text(
+                    if (isRecording) "Stop Monitoring" else "Start Monitoring",
+                    fontSize = 14.sp,
+                    modifier = Modifier.fillMaxWidth(),
+                    textAlign = TextAlign.Center
+                )
+            },
+            icon = { Text(if (isRecording) "⏹" else "▶", fontSize = 16.sp) },
+            colors = if (isRecording)
+                ChipDefaults.chipColors(
+                    backgroundColor = MaterialTheme.colors.error
+                )
+            else
+                ChipDefaults.primaryChipColors(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 2.dp)
+        )
+
+        // Upload Now button - only when recording and has batches
+        if (isRecording && pendingBatches > 0) {
+            Chip(
+                onClick = onUpload,
+                label = {
+                    Text(
+                        "Upload Now ($pendingBatches)",
+                        fontSize = 14.sp,
+                        modifier = Modifier.fillMaxWidth(),
+                        textAlign = TextAlign.Center
+                    )
+                },
+                icon = { Text("📤", fontSize = 16.sp) },
+                colors = ChipDefaults.secondaryChipColors(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 2.dp)
+            )
+        }
+
+        // Settings button - full width chip
+        Chip(
+            onClick = onShowConfig,
+            label = {
+                Text(
+                    "Settings",
+                    fontSize = 14.sp,
+                    modifier = Modifier.fillMaxWidth(),
+                    textAlign = TextAlign.Center
+                )
+            },
+            icon = { Text("⚙", fontSize = 16.sp) },
+            colors = ChipDefaults.secondaryChipColors(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 2.dp)
+        )
+
+        // Calibration button - full width chip
+        Chip(
+            onClick = onShowCalibration,
+            label = {
+                Text(
+                    if (hasCalibrated) "Recalibrate" else "Calibrate",
+                    fontSize = 14.sp,
+                    modifier = Modifier.fillMaxWidth(),
+                    textAlign = TextAlign.Center
+                )
+            },
+            secondaryLabel = {
+                Text(
+                    when {
+                        !hasCalibrated -> "Not calibrated"
+                        hoursSinceCalibration < 24 -> "${hoursSinceCalibration}h ago"
+                        else -> "${hoursSinceCalibration / 24}d ago"
+                    },
+                    fontSize = 10.sp
+                )
+            },
+            icon = { Text("📊", fontSize = 16.sp) },
+            colors = if (hasCalibrated)
+                ChipDefaults.secondaryChipColors()
+            else
+                ChipDefaults.chipColors(backgroundColor = MaterialTheme.colors.error.copy(alpha = 0.3f)),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 2.dp)
+        )
+
+        Spacer(modifier = Modifier.height(4.dp))
         Text(
             "v${BuildConfig.VERSION_NAME}",
             fontSize = 9.sp,
@@ -670,143 +769,124 @@ fun ConfigScreen(
         modifier = Modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
-            .padding(16.dp),
+            .padding(horizontal = 8.dp, vertical = 16.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Top
     ) {
+        Spacer(modifier = Modifier.height(8.dp))
+
         Text(
             "Settings",
             style = MaterialTheme.typography.title3,
             textAlign = TextAlign.Center
         )
-        Spacer(modifier = Modifier.height(10.dp))
-
-            Text(
-                "v${BuildConfig.VERSION_NAME} - Battery Optimized",
-                fontSize = 10.sp,
-                textAlign = TextAlign.Center,
-                color = MaterialTheme.colors.secondary
-            )
-
-        Spacer(modifier = Modifier.height(16.dp))
-
-        // Store Locally on Watch Toggle
-        Text(
-            "Store Locally on Watch",
-            fontSize = 11.sp,
-            textAlign = TextAlign.Center
-        )
-
-        Spacer(modifier = Modifier.height(5.dp))
-
-        Button(
-            onClick = {
-                storeLocally = !storeLocally
-                DataConfig.setLocalStorageEnabled(context, storeLocally)
-            },
-            colors = ButtonDefaults.buttonColors(
-                backgroundColor = if (storeLocally)
-                    MaterialTheme.colors.primary
-                else
-                    MaterialTheme.colors.surface
-            )
-        ) {
-            Text(if (storeLocally) "ON" else "OFF")
-        }
-
-        Spacer(modifier = Modifier.height(5.dp))
 
         Text(
-            "Keep consolidated data file\non watch for later export",
-            fontSize = 8.sp,
+            "v${BuildConfig.VERSION_NAME}",
+            fontSize = 9.sp,
             textAlign = TextAlign.Center,
             color = MaterialTheme.colors.secondary
         )
 
-        Spacer(modifier = Modifier.height(16.dp))
+        Spacer(modifier = Modifier.height(12.dp))
 
-        // Pause When Not Worn Toggle
-        Text(
-            "Pause When Not Worn",
-            fontSize = 11.sp,
-            textAlign = TextAlign.Center
-        )
-
-        Spacer(modifier = Modifier.height(5.dp))
-
-        Button(
-            onClick = {
-                pauseWhenNotWorn = !pauseWhenNotWorn
-                MonitoringState.setPauseWhenNotWorn(context, pauseWhenNotWorn)
+        // Store Locally on Watch Toggle - full width
+        ToggleChip(
+            checked = storeLocally,
+            onCheckedChange = {
+                storeLocally = it
+                DataConfig.setLocalStorageEnabled(context, it)
             },
-            colors = ButtonDefaults.buttonColors(
-                backgroundColor = if (pauseWhenNotWorn)
-                    MaterialTheme.colors.primary
-                else
-                    MaterialTheme.colors.surface
-            )
-        ) {
-            Text(if (pauseWhenNotWorn) "ON" else "OFF")
-        }
-
-        Spacer(modifier = Modifier.height(5.dp))
-
-        Text(
-            "Stop monitoring while\ncharging or not worn",
-            fontSize = 8.sp,
-            textAlign = TextAlign.Center,
-            color = MaterialTheme.colors.secondary
+            label = {
+                Text("Store Locally", fontSize = 14.sp)
+            },
+            secondaryLabel = {
+                Text("Keep data on watch", fontSize = 10.sp)
+            },
+            toggleControl = {
+                Icon(
+                    imageVector = ToggleChipDefaults.switchIcon(storeLocally),
+                    contentDescription = null
+                )
+            },
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 2.dp)
         )
 
-        Spacer(modifier = Modifier.height(16.dp))
-        
-        // Calibration Section
-        Text(
-            "Baseline Calibration",
-            fontSize = 11.sp,
-            textAlign = TextAlign.Center
+        // Pause When Not Worn Toggle - full width
+        ToggleChip(
+            checked = pauseWhenNotWorn,
+            onCheckedChange = {
+                pauseWhenNotWorn = it
+                MonitoringState.setPauseWhenNotWorn(context, it)
+            },
+            label = {
+                Text("Pause When Not Worn", fontSize = 14.sp)
+            },
+            secondaryLabel = {
+                Text("Stop when charging/off wrist", fontSize = 10.sp)
+            },
+            toggleControl = {
+                Icon(
+                    imageVector = ToggleChipDefaults.switchIcon(pauseWhenNotWorn),
+                    contentDescription = null
+                )
+            },
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 2.dp)
         )
-        
-        Spacer(modifier = Modifier.height(5.dp))
-        
-        Button(
+
+        // Calibration button - full width chip
+        Chip(
             onClick = onShowCalibration,
-            colors = ButtonDefaults.buttonColors(
-                backgroundColor = if (hasCalibrated) 
-                    MaterialTheme.colors.surface 
-                else 
-                    MaterialTheme.colors.primary
-            )
-        ) {
-            Text(if (hasCalibrated) "Recalibrate" else "Calibrate")
-        }
-        
-        Spacer(modifier = Modifier.height(5.dp))
-        
-        Text(
-            when {
-                !hasCalibrated -> "Not calibrated yet"
-                hoursSinceCalibration < 0 -> "Calibration status unknown"
-                hoursSinceCalibration < 24 -> "Calibrated ${hoursSinceCalibration}h ago"
-                else -> "Calibrated ${hoursSinceCalibration / 24}d ago"
+            label = {
+                Text(
+                    if (hasCalibrated) "Recalibrate Baseline" else "Calibrate Baseline",
+                    fontSize = 14.sp
+                )
             },
-            fontSize = 8.sp,
-            textAlign = TextAlign.Center,
-            color = if (hasCalibrated) MaterialTheme.colors.secondary else MaterialTheme.colors.error
-        )
-        
-        Text(
-            "Personalize tremor detection\nto your baseline",
-            fontSize = 8.sp,
-            textAlign = TextAlign.Center,
-            color = MaterialTheme.colors.secondary
+            secondaryLabel = {
+                Text(
+                    when {
+                        !hasCalibrated -> "Not calibrated yet"
+                        hoursSinceCalibration < 0 -> "Status unknown"
+                        hoursSinceCalibration < 24 -> "Done ${hoursSinceCalibration}h ago"
+                        else -> "Done ${hoursSinceCalibration / 24}d ago"
+                    },
+                    fontSize = 10.sp
+                )
+            },
+            icon = { Text("📊", fontSize = 16.sp) },
+            colors = if (hasCalibrated)
+                ChipDefaults.secondaryChipColors()
+            else
+                ChipDefaults.chipColors(backgroundColor = MaterialTheme.colors.error.copy(alpha = 0.3f)),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 2.dp)
         )
 
-        Spacer(modifier = Modifier.height(16.dp))
+        Spacer(modifier = Modifier.height(8.dp))
 
-        Button(onClick = onBack) {
-            Text("Back")
-        }
+        // Back button - full width chip
+        Chip(
+            onClick = onBack,
+            label = {
+                Text(
+                    "Back to Home",
+                    fontSize = 14.sp,
+                    modifier = Modifier.fillMaxWidth(),
+                    textAlign = TextAlign.Center
+                )
+            },
+            icon = { Text("←", fontSize = 16.sp) },
+            colors = ChipDefaults.secondaryChipColors(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 2.dp)
+        )
     }
 }
 

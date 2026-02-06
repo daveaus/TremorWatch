@@ -488,6 +488,8 @@ fun ChartsSection(
     data: List<ChartData>,
     gapEvents: List<GapEvent>,
     hoursBack: Int,
+    ratings: List<RatingChartPoint> = emptyList(),
+    showRatingsOnGraph: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     // Default to Today (-1)
@@ -621,6 +623,18 @@ fun ChartsSection(
             endTime = endTime,
             modifier = Modifier.fillMaxWidth()
         )
+        
+        // Subjective Ratings Chart (optional, shown when enabled)
+        if (showRatingsOnGraph && ratings.isNotEmpty()) {
+            Spacer(modifier = Modifier.height(16.dp))
+            
+            SubjectiveRatingsChart(
+                ratings = ratings,
+                startTime = startTime,
+                endTime = endTime,
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
     }
 }
 
@@ -1554,6 +1568,188 @@ fun TremorActivityChart(
                 textAlign = TextAlign.Center,
                 modifier = Modifier.fillMaxWidth()
             )
+        }
+    }
+}
+
+/**
+ * Data class for subjective rating display on chart
+ */
+data class RatingChartPoint(
+    val timestamp: Long,
+    val rating: Int,  // 1-5
+    val source: String  // MANUAL, PROMPTED, TREMOR_CHANGE
+)
+
+/**
+ * Subjective Ratings Chart - Displays user-submitted tremor ratings as dots
+ */
+@Composable
+fun SubjectiveRatingsChart(
+    ratings: List<RatingChartPoint>,
+    startTime: Long,
+    endTime: Long,
+    modifier: Modifier = Modifier
+) {
+    val ChartBackgroundGradientStart = Color(0xFF1E2836)
+    val ChartBackgroundGradientEnd = Color(0xFF1A2530)
+    val ChartGridColor = Color(0xFF4A5A6A)
+    val ChartVerticalGridColor = Color(0xFF7A8A9A)
+    val ManualRatingColor = Color(0xFF26D9B0)  // Teal for manual
+    val PromptedRatingColor = Color(0xFFFFAB40) // Orange for prompted
+    val ChangeRatingColor = Color(0xFFE040FB)   // Purple for tremor change
+    
+    Card(
+        modifier = modifier,
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            // Filter ratings to visible time range
+            val visibleRatings = remember(ratings, startTime, endTime) {
+                ratings.filter { it.timestamp >= startTime && it.timestamp <= endTime }
+            }
+            
+            Text(
+                text = "Subjective Ratings",
+                style = MaterialTheme.typography.titleSmall
+            )
+            
+            Text(
+                text = "${visibleRatings.size} ratings • 1 (minimal) to 5 (severe)",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            
+            Spacer(modifier = Modifier.height(8.dp))
+            
+            // Chart Canvas
+            val timeRange = endTime - startTime
+            
+            // Calculate hour interval for grid lines
+            val hoursInRange = remember(timeRange) { (timeRange / (60 * 60 * 1000)).toInt().coerceAtLeast(1) }
+            val hourInterval = remember(hoursInRange) {
+                when {
+                    hoursInRange <= 4 -> 1
+                    hoursInRange <= 8 -> 2
+                    hoursInRange <= 16 -> 4
+                    hoursInRange <= 24 -> 6
+                    else -> 12
+                }
+            }
+            
+            BoxWithConstraints(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(120.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(
+                        Brush.verticalGradient(
+                            colors = listOf(ChartBackgroundGradientStart, ChartBackgroundGradientEnd)
+                        )
+                    )
+            ) {
+                Canvas(modifier = Modifier.fillMaxSize().padding(16.dp)) {
+                    val width = size.width
+                    val height = size.height
+                    
+                    if (timeRange <= 0) return@Canvas
+                    
+                    // Draw vertical grid lines at hour intervals
+                    val calendar = Calendar.getInstance()
+                    calendar.timeInMillis = startTime
+                    calendar.set(Calendar.MINUTE, 0)
+                    calendar.set(Calendar.SECOND, 0)
+                    calendar.set(Calendar.MILLISECOND, 0)
+                    if (calendar.timeInMillis < startTime) {
+                        calendar.add(Calendar.HOUR_OF_DAY, 1)
+                    }
+                    
+                    while (calendar.timeInMillis <= endTime) {
+                        val hour = calendar.get(Calendar.HOUR_OF_DAY)
+                        if (hour % hourInterval == 0) {
+                            val x = ((calendar.timeInMillis - startTime).toFloat() / timeRange) * width
+                            drawLine(
+                                color = ChartVerticalGridColor.copy(alpha = 0.5f),
+                                start = Offset(x, 0f),
+                                end = Offset(x, height),
+                                strokeWidth = 1f
+                            )
+                        }
+                        calendar.add(Calendar.HOUR_OF_DAY, 1)
+                    }
+                    
+                    // Draw horizontal grid lines for ratings 1-5
+                    for (i in 1..5) {
+                        val y = height - (height * (i - 1) / 4f)
+                        drawLine(
+                            color = ChartGridColor.copy(alpha = 0.4f),
+                            start = Offset(0f, y),
+                            end = Offset(width, y),
+                            strokeWidth = 1f,
+                            pathEffect = PathEffect.dashPathEffect(floatArrayOf(4f, 4f))
+                        )
+                    }
+                    
+                    // Draw rating dots
+                    visibleRatings.forEach { rating ->
+                        val x = ((rating.timestamp - startTime).toFloat() / timeRange) * width
+                        // Rating 1 = bottom, Rating 5 = top
+                        val y = height - (height * (rating.rating - 1) / 4f)
+                        
+                        val dotColor = when (rating.source) {
+                            "MANUAL" -> ManualRatingColor
+                            "PROMPTED" -> PromptedRatingColor
+                            else -> ChangeRatingColor
+                        }
+                        
+                        // Draw outer circle (border effect)
+                        drawCircle(
+                            color = dotColor.copy(alpha = 0.3f),
+                            radius = 12f,
+                            center = Offset(x.coerceIn(12f, width - 12f), y)
+                        )
+                        
+                        // Draw inner circle
+                        drawCircle(
+                            color = dotColor,
+                            radius = 8f,
+                            center = Offset(x.coerceIn(12f, width - 12f), y)
+                        )
+                    }
+                }
+            }
+            
+            Spacer(modifier = Modifier.height(8.dp))
+            
+            // Legend
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                LegendItem("Manual", ManualRatingColor)
+                Spacer(modifier = Modifier.width(16.dp))
+                LegendItem("Prompted", PromptedRatingColor)
+                Spacer(modifier = Modifier.width(16.dp))
+                LegendItem("Auto", ChangeRatingColor)
+            }
+            
+            // Y-axis labels
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text(
+                    text = "1 (Minimal)",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                )
+                Text(
+                    text = "5 (Severe)",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                )
+            }
         }
     }
 }
