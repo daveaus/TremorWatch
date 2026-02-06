@@ -52,6 +52,7 @@ dependencies {
 
     // ---- Core Wear + Compose ----
     implementation(libs.play.services.wearable)
+    implementation(libs.play.services.location)
     implementation(platform(libs.compose.bom))
     implementation(libs.ui)
     implementation(libs.ui.graphics)

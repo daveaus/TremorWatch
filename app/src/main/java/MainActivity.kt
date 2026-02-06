@@ -99,6 +99,17 @@ class MainActivity : ComponentActivity() {
             permissionsToRequest.add(Manifest.permission.BODY_SENSORS)
         }
 
+        // Request ACTIVITY_RECOGNITION for Android 10+ (API 29)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            if (ContextCompat.checkSelfPermission(
+                    this,
+                    Manifest.permission.ACTIVITY_RECOGNITION
+                ) != PackageManager.PERMISSION_GRANTED
+            ) {
+                permissionsToRequest.add(Manifest.permission.ACTIVITY_RECOGNITION)
+            }
+        }
+
         // Request POST_NOTIFICATIONS for Android 13+ (API 33)
         if (Build.VERSION.SDK_INT >= 33) {
             if (ContextCompat.checkSelfPermission(

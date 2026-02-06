@@ -97,7 +97,16 @@ object MonitoringConstants {
      * Battery-optimized: 144 batches = 24 hours of 10-minute batches.
      */
     const val MAX_PENDING_BATCHES = 144  // 24 hours of 10-minute batches (144 batches/day)
-    
+
+    // ====================== ACTIVITY RECOGNITION ======================
+
+    /**
+     * Activity Recognition update interval in milliseconds.
+     * 30 seconds balances battery impact with context responsiveness.
+     * Activity state changes slowly, so frequent updates are unnecessary.
+     */
+    const val ACTIVITY_UPDATE_INTERVAL_MS = 30_000L  // 30 seconds - battery optimized
+
     // ====================== SERVICE LIFECYCLE ======================
     
     /**

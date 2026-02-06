@@ -9,6 +9,7 @@ import timber.log.Timber
 import com.opensource.tremorwatch.TremorFFT
 import com.opensource.tremorwatch.constants.MonitoringConstants
 import com.opensource.tremorwatch.shared.models.TremorDetectionConfig
+import com.google.android.gms.location.DetectedActivity
 import java.text.SimpleDateFormat
 import java.util.*
 import kotlin.math.sqrt
@@ -104,7 +105,17 @@ class TremorMonitoringEngine(
     // Phase 5: Rolling baseline and severity calculation (opus45 review)
     // Note: BaselineManager requires context - not available without context parameter
     private val baselineManager: BaselineManager? = null
-    
+
+    // Activity recognition state (updated by TremorService)
+    private data class ActivityState(
+        val type: Int,
+        val confidence: Int,
+        val updatedAtMs: Long
+    )
+
+    @Volatile
+    private var activityState = ActivityState(DetectedActivity.UNKNOWN, 0, 0L)
+
     /**
      * Data class representing a single tremor data sample.
      */
@@ -131,7 +142,16 @@ class TremorMonitoringEngine(
         // Phase 5b: Tremor type classification
         val tremorType: String = "unknown",          // Tremor type (resting, postural, essential, etc.)
         val tremorTypeConfidence: Float = 0f,        // Classification confidence (0-1)
-        val isRestingState: Boolean = false          // Whether detected in resting state
+        val isRestingState: Boolean = false,         // Whether detected in resting state
+        // Activity context (from Activity Recognition)
+        val activityType: String = "unknown",
+        val activityConfidence: Float = 0f,          // 0-1
+        val activityAgeMs: Long = -1L,
+        // Activity-adjusted metrics
+        val activityAdjustedConfidence: Float = 0f,
+        val activityAdjustedSeverity: Float = 0f,
+        val isReliableMeasurement: Boolean = false,
+        val excludeFromAnalysis: Boolean = false
     )
     
     /**
@@ -191,8 +211,103 @@ class TremorMonitoringEngine(
         inTremorEpisode = false
         currentEpisodeStartTime = 0L
         currentEpisodeTremorCount = 0
+        activityState = ActivityState(DetectedActivity.UNKNOWN, 0, 0L)
     }
-    
+
+    /**
+     * Update activity context from Activity Recognition.
+     */
+    fun updateActivity(type: Int, confidence: Int, updatedAtMs: Long = System.currentTimeMillis()) {
+        activityState = ActivityState(type, confidence.coerceIn(0, 100), updatedAtMs)
+    }
+
+    private data class ActivityAdjustment(
+        val adjustedConfidence: Float,
+        val adjustedSeverity: Float,
+        val isReliable: Boolean,
+        val excludeFromAnalysis: Boolean,
+        val activityType: Int,
+        val activityConfidence: Int,
+        val activityAgeMs: Long
+    )
+
+    private fun getActivityName(type: Int): String = when (type) {
+        DetectedActivity.STILL -> "still"
+        DetectedActivity.WALKING -> "walking"
+        DetectedActivity.RUNNING -> "running"
+        DetectedActivity.ON_BICYCLE -> "on_bicycle"
+        DetectedActivity.IN_VEHICLE -> "in_vehicle"
+        DetectedActivity.TILTING -> "tilting"
+        DetectedActivity.ON_FOOT -> "on_foot"
+        else -> "unknown"
+    }
+
+    private fun adjustForActivity(
+        baseConfidence: Float,
+        baseSeverity: Float,
+        nowMs: Long
+    ): ActivityAdjustment {
+        val state = activityState
+        val ageMs = if (state.updatedAtMs > 0L) {
+            kotlin.math.max(0L, nowMs - state.updatedAtMs)
+        } else {
+            Long.MAX_VALUE
+        }
+        val isStale = ageMs > config.activityStaleThresholdMs
+
+        val activityType = if (isStale) DetectedActivity.UNKNOWN else state.type
+        val activityConfidence = if (isStale) 0 else state.confidence
+
+        val isReliable = !isStale &&
+            activityType == DetectedActivity.STILL &&
+            activityConfidence >= config.activityHighConfidenceThreshold
+
+        val excludeFromAnalysis = !isStale &&
+            activityConfidence >= config.activityHighConfidenceThreshold &&
+            (activityType == DetectedActivity.RUNNING ||
+             activityType == DetectedActivity.ON_BICYCLE ||
+             activityType == DetectedActivity.IN_VEHICLE)
+
+        if (!config.activityFilteringEnabled ||
+            isStale ||
+            activityConfidence < config.activityLowConfidenceThreshold) {
+            return ActivityAdjustment(
+                adjustedConfidence = baseConfidence,
+                adjustedSeverity = baseSeverity,
+                isReliable = isReliable,
+                excludeFromAnalysis = excludeFromAnalysis,
+                activityType = activityType,
+                activityConfidence = activityConfidence,
+                activityAgeMs = if (ageMs == Long.MAX_VALUE) -1L else ageMs
+            )
+        }
+
+        val baseMultiplier = when (activityType) {
+            DetectedActivity.STILL -> config.activityStillMultiplier
+            DetectedActivity.TILTING -> config.activityTiltingMultiplier
+            DetectedActivity.WALKING -> config.activityWalkingMultiplier
+            DetectedActivity.RUNNING -> config.activityRunningMultiplier
+            DetectedActivity.ON_BICYCLE -> config.activityOnBicycleMultiplier
+            DetectedActivity.IN_VEHICLE -> config.activityInVehicleMultiplier
+            DetectedActivity.ON_FOOT -> config.activityOnFootMultiplier
+            else -> config.activityUnknownMultiplier
+        }
+
+        // Scale multiplier by activity confidence (0..1): low confidence -> minimal adjustment
+        val confidenceWeight = (activityConfidence / 100f).coerceIn(0f, 1f)
+        val effectiveMultiplier = 1f - (1f - baseMultiplier) * confidenceWeight
+
+        return ActivityAdjustment(
+            adjustedConfidence = (baseConfidence * effectiveMultiplier).coerceIn(0f, 1f),
+            adjustedSeverity = (baseSeverity * effectiveMultiplier).coerceAtLeast(0f),
+            isReliable = isReliable,
+            excludeFromAnalysis = excludeFromAnalysis,
+            activityType = activityType,
+            activityConfidence = activityConfidence,
+            activityAgeMs = if (ageMs == Long.MAX_VALUE) -1L else ageMs
+        )
+    }
+
     /**
      * Check if currently in a tremor episode.
      * Useful for UI status display.
@@ -581,7 +696,13 @@ class TremorMonitoringEngine(
         } else {
             0f
         }
-        
+
+        val activityAdjustment = adjustForActivity(
+            baseConfidence = finalConfidence,
+            baseSeverity = severity,
+            nowMs = now
+        )
+
         // Phase 5b: Classify tremor type (only when tremor is detected)
         val tremorClassification = if (finalIsTremor && dominantFrequency > 0f) {
             TremorClassifier.classify(
@@ -614,7 +735,14 @@ class TremorMonitoringEngine(
             // Tremor type classification
             tremorType = tremorClassification?.primaryType?.name?.lowercase() ?: "none",
             tremorTypeConfidence = tremorClassification?.confidence ?: 0f,
-            isRestingState = tremorClassification?.isResting ?: isResting
+            isRestingState = tremorClassification?.isResting ?: isResting,
+            activityType = getActivityName(activityAdjustment.activityType),
+            activityConfidence = activityAdjustment.activityConfidence / 100f,
+            activityAgeMs = activityAdjustment.activityAgeMs,
+            activityAdjustedConfidence = activityAdjustment.adjustedConfidence,
+            activityAdjustedSeverity = activityAdjustment.adjustedSeverity,
+            isReliableMeasurement = activityAdjustment.isReliable,
+            excludeFromAnalysis = activityAdjustment.excludeFromAnalysis
         )
         
         // Synchronized access to buffer for thread safety

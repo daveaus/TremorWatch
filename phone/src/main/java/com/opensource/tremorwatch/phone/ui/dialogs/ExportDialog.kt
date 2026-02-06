@@ -40,6 +40,7 @@ import java.util.Date
 import java.util.Locale
 import com.opensource.tremorwatch.phone.ChartData
 import com.opensource.tremorwatch.shared.models.TremorBatch
+import org.json.JSONObject
 
 /**
  * Export Dialog - allows user to select time range and export format
@@ -294,7 +295,9 @@ private suspend fun writeRawDataCsv(writer: FileWriter, context: Context, hoursB
     writer.write("Timestamp,DateTime,Severity,Tremor Count,")
     writer.write("X,Y,Z,Magnitude,Accel Magnitude,Confidence,")
     writer.write("Is Worn,Is Charging,Dominant Freq,Tremor Band Power,")
-    writer.write("Total Power,Band Ratio,Peak Prominence,Watch ID\n")
+    writer.write("Total Power,Band Ratio,Peak Prominence,Watch ID,")
+    writer.write("Activity Type,Activity Confidence,Activity Age Ms,")
+    writer.write("Adjusted Severity,Adjusted Confidence,Is Reliable,Exclude From Analysis\n")
 
     // Query database instead of reading JSONL
     val dbHelper = com.opensource.tremorwatch.phone.database.TremorDatabaseHelper(context)
@@ -310,6 +313,11 @@ private suspend fun writeRawDataCsv(writer: FileWriter, context: Context, hoursB
         val dateStr = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US)
             .format(Date(sample.timestamp))
 
+        val metadata = sample.metadataJson?.let {
+            runCatching { JSONObject(it) }.getOrNull()
+        }
+        fun metaValue(key: String): String = metadata?.opt(key)?.toString() ?: ""
+
         writer.write("${sample.timestamp},$dateStr,")
         writer.write("${String.format("%.6f", sample.severity)},${sample.tremorCount},")
         writer.write("${sample.x ?: ""},${sample.y ?: ""},${sample.z ?: ""},")
@@ -317,7 +325,10 @@ private suspend fun writeRawDataCsv(writer: FileWriter, context: Context, hoursB
         writer.write("${sample.isWorn ?: ""},${sample.isCharging ?: ""},")
         writer.write("${sample.dominantFrequency ?: ""},${sample.tremorBandPower ?: ""},")
         writer.write("${sample.totalPower ?: ""},${sample.bandRatio ?: ""},${sample.peakProminence ?: ""},")
-        writer.write("${sample.watchId ?: ""}\n")
+        writer.write("${sample.watchId ?: ""},")
+        writer.write("${metaValue("activityType")},${metaValue("activityConfidence")},${metaValue("activityAgeMs")},")
+        writer.write("${metaValue("activityAdjustedSeverity")},${metaValue("activityAdjustedConfidence")},")
+        writer.write("${metaValue("isReliableMeasurement")},${metaValue("excludeFromAnalysis")}\n")
     }
 }
 

@@ -8,6 +8,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import org.json.JSONObject
 
 /**
  * Helper class for database operations on tremor data.
@@ -29,6 +30,17 @@ class TremorDatabaseHelper(private val context: Context) {
     suspend fun saveBatch(batch: TremorBatch): Boolean = withContext(Dispatchers.IO) {
         try {
             val samples = batch.samples.map { sample ->
+                // Only create JSON if activity metadata exists (FIX #5)
+                val metadataJson = if (sample.metadata.containsKey("activityType")) {
+                    try {
+                        JSONObject(sample.metadata).toString()
+                    } catch (e: Exception) {
+                        null
+                    }
+                } else {
+                    null
+                }
+
                 TremorSample(
                     timestamp = sample.timestamp,
                     severity = sample.severity,
@@ -47,7 +59,7 @@ class TremorDatabaseHelper(private val context: Context) {
                     isCharging = sample.metadata["isCharging"] as? Boolean,
                     confidence = sample.metadata["confidence"] as? Double,
                     watchId = sample.metadata["watch_id"] as? String,
-                    metadataJson = null  // Skip JSON for now - all important fields are extracted
+                    metadataJson = metadataJson
                 )
             }
             

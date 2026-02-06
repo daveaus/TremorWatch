@@ -75,7 +75,26 @@ data class TremorDetectionConfig(
     /** Power threshold below which tremor is classified as "low" */
     val lowTremorThreshold: Float = 0.3f,
     /** Power threshold above which movement is classified as high activity (not tremor) */
-    val highActivityThreshold: Float = 5.0f
+    val highActivityThreshold: Float = 5.0f,
+
+    // === Activity Recognition Filtering ===
+    /** Enable activity-based filtering of tremor confidence/severity */
+    val activityFilteringEnabled: Boolean = true,
+    /** Multipliers applied by detected activity (0-1). */
+    val activityStillMultiplier: Float = 1.0f,
+    val activityTiltingMultiplier: Float = 0.5f,
+    val activityWalkingMultiplier: Float = 0.3f,
+    val activityRunningMultiplier: Float = 0.1f,
+    val activityOnBicycleMultiplier: Float = 0.1f,
+    val activityInVehicleMultiplier: Float = 0.05f,
+    val activityOnFootMultiplier: Float = 0.3f,
+    val activityUnknownMultiplier: Float = 0.7f,
+    /** Confidence thresholds (0-100) */
+    val activityHighConfidenceThreshold: Int = 75,
+    val activityMediumConfidenceThreshold: Int = 60,
+    val activityLowConfidenceThreshold: Int = 40,
+    /** Ignore activity states older than this */
+    val activityStaleThresholdMs: Long = 30_000L
 ) {
     init {
         // Validate logical consistency of parameters
@@ -126,6 +145,26 @@ data class TremorDetectionConfig(
         require(highActivityThreshold > lowTremorThreshold) {
             "High activity threshold must be greater than low tremor threshold"
         }
+
+        // Activity filtering validation
+        require(activityStillMultiplier in 0.0f..1.0f) { "Activity multipliers must be in [0, 1]" }
+        require(activityTiltingMultiplier in 0.0f..1.0f) { "Activity multipliers must be in [0, 1]" }
+        require(activityWalkingMultiplier in 0.0f..1.0f) { "Activity multipliers must be in [0, 1]" }
+        require(activityRunningMultiplier in 0.0f..1.0f) { "Activity multipliers must be in [0, 1]" }
+        require(activityOnBicycleMultiplier in 0.0f..1.0f) { "Activity multipliers must be in [0, 1]" }
+        require(activityInVehicleMultiplier in 0.0f..1.0f) { "Activity multipliers must be in [0, 1]" }
+        require(activityOnFootMultiplier in 0.0f..1.0f) { "Activity multipliers must be in [0, 1]" }
+        require(activityUnknownMultiplier in 0.0f..1.0f) { "Activity multipliers must be in [0, 1]" }
+        require(activityHighConfidenceThreshold in 0..100) { "Activity confidence must be in [0, 100]" }
+        require(activityMediumConfidenceThreshold in 0..100) { "Activity confidence must be in [0, 100]" }
+        require(activityLowConfidenceThreshold in 0..100) { "Activity confidence must be in [0, 100]" }
+        require(activityHighConfidenceThreshold >= activityMediumConfidenceThreshold) {
+            "Activity high confidence must be >= medium confidence"
+        }
+        require(activityMediumConfidenceThreshold >= activityLowConfidenceThreshold) {
+            "Activity medium confidence must be >= low confidence"
+        }
+        require(activityStaleThresholdMs >= 0) { "Activity stale threshold must be >= 0" }
     }
 
     /**
@@ -138,7 +177,7 @@ data class TremorDetectionConfig(
 
     companion object {
         /** Current schema version - increment when adding/removing fields */
-        const val CURRENT_VERSION = 1
+        const val CURRENT_VERSION = 2
 
         /** JSON serializer with pretty printing */
         private val json = Json {

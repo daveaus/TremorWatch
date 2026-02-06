@@ -11,6 +11,8 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.ServiceInfo
+import android.content.pm.PackageManager
+import android.Manifest
 import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
@@ -24,6 +26,7 @@ import android.os.PowerManager
 import android.os.SystemClock
 import timber.log.Timber
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleService
 import com.opensource.tremorwatch.MainActivity
 import com.opensource.tremorwatch.WatchDataSender
@@ -51,6 +54,10 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.*
 import kotlin.math.sqrt
+import com.google.android.gms.location.ActivityRecognition
+import com.google.android.gms.location.ActivityRecognitionClient
+import com.google.android.gms.location.ActivityRecognitionResult
+import com.google.android.gms.location.DetectedActivity
 
 
 /**
@@ -63,6 +70,8 @@ class TremorService : LifecycleService(), SensorEventListener {
 
     companion object {
         // TAG removed - Timber uses class name automatically
+        private const val ACTION_ACTIVITY_UPDATE = "com.opensource.tremorwatch.ACTION_ACTIVITY_UPDATE"
+        private const val ACTIVITY_UPDATE_REQUEST_CODE = 4101
     }
 
     private lateinit var sensorManager: SensorManager
@@ -70,6 +79,11 @@ class TremorService : LifecycleService(), SensorEventListener {
     private var accelerometer: Sensor? = null
     private var offBodySensor: Sensor? = null
     private var wakeLock: PowerManager.WakeLock? = null
+
+    // Activity Recognition
+    private var activityRecognitionClient: ActivityRecognitionClient? = null
+    private var activityUpdatePendingIntent: PendingIntent? = null
+    private var activityUpdatesRegistered = false
 
     // Wear detection and charging state (managed by service, synchronized with engine)
     private var isWatchWorn = true  // Assume worn initially
@@ -219,7 +233,15 @@ class TremorService : LifecycleService(), SensorEventListener {
             // Phase 5b: Tremor type classification
             "tremorType" to data.tremorType,
             "tremorTypeConfidence" to data.tremorTypeConfidence,
-            "isRestingState" to data.isRestingState
+            "isRestingState" to data.isRestingState,
+            // Activity context + filtered values
+            "activityType" to data.activityType,
+            "activityConfidence" to data.activityConfidence,
+            "activityAgeMs" to data.activityAgeMs,
+            "activityAdjustedConfidence" to data.activityAdjustedConfidence,
+            "activityAdjustedSeverity" to data.activityAdjustedSeverity,
+            "isReliableMeasurement" to data.isReliableMeasurement,
+            "excludeFromAnalysis" to data.excludeFromAnalysis
         )
 
         return com.opensource.tremorwatch.shared.models.TremorData(
@@ -841,8 +863,12 @@ class TremorService : LifecycleService(), SensorEventListener {
         configListener = ConfigDataListener(this) { newConfig ->
             Timber.i("Received config update from phone: ${newConfig.profileName}")
             monitoringEngine.setConfig(newConfig)
+            updateActivityRecognitionState(newConfig.activityFilteringEnabled)
         }
         configListener.register()
+
+        // Start activity recognition with default config (can be toggled by config updates)
+        updateActivityRecognitionState(true)
 
         // Clean up old local storage files based on retention period (run in background to avoid blocking onCreate)
         Thread {
@@ -1573,7 +1599,12 @@ class TremorService : LifecycleService(), SensorEventListener {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         super.onStartCommand(intent, flags, startId)  // LifecycleService transitions to STARTED state
-        
+
+        if (intent?.action == ACTION_ACTIVITY_UPDATE) {
+            handleActivityUpdate(intent)
+            return START_STICKY
+        }
+
         val now = System.currentTimeMillis()
         val lastSampleTime = if (::monitoringEngine.isInitialized) {
             monitoringEngine.getLastSampleTime()
@@ -1750,7 +1781,10 @@ class TremorService : LifecycleService(), SensorEventListener {
                 sensorManager.unregisterListener(monitoringEngine)
                 Timber.d("Sensors unregistered")
             }
-            
+
+            // 3b. Stop activity recognition updates
+            stopActivityRecognitionUpdates()
+
             // 4. Shutdown monitoring engine
             if (::monitoringEngine.isInitialized) {
                 monitoringEngine.shutdown()
@@ -1893,7 +1927,92 @@ class TremorService : LifecycleService(), SensorEventListener {
             Timber.e("EMERGENCY: Failed to clear batches: ${e.message}")
         }
     }
-    
+
+    // ====================== ACTIVITY RECOGNITION ======================
+
+    private fun hasActivityRecognitionPermission(): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            ContextCompat.checkSelfPermission(
+                this,
+                Manifest.permission.ACTIVITY_RECOGNITION
+            ) == PackageManager.PERMISSION_GRANTED
+        } else {
+            true
+        }
+    }
+
+    private fun createActivityPendingIntent(): PendingIntent {
+        val intent = Intent(this, TremorService::class.java).apply {
+            action = ACTION_ACTIVITY_UPDATE
+        }
+        return PendingIntent.getService(
+            this,
+            ACTIVITY_UPDATE_REQUEST_CODE,
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+    }
+
+    private fun startActivityRecognitionUpdates() {
+        if (activityUpdatesRegistered) return
+        if (!hasActivityRecognitionPermission()) {
+            Timber.w("Activity Recognition permission not granted - skipping activity updates")
+            return
+        }
+
+        if (activityRecognitionClient == null) {
+            activityRecognitionClient = ActivityRecognition.getClient(this)
+        }
+
+        val pendingIntent = createActivityPendingIntent()
+        activityUpdatePendingIntent = pendingIntent
+
+        try {
+            activityRecognitionClient
+                ?.requestActivityUpdates(MonitoringConstants.ACTIVITY_UPDATE_INTERVAL_MS, pendingIntent)
+                ?.addOnSuccessListener {
+                    activityUpdatesRegistered = true
+                    Timber.i("Activity Recognition updates enabled")
+                }
+                ?.addOnFailureListener { e ->
+                    Timber.e("Failed to request activity updates: ${e.message}", e)
+                }
+        } catch (e: SecurityException) {
+            Timber.e("Missing ACTIVITY_RECOGNITION permission: ${e.message}")
+        }
+    }
+
+    private fun stopActivityRecognitionUpdates() {
+        val pendingIntent = activityUpdatePendingIntent ?: return
+        activityRecognitionClient?.removeActivityUpdates(pendingIntent)
+            ?.addOnSuccessListener {
+                Timber.i("Activity Recognition updates removed")
+                activityRecognitionClient = null
+            }
+        activityUpdatesRegistered = false
+        activityUpdatePendingIntent = null
+    }
+
+    private fun updateActivityRecognitionState(enabled: Boolean) {
+        if (enabled) {
+            startActivityRecognitionUpdates()
+        } else {
+            stopActivityRecognitionUpdates()
+        }
+    }
+
+    private fun handleActivityUpdate(intent: Intent) {
+        if (!ActivityRecognitionResult.hasResult(intent)) return
+        val result = ActivityRecognitionResult.extractResult(intent) ?: return
+        val activity = result.mostProbableActivity
+
+        if (::monitoringEngine.isInitialized) {
+            monitoringEngine.updateActivity(activity.type, activity.confidence, System.currentTimeMillis())
+        }
+
+        Timber.d("Activity update: ${activity.type} (${activity.confidence}%)")
+    }
+
     // Note: onBind() is not overridden - LifecycleService provides default implementation
     // This is a started service, not a bound service
 }
