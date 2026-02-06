@@ -15,6 +15,10 @@
 .agent/
 .claude/
 
+# Syncthing
+.stfolder/
+.stignore
+
 # Screenshots and temporary files
 *.png
 !app/src/main/res/**/ic_launcher*.png
