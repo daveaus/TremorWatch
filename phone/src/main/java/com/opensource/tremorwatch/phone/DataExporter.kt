@@ -3,6 +3,7 @@ package com.opensource.tremorwatch.phone
 import android.content.Context
 import android.util.Log
 import com.opensource.tremorwatch.phone.database.TremorDatabaseHelper
+import org.json.JSONObject
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.*
@@ -47,14 +48,26 @@ object DataExporter {
 
             // Build CSV content
             val csvLines = mutableListOf<String>()
-            val csvHeader = "Timestamp,Unix Timestamp (ms),Severity,Tremor Count"
+            val csvHeader = "Timestamp,Unix Timestamp (ms),Severity,Tremor Count," +
+                "Activity Type,Activity Confidence,Activity Age Ms," +
+                "Adjusted Severity,Adjusted Confidence,Is Reliable,Exclude From Analysis"
             csvLines.add(csvHeader)
 
             var recordCount = 0
 
             samples.sortedBy { it.timestamp }.forEach { sample ->
                 val dateStr = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US).format(Date(sample.timestamp))
-                val csvLine = "$dateStr,${sample.timestamp},${sample.severity},${sample.tremorCount}"
+                val metadata = parseMetadata(sample.metadataJson)
+                val csvLine = buildString {
+                    append("$dateStr,${sample.timestamp},${sample.severity},${sample.tremorCount},")
+                    append("${metaValue(metadata, "activityType")},")
+                    append("${metaValue(metadata, "activityConfidence")},")
+                    append("${metaValue(metadata, "activityAgeMs")},")
+                    append("${metaValue(metadata, "activityAdjustedSeverity")},")
+                    append("${metaValue(metadata, "activityAdjustedConfidence")},")
+                    append("${metaValue(metadata, "isReliableMeasurement")},")
+                    append("${metaValue(metadata, "excludeFromAnalysis")}")
+                }
                 csvLines.add(csvLine)
                 recordCount++
             }
@@ -108,14 +121,26 @@ object DataExporter {
             val csvFile = File(context.getExternalFilesDir(null) ?: context.filesDir, "tremorwatch_export_${timestamp}_filtered.csv")
 
             val csvLines = mutableListOf<String>()
-            val csvHeader = "Timestamp,Unix Timestamp (ms),Severity,Tremor Count"
+            val csvHeader = "Timestamp,Unix Timestamp (ms),Severity,Tremor Count," +
+                "Activity Type,Activity Confidence,Activity Age Ms," +
+                "Adjusted Severity,Adjusted Confidence,Is Reliable,Exclude From Analysis"
             csvLines.add(csvHeader)
 
             var recordCount = 0
 
             samples.sortedBy { it.timestamp }.forEach { sample ->
                 val dateStr = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US).format(Date(sample.timestamp))
-                val csvLine = "$dateStr,${sample.timestamp},${sample.severity},${sample.tremorCount}"
+                val metadata = parseMetadata(sample.metadataJson)
+                val csvLine = buildString {
+                    append("$dateStr,${sample.timestamp},${sample.severity},${sample.tremorCount},")
+                    append("${metaValue(metadata, "activityType")},")
+                    append("${metaValue(metadata, "activityConfidence")},")
+                    append("${metaValue(metadata, "activityAgeMs")},")
+                    append("${metaValue(metadata, "activityAdjustedSeverity")},")
+                    append("${metaValue(metadata, "activityAdjustedConfidence")},")
+                    append("${metaValue(metadata, "isReliableMeasurement")},")
+                    append("${metaValue(metadata, "excludeFromAnalysis")}")
+                }
                 csvLines.add(csvLine)
                 recordCount++
             }
@@ -193,4 +218,15 @@ object DataExporter {
         val newestTimestamp: Long,
         val fileSizeKB: Double
     )
+
+    private fun parseMetadata(metadataJson: String?): JSONObject? {
+        return metadataJson?.let { runCatching { JSONObject(it) }.getOrNull() }
+    }
+
+    private fun metaValue(metadata: JSONObject?, key: String): String {
+        if (metadata == null || !metadata.has(key) || metadata.isNull(key)) {
+            return ""
+        }
+        return metadata.opt(key)?.toString() ?: ""
+    }
 }

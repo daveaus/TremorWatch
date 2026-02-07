@@ -2018,7 +2018,19 @@ class TremorService : LifecycleService(), SensorEventListener {
             monitoringEngine.updateActivity(activity.type, activity.confidence, System.currentTimeMillis())
         }
 
-        Timber.d("Activity update: ${activity.type} (${activity.confidence}%)")
+        Timber.d("Activity update: ${getActivityName(activity.type)} (${activity.confidence}%)")
+    }
+
+    private fun getActivityName(type: Int): String = when (type) {
+        DetectedActivity.STILL -> "still"
+        DetectedActivity.WALKING -> "walking"
+        DetectedActivity.RUNNING -> "running"
+        DetectedActivity.ON_BICYCLE -> "on_bicycle"
+        DetectedActivity.IN_VEHICLE -> "in_vehicle"
+        DetectedActivity.TILTING -> "tilting"
+        DetectedActivity.ON_FOOT -> "on_foot"
+        DetectedActivity.UNKNOWN -> "unknown"
+        else -> "unknown"
     }
 
     // Note: onBind() is not overridden - LifecycleService provides default implementation

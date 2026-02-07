@@ -29,7 +29,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
 import android.content.Intent
-import com.opensource.tremorwatch.phone.loadLocalData
+import com.opensource.tremorwatch.phone.database.TremorDatabaseHelper
+import com.opensource.tremorwatch.phone.database.TremorSample
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -38,8 +39,6 @@ import java.io.FileWriter
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-import com.opensource.tremorwatch.phone.ChartData
-import com.opensource.tremorwatch.shared.models.TremorBatch
 import org.json.JSONObject
 
 /**
@@ -195,10 +194,17 @@ suspend fun exportData(context: Context, timeRange: String, format: String): Str
                 else -> 24
             }
 
-            // Load data
-            val data = loadLocalData(context, hoursBack)
+            val dbHelper = TremorDatabaseHelper(context)
+            val cutoffTime = if (hoursBack == Int.MAX_VALUE) 0L else {
+                System.currentTimeMillis() - (hoursBack.toLong() * 60 * 60 * 1000)
+            }
+            val samples = if (hoursBack == Int.MAX_VALUE) {
+                dbHelper.getAllSamples()
+            } else {
+                dbHelper.getSamplesAfter(cutoffTime)
+            }
 
-            if (data.isEmpty()) {
+            if (samples.isEmpty()) {
                 return@withContext "No data available for export"
             }
 
@@ -207,13 +213,12 @@ suspend fun exportData(context: Context, timeRange: String, format: String): Str
             val fileName = "tremorwatch_${format.lowercase().replace(" ", "_")}_${timestamp}.csv"
             val exportFile = File(context.cacheDir, fileName)
 
-            // Write CSV
-            FileWriter(exportFile).use { writer ->
+            val recordCount = FileWriter(exportFile).use { writer ->
                 when (format) {
-                    "Summary" -> writeSummaryCsv(writer, data)
-                    "Detailed" -> writeDetailedCsv(writer, data)
-                    "Raw Data" -> writeRawDataCsv(writer, context, hoursBack)
-                    else -> writeDetailedCsv(writer, data)
+                    "Summary" -> writeSummaryCsv(writer, samples)
+                    "Detailed" -> writeDetailedCsv(writer, samples)
+                    "Raw Data" -> writeRawDataCsv(writer, samples)
+                    else -> writeDetailedCsv(writer, samples)
                 }
             }
 
@@ -234,7 +239,7 @@ suspend fun exportData(context: Context, timeRange: String, format: String): Str
                 context.startActivity(Intent.createChooser(shareIntent, "Share Tremor Data"))
             }
 
-            "Success! Exported ${data.size} records"
+            "Success! Exported $recordCount records"
         } catch (e: Exception) {
             "Error: ${e.message}"
         }
@@ -244,49 +249,74 @@ suspend fun exportData(context: Context, timeRange: String, format: String): Str
 /**
  * Write summary CSV (aggregated by hour)
  */
-private fun writeSummaryCsv(writer: FileWriter, data: List<ChartData>) {
+private fun writeSummaryCsv(writer: FileWriter, samples: List<TremorSample>): Int {
     // Write experimental disclaimer
     writer.write("# EXPERIMENTAL DATA - NOT FOR MEDICAL USE\n")
     writer.write("# This data is from experimental software and should not be used for diagnosis or treatment\n")
     writer.write("#\n")
-    writer.write("Hour,Avg Severity,Max Severity,Tremor Events,Duration Minutes\n")
+    writer.write("Hour,Avg Severity,Max Severity,Tremor Events,Duration Minutes,")
+    writer.write("Activity Type,Avg Activity Confidence,Avg Adjusted Severity,Avg Adjusted Confidence,")
+    writer.write("Reliable %,Exclude %\n")
 
     // Group by hour
-    val grouped = data.groupBy { it.timestamp / (60 * 60 * 1000) }
+    val hourMs = 60 * 60 * 1000L
+    val grouped = samples.groupBy { it.timestamp / hourMs }
     grouped.entries.sortedBy { it.key }.forEach { (hour, records) ->
         val avgSeverity = records.map { it.severity }.average()
         val maxSeverity = records.maxOfOrNull { it.severity } ?: 0.0
         val tremorEvents = records.sumOf { it.tremorCount }
-        val durationMinutes = records.size
+        val durationMinutes = records.map { it.timestamp / 60000L }.distinct().size
+        val activitySummary = summarizeActivity(records)
 
         val dateStr = SimpleDateFormat("yyyy-MM-dd HH:00", Locale.US)
-            .format(Date(hour * 60 * 60 * 1000))
+            .format(Date(hour * hourMs))
 
-        writer.write("$dateStr,${String.format("%.4f", avgSeverity)},${String.format("%.4f", maxSeverity)},$tremorEvents,$durationMinutes\n")
+        val avgActivityConfidence = activitySummary.avgConfidence?.let { String.format("%.3f", it) } ?: ""
+        val avgAdjustedSeverity = activitySummary.avgAdjustedSeverity?.let { String.format("%.4f", it) } ?: ""
+        val avgAdjustedConfidence = activitySummary.avgAdjustedConfidence?.let { String.format("%.4f", it) } ?: ""
+        val reliablePct = activitySummary.reliablePct?.let { String.format("%.1f", it) } ?: ""
+        val excludePct = activitySummary.excludePct?.let { String.format("%.1f", it) } ?: ""
+
+        writer.write(
+            "$dateStr,${String.format("%.4f", avgSeverity)},${String.format("%.4f", maxSeverity)}," +
+                "$tremorEvents,$durationMinutes," +
+                "${activitySummary.dominantType},$avgActivityConfidence," +
+                "$avgAdjustedSeverity,$avgAdjustedConfidence,$reliablePct,$excludePct\n"
+        )
     }
+    return grouped.size
 }
 
 /**
  * Write detailed CSV with all data points
  */
-private fun writeDetailedCsv(writer: FileWriter, data: List<ChartData>) {
+private fun writeDetailedCsv(writer: FileWriter, samples: List<TremorSample>): Int {
     // Write experimental disclaimer
     writer.write("# EXPERIMENTAL DATA - NOT FOR MEDICAL USE\n")
     writer.write("# This data is from experimental software and should not be used for diagnosis or treatment\n")
     writer.write("#\n")
-    writer.write("Timestamp,DateTime,Severity,Tremor Count\n")
+    writer.write("Timestamp,DateTime,Severity,Tremor Count,")
+    writer.write("Activity Type,Activity Confidence,Activity Age Ms,")
+    writer.write("Adjusted Severity,Adjusted Confidence,Is Reliable,Exclude From Analysis\n")
 
-    data.sortedBy { it.timestamp }.forEach { record ->
+    samples.sortedBy { it.timestamp }.forEach { record ->
         val dateStr = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
             .format(Date(record.timestamp))
-        writer.write("${record.timestamp},$dateStr,${String.format("%.6f", record.severity)},${record.tremorCount}\n")
+
+        val metadata = parseMetadata(record.metadataJson)
+        writer.write("${record.timestamp},$dateStr,${String.format("%.6f", record.severity)},${record.tremorCount},")
+        writer.write("${metaValue(metadata, "activityType")},${metaValue(metadata, "activityConfidence")},")
+        writer.write("${metaValue(metadata, "activityAgeMs")},")
+        writer.write("${metaValue(metadata, "activityAdjustedSeverity")},${metaValue(metadata, "activityAdjustedConfidence")},")
+        writer.write("${metaValue(metadata, "isReliableMeasurement")},${metaValue(metadata, "excludeFromAnalysis")}\n")
     }
+    return samples.size
 }
 
 /**
  * Write raw data CSV with all available fields from database
  */
-private suspend fun writeRawDataCsv(writer: FileWriter, context: Context, hoursBack: Int) {
+private fun writeRawDataCsv(writer: FileWriter, samples: List<TremorSample>): Int {
     // Write experimental disclaimer
     writer.write("# EXPERIMENTAL DATA - NOT FOR MEDICAL USE\n")
     writer.write("# This data is from experimental software and should not be used for diagnosis or treatment\n")
@@ -299,24 +329,11 @@ private suspend fun writeRawDataCsv(writer: FileWriter, context: Context, hoursB
     writer.write("Activity Type,Activity Confidence,Activity Age Ms,")
     writer.write("Adjusted Severity,Adjusted Confidence,Is Reliable,Exclude From Analysis\n")
 
-    // Query database instead of reading JSONL
-    val dbHelper = com.opensource.tremorwatch.phone.database.TremorDatabaseHelper(context)
-    val cutoffTime = if (hoursBack == Int.MAX_VALUE) 0L else System.currentTimeMillis() - (hoursBack.toLong() * 60 * 60 * 1000)
-    
-    val samples = if (hoursBack == Int.MAX_VALUE) {
-        dbHelper.getAllSamples()
-    } else {
-        dbHelper.getSamplesAfter(cutoffTime)
-    }
-
     samples.sortedBy { it.timestamp }.forEach { sample ->
         val dateStr = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US)
             .format(Date(sample.timestamp))
 
-        val metadata = sample.metadataJson?.let {
-            runCatching { JSONObject(it) }.getOrNull()
-        }
-        fun metaValue(key: String): String = metadata?.opt(key)?.toString() ?: ""
+        val metadata = parseMetadata(sample.metadataJson)
 
         writer.write("${sample.timestamp},$dateStr,")
         writer.write("${String.format("%.6f", sample.severity)},${sample.tremorCount},")
@@ -326,9 +343,114 @@ private suspend fun writeRawDataCsv(writer: FileWriter, context: Context, hoursB
         writer.write("${sample.dominantFrequency ?: ""},${sample.tremorBandPower ?: ""},")
         writer.write("${sample.totalPower ?: ""},${sample.bandRatio ?: ""},${sample.peakProminence ?: ""},")
         writer.write("${sample.watchId ?: ""},")
-        writer.write("${metaValue("activityType")},${metaValue("activityConfidence")},${metaValue("activityAgeMs")},")
-        writer.write("${metaValue("activityAdjustedSeverity")},${metaValue("activityAdjustedConfidence")},")
-        writer.write("${metaValue("isReliableMeasurement")},${metaValue("excludeFromAnalysis")}\n")
+        writer.write("${metaValue(metadata, "activityType")},${metaValue(metadata, "activityConfidence")},${metaValue(metadata, "activityAgeMs")},")
+        writer.write("${metaValue(metadata, "activityAdjustedSeverity")},${metaValue(metadata, "activityAdjustedConfidence")},")
+        writer.write("${metaValue(metadata, "isReliableMeasurement")},${metaValue(metadata, "excludeFromAnalysis")}\n")
+    }
+    return samples.size
+}
+
+private data class ActivitySummary(
+    val dominantType: String,
+    val avgConfidence: Double?,
+    val avgAdjustedSeverity: Double?,
+    val avgAdjustedConfidence: Double?,
+    val reliablePct: Double?,
+    val excludePct: Double?
+)
+
+private fun summarizeActivity(records: List<TremorSample>): ActivitySummary {
+    val activityCounts = mutableMapOf<String, Int>()
+    var confidenceSum = 0.0
+    var confidenceCount = 0
+    var adjustedSeveritySum = 0.0
+    var adjustedSeverityCount = 0
+    var adjustedConfidenceSum = 0.0
+    var adjustedConfidenceCount = 0
+    var reliableCount = 0
+    var reliableSamples = 0
+    var excludeCount = 0
+    var excludeSamples = 0
+
+    records.forEach { sample ->
+        val metadata = parseMetadata(sample.metadataJson)
+        val activityType = metaValue(metadata, "activityType")
+        if (activityType.isNotBlank()) {
+            activityCounts[activityType] = (activityCounts[activityType] ?: 0) + 1
+        }
+
+        optDouble(metadata, "activityConfidence")?.let {
+            confidenceSum += it
+            confidenceCount++
+        }
+        optDouble(metadata, "activityAdjustedSeverity")?.let {
+            adjustedSeveritySum += it
+            adjustedSeverityCount++
+        }
+        optDouble(metadata, "activityAdjustedConfidence")?.let {
+            adjustedConfidenceSum += it
+            adjustedConfidenceCount++
+        }
+        optBoolean(metadata, "isReliableMeasurement")?.let { reliable ->
+            reliableSamples++
+            if (reliable) reliableCount++
+        }
+        optBoolean(metadata, "excludeFromAnalysis")?.let { exclude ->
+            excludeSamples++
+            if (exclude) excludeCount++
+        }
+    }
+
+    val dominantType = activityCounts.maxByOrNull { it.value }?.key ?: ""
+    val avgConfidence = if (confidenceCount > 0) confidenceSum / confidenceCount else null
+    val avgAdjustedSeverity = if (adjustedSeverityCount > 0) adjustedSeveritySum / adjustedSeverityCount else null
+    val avgAdjustedConfidence = if (adjustedConfidenceCount > 0) adjustedConfidenceSum / adjustedConfidenceCount else null
+    val reliablePct = if (reliableSamples > 0) (reliableCount.toDouble() / reliableSamples) * 100.0 else null
+    val excludePct = if (excludeSamples > 0) (excludeCount.toDouble() / excludeSamples) * 100.0 else null
+
+    return ActivitySummary(
+        dominantType = dominantType,
+        avgConfidence = avgConfidence,
+        avgAdjustedSeverity = avgAdjustedSeverity,
+        avgAdjustedConfidence = avgAdjustedConfidence,
+        reliablePct = reliablePct,
+        excludePct = excludePct
+    )
+}
+
+private fun parseMetadata(metadataJson: String?): JSONObject? {
+    return metadataJson?.let { runCatching { JSONObject(it) }.getOrNull() }
+}
+
+private fun metaValue(metadata: JSONObject?, key: String): String {
+    if (metadata == null || !metadata.has(key) || metadata.isNull(key)) {
+        return ""
+    }
+    return metadata.opt(key)?.toString() ?: ""
+}
+
+private fun optDouble(metadata: JSONObject?, key: String): Double? {
+    if (metadata == null || !metadata.has(key) || metadata.isNull(key)) {
+        return null
+    }
+    val raw = metadata.opt(key)
+    return when (raw) {
+        is Number -> raw.toDouble()
+        is String -> raw.toDoubleOrNull()
+        else -> null
+    }
+}
+
+private fun optBoolean(metadata: JSONObject?, key: String): Boolean? {
+    if (metadata == null || !metadata.has(key) || metadata.isNull(key)) {
+        return null
+    }
+    val raw = metadata.opt(key)
+    return when (raw) {
+        is Boolean -> raw
+        is Number -> raw.toInt() != 0
+        is String -> raw.equals("true", ignoreCase = true)
+        else -> null
     }
 }
 
