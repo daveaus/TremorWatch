@@ -16,6 +16,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.opensource.tremorwatch.phone.config.RatingConfigManager
 import kotlinx.coroutines.launch
 import timber.log.Timber
 
@@ -34,6 +35,7 @@ fun RatingConfigScreen(
 ) {
     val context = LocalContext.current
     val prefs = remember { context.getSharedPreferences("rating_config", Context.MODE_PRIVATE) }
+    val configManager = remember { RatingConfigManager(context) }
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
     
@@ -62,6 +64,13 @@ fun RatingConfigScreen(
     
     // Track if any setting has changed
     var hasChanges by remember { mutableStateOf(false) }
+
+    LaunchedEffect(Unit) {
+        val status = configManager.syncToWatch()
+        if (status != RatingConfigManager.SyncStatus.SYNCED) {
+            Timber.w("Initial rating config sync failed")
+        }
+    }
     
     fun saveSettings() {
         prefs.edit().apply {
@@ -168,7 +177,13 @@ fun RatingConfigScreen(
                     onClick = {
                         saveSettings()
                         scope.launch {
-                            snackbarHostState.showSnackbar("Settings saved")
+                            val status = configManager.syncToWatch()
+                            val message = if (status == RatingConfigManager.SyncStatus.SYNCED) {
+                                "Settings saved and synced to watch"
+                            } else {
+                                "Settings saved locally (watch sync failed)"
+                            }
+                            snackbarHostState.showSnackbar(message)
                         }
                     },
                     enabled = hasChanges,
@@ -216,7 +231,7 @@ private fun RatingPromptSection(
                 IntSliderSetting(
                     label = "Maximum Daily Prompts",
                     value = dailyMax,
-                    range = 1..10,
+                    range = 1..30,
                     help = "Maximum prompts per day",
                     onValueChange = onDailyMaxChange
                 )

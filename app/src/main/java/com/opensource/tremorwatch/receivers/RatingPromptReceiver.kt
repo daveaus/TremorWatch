@@ -1,12 +1,15 @@
 package com.opensource.tremorwatch.receivers
 
 import android.app.AlarmManager
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.os.SystemClock
+import androidx.core.app.NotificationCompat
 import timber.log.Timber
 import java.text.SimpleDateFormat
 import java.util.*
@@ -27,14 +30,27 @@ class RatingPromptReceiver : BroadcastReceiver() {
         private const val KEY_PROMPTS_TODAY = "prompts_today"
         private const val KEY_PROMPTS_TODAY_DATE = "prompts_today_date"
         private const val KEY_MAX_DAILY_PROMPTS = "max_daily_prompts"
+        private const val KEY_MIN_INTERVAL_MINUTES = "min_interval_minutes"
+        private const val KEY_PROMPTS_ENABLED = "prompts_enabled"
+        private const val KEY_NEXT_PROMPT_ELAPSED = "next_prompt_elapsed"
         private const val DEFAULT_MAX_DAILY_PROMPTS = 6
+        private const val DEFAULT_MIN_INTERVAL_MINUTES = 60
         private const val REQUEST_CODE = 3  // Same as used in TremorService
+        private const val RATING_CHANNEL_ID = "rating_prompts"
 
         /**
          * Schedule the next rating prompt alarm.
          * Called after each prompt fires to schedule the next one.
          */
         fun scheduleNextPrompt(context: Context) {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            val promptsEnabled = prefs.getBoolean(KEY_PROMPTS_ENABLED, true)
+            if (!promptsEnabled) {
+                Timber.i("Rating prompts disabled - not scheduling next prompt")
+                cancelPrompt(context)
+                return
+            }
+
             val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
             val intent = Intent(context, RatingPromptReceiver::class.java).apply {
                 action = ACTION_RATING_PROMPT
@@ -46,10 +62,9 @@ class RatingPromptReceiver : BroadcastReceiver() {
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
             )
 
-            // Random interval between 2-3 hours for natural prompting
-            val baseIntervalMs = 2 * 60 * 60 * 1000L  // 2 hours
-            val randomExtra = (0..60).random() * 60 * 1000L  // 0-60 minutes extra
-            val intervalMs = baseIntervalMs + randomExtra
+            val minIntervalMinutes = prefs.getInt(KEY_MIN_INTERVAL_MINUTES, DEFAULT_MIN_INTERVAL_MINUTES)
+            val safeIntervalMinutes = maxOf(15, minIntervalMinutes)
+            val intervalMs = safeIntervalMinutes * 60 * 1000L
             val triggerAtMillis = SystemClock.elapsedRealtime() + intervalMs
 
             // Calculate wall clock time for logging
@@ -82,16 +97,72 @@ class RatingPromptReceiver : BroadcastReceiver() {
                 Timber.i("★★★ Next rating prompt scheduled (exact) - in $intervalMinutes minutes at ~$triggerTimeFormatted")
             }
         }
+
+        fun cancelPrompt(context: Context) {
+            val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+            val intent = Intent(context, RatingPromptReceiver::class.java).apply {
+                action = ACTION_RATING_PROMPT
+            }
+            val pendingIntent = PendingIntent.getBroadcast(
+                context,
+                REQUEST_CODE,
+                intent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+            alarmManager.cancel(pendingIntent)
+            Timber.i("Rating prompt alarm cancelled")
+        }
+
+        fun applyConfig(
+            context: Context,
+            promptsEnabled: Boolean,
+            minIntervalMinutes: Int,
+            maxDailyPrompts: Int,
+            activeStartHour: Int,
+            activeEndHour: Int,
+            scheduleAlarm: Boolean = true
+        ) {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            prefs.edit()
+                .putBoolean(KEY_PROMPTS_ENABLED, promptsEnabled)
+                .putInt(KEY_MIN_INTERVAL_MINUTES, minIntervalMinutes)
+                .putInt(KEY_MAX_DAILY_PROMPTS, maxDailyPrompts)
+                .putInt(KEY_ACTIVE_HOURS_START, activeStartHour)
+                .putInt(KEY_ACTIVE_HOURS_END, activeEndHour)
+                .apply()
+
+            if (scheduleAlarm) {
+                if (promptsEnabled) {
+                    scheduleNextPrompt(context)
+                } else {
+                    cancelPrompt(context)
+                }
+            }
+        }
     }
 
 
     override fun onReceive(context: Context, intent: Intent) {
         Timber.d("Rating prompt receiver triggered")
-        
+
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val promptsEnabled = prefs.getBoolean(KEY_PROMPTS_ENABLED, true)
+        if (!promptsEnabled) {
+            Timber.i("Rating prompt skipped - prompts disabled")
+            cancelPrompt(context)
+            return
+        }
+
+        val nowElapsed = SystemClock.elapsedRealtime()
+        val nextElapsed = prefs.getLong(KEY_NEXT_PROMPT_ELAPSED, 0L)
+        if (nextElapsed > nowElapsed) {
+            Timber.d("Rating prompt skipped - next prompt not due yet")
+            return
+        }
+
         // Always schedule the next prompt first, regardless of whether we show this one
         scheduleNextPrompt(context)
-        
-        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+
         val today = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
         
         // Check "don't ask today" setting
@@ -127,24 +198,62 @@ class RatingPromptReceiver : BroadcastReceiver() {
             return
         }
         
-        // Increment prompt count
-        prefs.edit().putInt(KEY_PROMPTS_TODAY, promptsToday + 1).apply()
-        
-        // Launch rating activity
+        // Increment prompt count and record next prompt time
+        val minIntervalMinutes = prefs.getInt(KEY_MIN_INTERVAL_MINUTES, DEFAULT_MIN_INTERVAL_MINUTES)
+        val safeIntervalMinutes = maxOf(15, minIntervalMinutes)
+        val nextPromptElapsed = nowElapsed + (safeIntervalMinutes * 60 * 1000L)
+        prefs.edit()
+            .putInt(KEY_PROMPTS_TODAY, promptsToday + 1)
+            .putLong(KEY_NEXT_PROMPT_ELAPSED, nextPromptElapsed)
+            .commit()
+
+        // Launch rating activity via full-screen notification
         Timber.i("Showing rating prompt (${promptsToday + 1}/$maxDailyPrompts today)")
-        launchRatingScreen(context, "PROMPTED")
+        showRatingNotification(context, "PROMPTED")
     }
     
-    private fun launchRatingScreen(context: Context, source: String) {
+    private fun ensureRatingChannel(context: Context) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            val channel = NotificationChannel(
+                RATING_CHANNEL_ID,
+                "Rating Prompts",
+                NotificationManager.IMPORTANCE_HIGH
+            ).apply {
+                description = "Subjective rating prompts"
+            }
+            manager.createNotificationChannel(channel)
+        }
+    }
+
+    private fun showRatingNotification(context: Context, source: String) {
         try {
+            ensureRatingChannel(context)
             val activityIntent = Intent().apply {
                 setClassName(context.packageName, "com.opensource.tremorwatch.RatingActivity")
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
                 putExtra("source", source)
             }
-            context.startActivity(activityIntent)
+            val pendingIntent = PendingIntent.getActivity(
+                context,
+                REQUEST_CODE,
+                activityIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+            val notification = NotificationCompat.Builder(context, RATING_CHANNEL_ID)
+                .setSmallIcon(android.R.drawable.ic_dialog_info)
+                .setContentTitle("Time to rate")
+                .setContentText("How are you feeling?")
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setCategory(NotificationCompat.CATEGORY_ALARM)
+                .setAutoCancel(true)
+                .setContentIntent(pendingIntent)
+                .setFullScreenIntent(pendingIntent, true)
+                .build()
+            val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            manager.notify(REQUEST_CODE, notification)
         } catch (e: Exception) {
-            Timber.e(e, "Failed to launch rating screen: ${e.message}")
+            Timber.e(e, "Failed to show rating notification: ${e.message}")
         }
     }
     

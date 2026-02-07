@@ -31,6 +31,7 @@
 
     <!-- Battery optimization exemption for 24/7 monitoring -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
 
     <!-- Declare this is a Wear OS app -->
     <uses-feature android:name="android.hardware.type.watch" />

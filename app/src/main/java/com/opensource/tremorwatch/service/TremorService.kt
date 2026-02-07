@@ -37,6 +37,7 @@ import com.opensource.tremorwatch.shared.models.TremorBatch
 import com.opensource.tremorwatch.config.MonitoringState
 import com.opensource.tremorwatch.config.DataConfig
 import com.opensource.tremorwatch.config.ConfigDataListener
+import com.opensource.tremorwatch.config.RatingConfigDataListener
 import com.opensource.tremorwatch.receivers.ServiceWatchdogReceiver
 import com.opensource.tremorwatch.receivers.UploadAlarmReceiver
 import com.opensource.tremorwatch.receivers.BatchRetryAlarmReceiver
@@ -46,6 +47,7 @@ import com.opensource.tremorwatch.constants.MonitoringConstants
 import com.opensource.tremorwatch.data.PreferencesRepository
 import com.opensource.tremorwatch.data.CalibrationCaptureManager
 import com.opensource.tremorwatch.data.CalibrationSample
+import com.opensource.tremorwatch.shared.models.RatingConfig
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
@@ -72,6 +74,17 @@ class TremorService : LifecycleService(), SensorEventListener {
         // TAG removed - Timber uses class name automatically
         private const val ACTION_ACTIVITY_UPDATE = "com.opensource.tremorwatch.ACTION_ACTIVITY_UPDATE"
         private const val ACTIVITY_UPDATE_REQUEST_CODE = 4101
+        private const val RATING_PREFS_NAME = "rating_prefs"
+        private const val KEY_PROMPTS_ENABLED = "prompts_enabled"
+        private const val KEY_MIN_INTERVAL_MINUTES = "min_interval_minutes"
+        private const val KEY_MAX_DAILY_PROMPTS = "max_daily_prompts"
+        private const val KEY_PROMPTS_TODAY = "prompts_today"
+        private const val KEY_PROMPTS_TODAY_DATE = "prompts_today_date"
+        private const val KEY_DONT_ASK_DATE = "dont_ask_date"
+        private const val KEY_ACTIVE_HOURS_START = "active_hours_start"
+        private const val KEY_ACTIVE_HOURS_END = "active_hours_end"
+        private const val KEY_NEXT_PROMPT_ELAPSED = "next_prompt_elapsed"
+        private const val RATING_CHANNEL_ID = "rating_prompts"
     }
 
     private lateinit var sensorManager: SensorManager
@@ -87,6 +100,7 @@ class TremorService : LifecycleService(), SensorEventListener {
     private var activityFilteringEnabled = true
     private var lastLoggedActivityType = DetectedActivity.UNKNOWN
     private var lastLoggedActivityConfidenceBucket = -1
+    private val ratingPromptHandler = Handler(Looper.getMainLooper())
 
     // Wear detection and charging state (managed by service, synchronized with engine)
     private var isWatchWorn = true  // Assume worn initially
@@ -107,6 +121,9 @@ class TremorService : LifecycleService(), SensorEventListener {
 
         // Config listener - receives detection algorithm config from phone
         private lateinit var configListener: ConfigDataListener
+
+        // Rating config listener - receives subjective rating settings from phone
+        private lateinit var ratingConfigListener: RatingConfigDataListener
 
         // Preferences repository for state management
         private lateinit var preferencesRepository: PreferencesRepository
@@ -142,6 +159,12 @@ class TremorService : LifecycleService(), SensorEventListener {
         override fun run() {
             checkBatteryOptimizationStatus()
             batteryOptMonitorHandler.postDelayed(this, 60000L) // Check every 60 seconds
+        }
+    }
+
+    private val ratingPromptRunnable = object : Runnable {
+        override fun run() {
+            ensureRatingPromptScheduled()
         }
     }
 
@@ -792,8 +815,9 @@ class TremorService : LifecycleService(), SensorEventListener {
         // Set up batch retry alarm to ensure pending batches get sent even if process is killed
         scheduleBatchRetryAlarm()
 
-        // Set up rating prompt alarm for periodic subjective rating prompts
-        scheduleRatingPromptAlarm()
+        // Disable legacy alarm-based prompts; service scheduler handles prompts on Wear OS
+        cancelRatingPromptAlarm()
+        scheduleNextRatingPromptTick()
 
             // Initialize preferences repository
             preferencesRepository = PreferencesRepository(this)
@@ -870,6 +894,12 @@ class TremorService : LifecycleService(), SensorEventListener {
             updateActivityRecognitionState(activityFilteringEnabled)
         }
         configListener.register()
+
+        ratingConfigListener = RatingConfigDataListener(this) { ratingConfig ->
+            Timber.i("Received rating config update from phone")
+            applyRatingConfig(ratingConfig)
+        }
+        ratingConfigListener.register()
 
         // Clean up old local storage files based on retention period (run in background to avoid blocking onCreate)
         Thread {
@@ -1229,71 +1259,158 @@ class TremorService : LifecycleService(), SensorEventListener {
     /**
      * Schedule periodic rating prompts.
      * 
-     * Uses a 2-3 hour random interval to avoid predictable prompt timing.
+     * Uses the configured minimum interval from rating prefs.
      * The RatingPromptReceiver handles additional checks (active hours, daily limits, etc.).
      */
     private fun scheduleRatingPromptAlarm() {
-        val alarmManager = getSystemService(Context.ALARM_SERVICE) as AlarmManager
-        val intent = Intent(this, RatingPromptReceiver::class.java).apply {
-            action = RatingPromptReceiver.ACTION_RATING_PROMPT
-        }
-        val pendingIntent = PendingIntent.getBroadcast(
-            this,
-            3,  // Different request code from watchdog(0), upload(1), and batch retry(2)
-            intent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-
-        // Random interval between 2-3 hours for natural prompting
-        val baseIntervalMs = 2 * 60 * 60 * 1000L  // 2 hours
-        val randomExtra = (0..60).random() * 60 * 1000L  // 0-60 minutes extra
-        val intervalMs = baseIntervalMs + randomExtra
-        val triggerAtMillis = SystemClock.elapsedRealtime() + intervalMs
-
-        // Calculate wall clock time for logging
-        val triggerTime = System.currentTimeMillis() + intervalMs
-        val triggerTimeFormatted = SimpleDateFormat("HH:mm:ss", Locale.US).format(Date(triggerTime))
-        val intervalMinutes = intervalMs / (60 * 1000)
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            if (alarmManager.canScheduleExactAlarms()) {
-                alarmManager.setExactAndAllowWhileIdle(
-                    AlarmManager.ELAPSED_REALTIME_WAKEUP,
-                    triggerAtMillis,
-                    pendingIntent
-                )
-                Timber.i("★★★ Rating prompt alarm scheduled (exact) - next prompt in $intervalMinutes minutes at ~$triggerTimeFormatted")
-            } else {
-                alarmManager.setAndAllowWhileIdle(
-                    AlarmManager.ELAPSED_REALTIME_WAKEUP,
-                    triggerAtMillis,
-                    pendingIntent
-                )
-                Timber.w("★★★ Rating prompt alarm scheduled (inexact) - next prompt in ~$intervalMinutes minutes around $triggerTimeFormatted")
-            }
-        } else {
-            alarmManager.setExactAndAllowWhileIdle(
-                AlarmManager.ELAPSED_REALTIME_WAKEUP,
-                triggerAtMillis,
-                pendingIntent
-            )
-            Timber.i("★★★ Rating prompt alarm scheduled (exact) - next prompt in $intervalMinutes minutes at ~$triggerTimeFormatted")
-        }
+        RatingPromptReceiver.scheduleNextPrompt(this)
     }
 
     private fun cancelRatingPromptAlarm() {
-        val alarmManager = getSystemService(Context.ALARM_SERVICE) as AlarmManager
-        val intent = Intent(this, RatingPromptReceiver::class.java).apply {
-            action = RatingPromptReceiver.ACTION_RATING_PROMPT
-        }
-        val pendingIntent = PendingIntent.getBroadcast(
-            this,
-            3,
-            intent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        RatingPromptReceiver.cancelPrompt(this)
+    }
+
+    private fun applyRatingConfig(config: RatingConfig) {
+        RatingPromptReceiver.applyConfig(
+            context = this,
+            promptsEnabled = config.promptsEnabled,
+            minIntervalMinutes = config.promptFrequencyMinutes,
+            maxDailyPrompts = config.maxPromptsPerDay,
+            activeStartHour = config.activeHoursStart,
+            activeEndHour = config.activeHoursEnd,
+            scheduleAlarm = false
         )
-        alarmManager.cancel(pendingIntent)
-        Timber.d("Rating prompt alarm cancelled")
+        cancelRatingPromptAlarm()
+        scheduleNextRatingPromptTick()
+    }
+
+    private fun scheduleNextRatingPromptTick() {
+        ratingPromptHandler.removeCallbacks(ratingPromptRunnable)
+        val prefs = getSharedPreferences(RATING_PREFS_NAME, Context.MODE_PRIVATE)
+        if (!prefs.getBoolean(KEY_PROMPTS_ENABLED, true)) {
+            return
+        }
+        val nowElapsed = SystemClock.elapsedRealtime()
+        val nextElapsed = prefs.getLong(KEY_NEXT_PROMPT_ELAPSED, 0L)
+        val delay = if (nextElapsed > nowElapsed) {
+            nextElapsed - nowElapsed
+        } else {
+            1000L
+        }
+        ratingPromptHandler.postDelayed(ratingPromptRunnable, delay)
+    }
+
+    private fun ensureRatingPromptScheduled() {
+        val prefs = getSharedPreferences(RATING_PREFS_NAME, Context.MODE_PRIVATE)
+        val promptsEnabled = prefs.getBoolean(KEY_PROMPTS_ENABLED, true)
+        if (!promptsEnabled) {
+            return
+        }
+
+        val minIntervalMinutes = prefs.getInt(KEY_MIN_INTERVAL_MINUTES, 60)
+        val safeIntervalMinutes = maxOf(15, minIntervalMinutes)
+        val intervalMs = safeIntervalMinutes * 60 * 1000L
+
+        val nowElapsed = SystemClock.elapsedRealtime()
+        val nextElapsed = prefs.getLong(KEY_NEXT_PROMPT_ELAPSED, 0L)
+        if (nextElapsed <= nowElapsed) {
+            maybeShowRatingPrompt(prefs)
+            val newNextElapsed = nowElapsed + intervalMs
+            prefs.edit().putLong(KEY_NEXT_PROMPT_ELAPSED, newNextElapsed).commit()
+            ratingPromptHandler.postDelayed(ratingPromptRunnable, intervalMs)
+        } else {
+            ratingPromptHandler.postDelayed(ratingPromptRunnable, nextElapsed - nowElapsed)
+        }
+    }
+
+    private fun maybeShowRatingPrompt(prefs: android.content.SharedPreferences) {
+        if (isCharging) {
+            Timber.d("Rating prompt skipped - watch is charging")
+            return
+        }
+        if (hasOffBodySensor && !isWatchWorn) {
+            Timber.d("Rating prompt skipped - watch not worn")
+            return
+        }
+
+        val today = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
+        val dontAskDate = prefs.getString(KEY_DONT_ASK_DATE, null)
+        if (dontAskDate == today) {
+            Timber.d("Rating prompt skipped - user set 'don't ask today'")
+            return
+        }
+
+        val promptsTodayDate = prefs.getString(KEY_PROMPTS_TODAY_DATE, null)
+        var promptsToday = if (promptsTodayDate == today) {
+            prefs.getInt(KEY_PROMPTS_TODAY, 0)
+        } else {
+            prefs.edit().putString(KEY_PROMPTS_TODAY_DATE, today).commit()
+            0
+        }
+
+        val maxDailyPrompts = prefs.getInt(KEY_MAX_DAILY_PROMPTS, 6)
+        if (promptsToday >= maxDailyPrompts) {
+            Timber.d("Rating prompt skipped - daily limit reached ($promptsToday/$maxDailyPrompts)")
+            return
+        }
+
+        val currentHour = Calendar.getInstance().get(Calendar.HOUR_OF_DAY)
+        val startHour = prefs.getInt(KEY_ACTIVE_HOURS_START, 6)
+        val endHour = prefs.getInt(KEY_ACTIVE_HOURS_END, 22)
+        if (currentHour < startHour || currentHour >= endHour) {
+            Timber.d("Rating prompt skipped - outside active hours ($currentHour not in $startHour-$endHour)")
+            return
+        }
+
+        if (prefs.edit().putInt(KEY_PROMPTS_TODAY, promptsToday + 1).commit()) {
+            Timber.i("Showing rating prompt (${promptsToday + 1}/$maxDailyPrompts today) via service")
+            showRatingPromptNotification("PROMPTED")
+        }
+    }
+
+    private fun ensureRatingPromptChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            val channel = NotificationChannel(
+                RATING_CHANNEL_ID,
+                "Rating Prompts",
+                NotificationManager.IMPORTANCE_HIGH
+            ).apply {
+                description = "Subjective rating prompts"
+            }
+            manager.createNotificationChannel(channel)
+        }
+    }
+
+    private fun showRatingPromptNotification(source: String) {
+        try {
+            ensureRatingPromptChannel()
+            val activityIntent = Intent().apply {
+                setClassName(packageName, "com.opensource.tremorwatch.RatingActivity")
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                putExtra("source", source)
+            }
+            val pendingIntent = PendingIntent.getActivity(
+                this,
+                3,
+                activityIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+            val notification = NotificationCompat.Builder(this, RATING_CHANNEL_ID)
+                .setSmallIcon(android.R.drawable.ic_dialog_info)
+                .setContentTitle("Time to rate")
+                .setContentText("How are you feeling?")
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setCategory(NotificationCompat.CATEGORY_ALARM)
+                .setAutoCancel(true)
+                .setContentIntent(pendingIntent)
+                .setFullScreenIntent(pendingIntent, true)
+                .build()
+            val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            manager.notify(3, notification)
+        } catch (e: Exception) {
+            Timber.e(e, "Failed to show rating prompt notification: ${e.message}")
+        }
     }
 
     // ====================== WEAR DETECTION & CHARGING MANAGEMENT ======================
@@ -1801,12 +1918,17 @@ class TremorService : LifecycleService(), SensorEventListener {
                 configListener.unregister()
                 Timber.d("Config listener unregistered")
             }
+            if (::ratingConfigListener.isInitialized) {
+                ratingConfigListener.unregister()
+                Timber.d("Rating config listener unregistered")
+            }
 
             // 4. Cancel periodic status updates, heartbeats, and wakelock monitor
             statusUpdateHandler.removeCallbacks(statusUpdateRunnable)
             heartbeatHandler.removeCallbacks(heartbeatRunnable)
             wakeLockMonitorHandler.removeCallbacks(wakeLockMonitorRunnable)
             batteryOptMonitorHandler.removeCallbacks(batteryOptMonitorRunnable)
+            ratingPromptHandler.removeCallbacks(ratingPromptRunnable)
             Timber.d("Periodic handlers stopped (status, heartbeat, wakelock monitor, battery opt monitor)")
 
             // 5. Unregister broadcast receivers
