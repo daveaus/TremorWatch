@@ -1601,6 +1601,8 @@ class TremorService : LifecycleService(), SensorEventListener {
         super.onStartCommand(intent, flags, startId)  // LifecycleService transitions to STARTED state
 
         if (intent?.action == ACTION_ACTIVITY_UPDATE) {
+            Timber.i("★ AR intent received. extras=${intent.extras}")
+            Timber.i("★ AR hasResult=${ActivityRecognitionResult.hasResult(intent)}")
             handleActivityUpdate(intent)
             return START_STICKY
         }
@@ -1945,11 +1947,17 @@ class TremorService : LifecycleService(), SensorEventListener {
         val intent = Intent(this, TremorService::class.java).apply {
             action = ACTION_ACTIVITY_UPDATE
         }
+        // Use FLAG_MUTABLE on Android 12+ so Google Play Services can add ActivityRecognitionResult extras
+        val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE
+        } else {
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        }
         return PendingIntent.getService(
             this,
             ACTIVITY_UPDATE_REQUEST_CODE,
             intent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            flags
         )
     }
 
