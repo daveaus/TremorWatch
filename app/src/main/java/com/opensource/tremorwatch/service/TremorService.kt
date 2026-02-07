@@ -84,6 +84,9 @@ class TremorService : LifecycleService(), SensorEventListener {
     private var activityRecognitionClient: ActivityRecognitionClient? = null
     private var activityUpdatePendingIntent: PendingIntent? = null
     private var activityUpdatesRegistered = false
+    private var activityFilteringEnabled = true
+    private var lastLoggedActivityType = DetectedActivity.UNKNOWN
+    private var lastLoggedActivityConfidenceBucket = -1
 
     // Wear detection and charging state (managed by service, synchronized with engine)
     private var isWatchWorn = true  // Assume worn initially
@@ -863,12 +866,10 @@ class TremorService : LifecycleService(), SensorEventListener {
         configListener = ConfigDataListener(this) { newConfig ->
             Timber.i("Received config update from phone: ${newConfig.profileName}")
             monitoringEngine.setConfig(newConfig)
-            updateActivityRecognitionState(newConfig.activityFilteringEnabled)
+            activityFilteringEnabled = newConfig.activityFilteringEnabled
+            updateActivityRecognitionState(activityFilteringEnabled)
         }
         configListener.register()
-
-        // Start activity recognition with default config (can be toggled by config updates)
-        updateActivityRecognitionState(true)
 
         // Clean up old local storage files based on retention period (run in background to avoid blocking onCreate)
         Thread {
@@ -1537,6 +1538,7 @@ class TremorService : LifecycleService(), SensorEventListener {
         if (::monitoringEngine.isInitialized) {
             monitoringEngine.setPaused(true)
         }
+        stopActivityRecognitionUpdates()
         val reason = when {
             !isWatchWorn && isCharging -> "not worn and charging"
             !isWatchWorn -> "not worn"
@@ -1561,6 +1563,7 @@ class TremorService : LifecycleService(), SensorEventListener {
         if (::monitoringEngine.isInitialized) {
             monitoringEngine.setPaused(false)
         }
+        updateActivityRecognitionState(activityFilteringEnabled)
         Timber.i("★★★ MONITORING RESUMED: worn=${isWatchWorn}, charging=${isCharging} ★★★")
         Timber.i("TremorWatch: ★★★ Monitoring resumed: worn=${isWatchWorn}, charging=${isCharging} (data collection active)")
         
@@ -2002,9 +2005,13 @@ class TremorService : LifecycleService(), SensorEventListener {
     }
 
     private fun updateActivityRecognitionState(enabled: Boolean) {
-        if (enabled) {
+        val shouldRun = enabled && !isPausedDueToWearState
+        if (shouldRun) {
             startActivityRecognitionUpdates()
         } else {
+            if (enabled && isPausedDueToWearState) {
+                Timber.i("Activity Recognition updates suppressed (monitoring paused)")
+            }
             stopActivityRecognitionUpdates()
         }
     }
@@ -2018,7 +2025,19 @@ class TremorService : LifecycleService(), SensorEventListener {
             monitoringEngine.updateActivity(activity.type, activity.confidence, System.currentTimeMillis())
         }
 
-        Timber.d("Activity update: ${getActivityName(activity.type)} (${activity.confidence}%)")
+        val confidenceBucket = getConfidenceBucket(activity.confidence)
+        if (activity.type != lastLoggedActivityType || confidenceBucket != lastLoggedActivityConfidenceBucket) {
+            Timber.d("Activity update: ${getActivityName(activity.type)} (${activity.confidence}%)")
+            lastLoggedActivityType = activity.type
+            lastLoggedActivityConfidenceBucket = confidenceBucket
+        }
+    }
+
+    private fun getConfidenceBucket(confidence: Int): Int = when {
+        confidence >= 80 -> 3
+        confidence >= 60 -> 2
+        confidence >= 40 -> 1
+        else -> 0
     }
 
     private fun getActivityName(type: Int): String = when (type) {
