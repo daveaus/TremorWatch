@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<complication-data-source xmlns:android="http://schemas.android.com/apk/res/android"
+    android:name="@string/complication_rating_name"
+    android:icon="@drawable/ic_complication_rating"
+    android:description="@string/complication_rating_desc">
+    <supported-types>
+        <type>SHORT_TEXT</type>
+        <type>MONOCHROMATIC_IMAGE</type>
+    </supported-types>
+</complication-data-source>

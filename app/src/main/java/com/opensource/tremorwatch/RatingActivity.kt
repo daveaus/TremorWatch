@@ -18,6 +18,12 @@ class RatingActivity : ComponentActivity() {
     
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // Cancel any pending follow-up vibration now that the prompt is opened
+        getSharedPreferences("rating_prefs", MODE_PRIVATE)
+            .edit()
+            .putBoolean("prompt_followup_pending", false)
+            .apply()
         
         val sourceString = intent.getStringExtra("source") ?: "PROMPTED"
         val source = try {
@@ -50,7 +56,7 @@ class RatingActivity : ComponentActivity() {
                                 .setDontAskToday(this@RatingActivity)
                         }
 
-                        finish()
+                        finishAndRemoveTask()
                     },
                     onUndo = {
                         Timber.d("Rating undone by user")
@@ -58,7 +64,7 @@ class RatingActivity : ComponentActivity() {
                     },
                     onCancel = {
                         Timber.d("Rating cancelled")
-                        finish()
+                        finishAndRemoveTask()
                     }
                 )
             }

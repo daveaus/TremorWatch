@@ -32,6 +32,9 @@ class RatingConfigManager(private val context: Context) {
             activeHoursStart = prefs.getInt("active_start_hour", 8),
             activeHoursEnd = prefs.getInt("active_end_hour", 22),
             maxPromptsPerDay = prefs.getInt("daily_max_prompts", 5),
+            promptVibrationEnabled = prefs.getBoolean("prompt_vibration_enabled", true),
+            promptVibrationStrong = prefs.getBoolean("prompt_vibration_strong", false),
+            promptFollowupVibration = prefs.getBoolean("prompt_followup_vibration", false),
             calibrationModeEnabled = prefs.getBoolean("calibration_enabled", false),
             calibrationDurationSeconds = prefs.getInt("calibration_duration_seconds", 60),
             showRatingsOnChart = prefs.getBoolean("show_ratings_on_graph", true),
@@ -49,6 +52,9 @@ class RatingConfigManager(private val context: Context) {
                 dataMap.putInt("active_start_hour", config.activeHoursStart)
                 dataMap.putInt("active_end_hour", config.activeHoursEnd)
                 dataMap.putInt("daily_max_prompts", config.maxPromptsPerDay)
+                dataMap.putBoolean("prompt_vibration_enabled", config.promptVibrationEnabled)
+                dataMap.putBoolean("prompt_vibration_strong", config.promptVibrationStrong)
+                dataMap.putBoolean("prompt_followup_vibration", config.promptFollowupVibration)
                 dataMap.putBoolean("calibration_enabled", config.calibrationModeEnabled)
                 dataMap.putInt("calibration_duration_seconds", config.calibrationDurationSeconds)
                 dataMap.putBoolean("show_ratings_on_graph", config.showRatingsOnChart)

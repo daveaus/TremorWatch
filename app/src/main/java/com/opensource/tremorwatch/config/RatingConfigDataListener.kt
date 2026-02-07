@@ -75,6 +75,9 @@ class RatingConfigDataListener(
                 activeHoursStart = dataMap.getInt("active_start_hour", RatingConfig().activeHoursStart),
                 activeHoursEnd = dataMap.getInt("active_end_hour", RatingConfig().activeHoursEnd),
                 maxPromptsPerDay = dataMap.getInt("daily_max_prompts", RatingConfig().maxPromptsPerDay),
+                promptVibrationEnabled = dataMap.getBoolean("prompt_vibration_enabled", true),
+                promptVibrationStrong = dataMap.getBoolean("prompt_vibration_strong", false),
+                promptFollowupVibration = dataMap.getBoolean("prompt_followup_vibration", false),
                 calibrationModeEnabled = dataMap.getBoolean("calibration_enabled", false),
                 calibrationDurationSeconds = dataMap.getInt(
                     "calibration_duration_seconds",

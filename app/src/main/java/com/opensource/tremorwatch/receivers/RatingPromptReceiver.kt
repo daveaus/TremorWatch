@@ -33,6 +33,9 @@ class RatingPromptReceiver : BroadcastReceiver() {
         private const val KEY_MIN_INTERVAL_MINUTES = "min_interval_minutes"
         private const val KEY_PROMPTS_ENABLED = "prompts_enabled"
         private const val KEY_NEXT_PROMPT_ELAPSED = "next_prompt_elapsed"
+        private const val KEY_PROMPT_VIBRATION_ENABLED = "prompt_vibration_enabled"
+        private const val KEY_PROMPT_VIBRATION_STRONG = "prompt_vibration_strong"
+        private const val KEY_PROMPT_FOLLOWUP_VIBRATION = "prompt_followup_vibration"
         private const val DEFAULT_MAX_DAILY_PROMPTS = 6
         private const val DEFAULT_MIN_INTERVAL_MINUTES = 60
         private const val REQUEST_CODE = 3  // Same as used in TremorService
@@ -120,6 +123,9 @@ class RatingPromptReceiver : BroadcastReceiver() {
             maxDailyPrompts: Int,
             activeStartHour: Int,
             activeEndHour: Int,
+            promptVibrationEnabled: Boolean = true,
+            promptVibrationStrong: Boolean = false,
+            promptFollowupVibration: Boolean = false,
             scheduleAlarm: Boolean = true
         ) {
             val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -129,6 +135,9 @@ class RatingPromptReceiver : BroadcastReceiver() {
                 .putInt(KEY_MAX_DAILY_PROMPTS, maxDailyPrompts)
                 .putInt(KEY_ACTIVE_HOURS_START, activeStartHour)
                 .putInt(KEY_ACTIVE_HOURS_END, activeEndHour)
+                .putBoolean(KEY_PROMPT_VIBRATION_ENABLED, promptVibrationEnabled)
+                .putBoolean(KEY_PROMPT_VIBRATION_STRONG, promptVibrationStrong)
+                .putBoolean(KEY_PROMPT_FOLLOWUP_VIBRATION, promptFollowupVibration)
                 .apply()
 
             if (scheduleAlarm) {
@@ -231,7 +240,9 @@ class RatingPromptReceiver : BroadcastReceiver() {
             ensureRatingChannel(context)
             val activityIntent = Intent().apply {
                 setClassName(context.packageName, "com.opensource.tremorwatch.RatingActivity")
-                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or
+                    Intent.FLAG_ACTIVITY_CLEAR_TASK or
+                    Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS
                 putExtra("source", source)
             }
             val pendingIntent = PendingIntent.getActivity(

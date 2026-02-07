@@ -43,6 +43,9 @@ fun RatingConfigScreen(
     var promptsEnabled by remember { mutableStateOf(prefs.getBoolean("prompts_enabled", true)) }
     var dailyMaxPrompts by remember { mutableIntStateOf(prefs.getInt("daily_max_prompts", 5)) }
     var minIntervalMinutes by remember { mutableIntStateOf(prefs.getInt("min_interval_minutes", 60)) }
+    var promptVibrationEnabled by remember { mutableStateOf(prefs.getBoolean("prompt_vibration_enabled", true)) }
+    var promptVibrationStrong by remember { mutableStateOf(prefs.getBoolean("prompt_vibration_strong", false)) }
+    var promptFollowupVibration by remember { mutableStateOf(prefs.getBoolean("prompt_followup_vibration", false)) }
     
     // Active hours
     var activeStartHour by remember { mutableIntStateOf(prefs.getInt("active_start_hour", 8)) }
@@ -77,6 +80,9 @@ fun RatingConfigScreen(
             putBoolean("prompts_enabled", promptsEnabled)
             putInt("daily_max_prompts", dailyMaxPrompts)
             putInt("min_interval_minutes", minIntervalMinutes)
+            putBoolean("prompt_vibration_enabled", promptVibrationEnabled)
+            putBoolean("prompt_vibration_strong", promptVibrationStrong)
+            putBoolean("prompt_followup_vibration", promptFollowupVibration)
             putInt("active_start_hour", activeStartHour)
             putInt("active_end_hour", activeEndHour)
             putBoolean("smart_triggers_enabled", smartTriggersEnabled)
@@ -121,7 +127,20 @@ fun RatingConfigScreen(
                     dailyMax = dailyMaxPrompts,
                     onDailyMaxChange = { dailyMaxPrompts = it; hasChanges = true },
                     minInterval = minIntervalMinutes,
-                    onMinIntervalChange = { minIntervalMinutes = it; hasChanges = true }
+                    onMinIntervalChange = { minIntervalMinutes = it; hasChanges = true },
+                    promptVibrationEnabled = promptVibrationEnabled,
+                    onPromptVibrationEnabledChange = {
+                        promptVibrationEnabled = it
+                        if (!it) {
+                            promptVibrationStrong = false
+                            promptFollowupVibration = false
+                        }
+                        hasChanges = true
+                    },
+                    promptVibrationStrong = promptVibrationStrong,
+                    onPromptVibrationStrongChange = { promptVibrationStrong = it; hasChanges = true },
+                    promptFollowupVibration = promptFollowupVibration,
+                    onPromptFollowupVibrationChange = { promptFollowupVibration = it; hasChanges = true }
                 )
             }
             
@@ -205,7 +224,13 @@ private fun RatingPromptSection(
     dailyMax: Int,
     onDailyMaxChange: (Int) -> Unit,
     minInterval: Int,
-    onMinIntervalChange: (Int) -> Unit
+    onMinIntervalChange: (Int) -> Unit,
+    promptVibrationEnabled: Boolean,
+    onPromptVibrationEnabledChange: (Boolean) -> Unit,
+    promptVibrationStrong: Boolean,
+    onPromptVibrationStrongChange: (Boolean) -> Unit,
+    promptFollowupVibration: Boolean,
+    onPromptFollowupVibrationChange: (Boolean) -> Unit
 ) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp)) {
@@ -244,6 +269,29 @@ private fun RatingPromptSection(
                     help = "Minimum time between prompts",
                     onValueChange = onMinIntervalChange
                 )
+
+                SwitchSetting(
+                    label = "Vibrate on Prompt",
+                    help = "Vibrate when a prompt appears",
+                    checked = promptVibrationEnabled,
+                    onCheckedChange = onPromptVibrationEnabledChange
+                )
+
+                if (promptVibrationEnabled) {
+                    SwitchSetting(
+                        label = "Strong Vibration",
+                        help = "Use a stronger vibration pattern",
+                        checked = promptVibrationStrong,
+                        onCheckedChange = onPromptVibrationStrongChange
+                    )
+
+                    SwitchSetting(
+                        label = "5-Minute Follow-Up",
+                        help = "Vibrate again 5 minutes later if missed",
+                        checked = promptFollowupVibration,
+                        onCheckedChange = onPromptFollowupVibrationChange
+                    )
+                }
             }
         }
     }

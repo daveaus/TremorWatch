@@ -24,6 +24,8 @@ import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
 import android.os.SystemClock
+import android.os.VibrationEffect
+import android.os.Vibrator
 import timber.log.Timber
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
@@ -84,7 +86,13 @@ class TremorService : LifecycleService(), SensorEventListener {
         private const val KEY_ACTIVE_HOURS_START = "active_hours_start"
         private const val KEY_ACTIVE_HOURS_END = "active_hours_end"
         private const val KEY_NEXT_PROMPT_ELAPSED = "next_prompt_elapsed"
+        private const val KEY_PROMPT_VIBRATION_ENABLED = "prompt_vibration_enabled"
+        private const val KEY_PROMPT_VIBRATION_STRONG = "prompt_vibration_strong"
+        private const val KEY_PROMPT_FOLLOWUP_VIBRATION = "prompt_followup_vibration"
+        private const val KEY_PROMPT_FOLLOWUP_PENDING = "prompt_followup_pending"
+        private const val KEY_PROMPT_LAST_SHOWN_ELAPSED = "prompt_last_shown_elapsed"
         private const val RATING_CHANNEL_ID = "rating_prompts"
+        private const val PROMPT_FOLLOWUP_DELAY_MS = 5 * 60 * 1000L
     }
 
     private lateinit var sensorManager: SensorManager
@@ -101,6 +109,12 @@ class TremorService : LifecycleService(), SensorEventListener {
     private var lastLoggedActivityType = DetectedActivity.UNKNOWN
     private var lastLoggedActivityConfidenceBucket = -1
     private val ratingPromptHandler = Handler(Looper.getMainLooper())
+    private val ratingFollowupHandler = Handler(Looper.getMainLooper())
+    private val ratingFollowupRunnable = object : Runnable {
+        override fun run() {
+            maybeRunFollowupVibration()
+        }
+    }
 
     // Wear detection and charging state (managed by service, synchronized with engine)
     private var isWatchWorn = true  // Assume worn initially
@@ -1278,8 +1292,16 @@ class TremorService : LifecycleService(), SensorEventListener {
             maxDailyPrompts = config.maxPromptsPerDay,
             activeStartHour = config.activeHoursStart,
             activeEndHour = config.activeHoursEnd,
+            promptVibrationEnabled = config.promptVibrationEnabled,
+            promptVibrationStrong = config.promptVibrationStrong,
+            promptFollowupVibration = config.promptFollowupVibration,
             scheduleAlarm = false
         )
+        val prefs = getSharedPreferences(RATING_PREFS_NAME, Context.MODE_PRIVATE)
+        if (!config.promptsEnabled || !config.promptFollowupVibration) {
+            prefs.edit().putBoolean(KEY_PROMPT_FOLLOWUP_PENDING, false).apply()
+            ratingFollowupHandler.removeCallbacks(ratingFollowupRunnable)
+        }
         cancelRatingPromptAlarm()
         scheduleNextRatingPromptTick()
     }
@@ -1362,9 +1384,20 @@ class TremorService : LifecycleService(), SensorEventListener {
             return
         }
 
-        if (prefs.edit().putInt(KEY_PROMPTS_TODAY, promptsToday + 1).commit()) {
+        val nowElapsed = SystemClock.elapsedRealtime()
+        val followupEnabled = prefs.getBoolean(KEY_PROMPT_FOLLOWUP_VIBRATION, false)
+        if (prefs.edit()
+                .putInt(KEY_PROMPTS_TODAY, promptsToday + 1)
+                .putLong(KEY_PROMPT_LAST_SHOWN_ELAPSED, nowElapsed)
+                .putBoolean(KEY_PROMPT_FOLLOWUP_PENDING, followupEnabled)
+                .commit()
+        ) {
             Timber.i("Showing rating prompt (${promptsToday + 1}/$maxDailyPrompts today) via service")
             showRatingPromptNotification("PROMPTED")
+            triggerPromptVibration(followup = false)
+            if (followupEnabled) {
+                scheduleFollowupVibration()
+            }
         }
     }
 
@@ -1387,7 +1420,9 @@ class TremorService : LifecycleService(), SensorEventListener {
             ensureRatingPromptChannel()
             val activityIntent = Intent().apply {
                 setClassName(packageName, "com.opensource.tremorwatch.RatingActivity")
-                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or
+                    Intent.FLAG_ACTIVITY_CLEAR_TASK or
+                    Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS
                 putExtra("source", source)
             }
             val pendingIntent = PendingIntent.getActivity(
@@ -1411,6 +1446,64 @@ class TremorService : LifecycleService(), SensorEventListener {
         } catch (e: Exception) {
             Timber.e(e, "Failed to show rating prompt notification: ${e.message}")
         }
+    }
+
+    private fun triggerPromptVibration(followup: Boolean) {
+        val prefs = getSharedPreferences(RATING_PREFS_NAME, Context.MODE_PRIVATE)
+        if (!prefs.getBoolean(KEY_PROMPT_VIBRATION_ENABLED, true)) {
+            return
+        }
+        val strong = prefs.getBoolean(KEY_PROMPT_VIBRATION_STRONG, false)
+        val vibrator = getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator ?: return
+        if (!vibrator.hasVibrator()) {
+            return
+        }
+
+        val effect = if (strong) {
+            val pattern = if (followup) {
+                longArrayOf(0, 200, 100, 200)
+            } else {
+                longArrayOf(0, 250, 120, 250, 120, 250)
+            }
+            VibrationEffect.createWaveform(pattern, -1)
+        } else {
+            val duration = if (followup) 120L else 220L
+            VibrationEffect.createOneShot(duration, VibrationEffect.DEFAULT_AMPLITUDE)
+        }
+        vibrator.vibrate(effect)
+    }
+
+    private fun scheduleFollowupVibration() {
+        ratingFollowupHandler.removeCallbacks(ratingFollowupRunnable)
+        ratingFollowupHandler.postDelayed(ratingFollowupRunnable, PROMPT_FOLLOWUP_DELAY_MS)
+    }
+
+    private fun maybeRunFollowupVibration() {
+        val prefs = getSharedPreferences(RATING_PREFS_NAME, Context.MODE_PRIVATE)
+        if (!prefs.getBoolean(KEY_PROMPT_FOLLOWUP_VIBRATION, false)) {
+            return
+        }
+        if (!prefs.getBoolean(KEY_PROMPT_FOLLOWUP_PENDING, false)) {
+            return
+        }
+
+        val lastShown = prefs.getLong(KEY_PROMPT_LAST_SHOWN_ELAPSED, 0L)
+        val nowElapsed = SystemClock.elapsedRealtime()
+        if (lastShown == 0L || nowElapsed - lastShown < PROMPT_FOLLOWUP_DELAY_MS) {
+            val delay = (PROMPT_FOLLOWUP_DELAY_MS - (nowElapsed - lastShown)).coerceAtLeast(1000L)
+            ratingFollowupHandler.postDelayed(ratingFollowupRunnable, delay)
+            return
+        }
+
+        if (isCharging || (hasOffBodySensor && !isWatchWorn)) {
+            Timber.d("Follow-up vibration skipped - watch is charging or not worn")
+            prefs.edit().putBoolean(KEY_PROMPT_FOLLOWUP_PENDING, false).apply()
+            return
+        }
+
+        Timber.d("Triggering follow-up vibration for missed prompt")
+        triggerPromptVibration(followup = true)
+        prefs.edit().putBoolean(KEY_PROMPT_FOLLOWUP_PENDING, false).apply()
     }
 
     // ====================== WEAR DETECTION & CHARGING MANAGEMENT ======================
@@ -1929,6 +2022,7 @@ class TremorService : LifecycleService(), SensorEventListener {
             wakeLockMonitorHandler.removeCallbacks(wakeLockMonitorRunnable)
             batteryOptMonitorHandler.removeCallbacks(batteryOptMonitorRunnable)
             ratingPromptHandler.removeCallbacks(ratingPromptRunnable)
+            ratingFollowupHandler.removeCallbacks(ratingFollowupRunnable)
             Timber.d("Periodic handlers stopped (status, heartbeat, wakelock monitor, battery opt monitor)")
 
             // 5. Unregister broadcast receivers

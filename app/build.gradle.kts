@@ -64,6 +64,8 @@ dependencies {
     implementation(libs.wear.tooling.preview)
     implementation(libs.activity.compose)
     implementation(libs.core.splashscreen)
+    implementation("androidx.wear.watchface:watchface-complications-data:1.1.1")
+    implementation("androidx.wear.watchface:watchface-complications-data-source:1.1.1")
 
     // ---- Architecture Components ----
     implementation("androidx.lifecycle:lifecycle-viewmodel-ktx:2.7.0")

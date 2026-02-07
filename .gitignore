@@ -91,6 +91,7 @@ tobedeleted/
 *.orig
 *.bak
 *.swp
+version020.md
 
 # Windows reserved filenames
 NUL

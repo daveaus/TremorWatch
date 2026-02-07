@@ -87,6 +87,19 @@
             </intent-filter>
         </service>
 
+        <!-- ===== Rating Complication ===== -->
+        <service
+            android:name="com.opensource.tremorwatch.complications.RatingComplicationService"
+            android:exported="true"
+            android:permission="com.google.android.wearable.permission.BIND_COMPLICATION_PROVIDER">
+            <intent-filter>
+                <action android:name="androidx.wear.watchface.complications.datasource.ACTION_COMPLICATION_UPDATE_REQUEST" />
+            </intent-filter>
+            <meta-data
+                android:name="androidx.wear.watchface.complications.datasource.COMPLICATION_CONFIG"
+                android:resource="@xml/complication_rating" />
+        </service>
+
         <!-- ===== Boot Receiver ===== -->
         <receiver
             android:name="com.opensource.tremorwatch.receivers.BootReceiver"
@@ -131,7 +144,10 @@
             android:name=".RatingActivity"
             android:exported="false"
             android:label="Rate Tremor"
-            android:theme="@android:style/Theme.DeviceDefault" />
+            android:theme="@android:style/Theme.DeviceDefault"
+            android:excludeFromRecents="true"
+            android:launchMode="singleTask"
+            android:taskAffinity="com.opensource.tremorwatch.rating" />
 
         <!-- ===== Rating Prompt Receiver ===== -->
         <receiver
