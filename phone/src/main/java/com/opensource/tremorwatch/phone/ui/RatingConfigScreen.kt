@@ -256,7 +256,7 @@ private fun RatingPromptSection(
                 IntSliderSetting(
                     label = "Maximum Daily Prompts",
                     value = dailyMax,
-                    range = 1..30,
+                    range = 1..70,
                     help = "Maximum prompts per day",
                     onValueChange = onDailyMaxChange
                 )

@@ -7,5 +7,5 @@ plugins {
 
 // Shared version properties across all modules
 // Shared version properties across all modules
-extra["appVersionName"] = "0.1.3"  // Subjective rating prompts & manual entry
-extra["appVersionCode"] = 4
+extra["appVersionName"] = "0.2.0"  // Subjective rating prompts & manual entry
+extra["appVersionCode"] = 5
