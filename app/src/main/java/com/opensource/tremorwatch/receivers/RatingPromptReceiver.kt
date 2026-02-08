@@ -172,12 +172,23 @@ class RatingPromptReceiver : BroadcastReceiver() {
         // Always schedule the next prompt first, regardless of whether we show this one
         scheduleNextPrompt(context)
 
+        val minIntervalMinutes = prefs.getInt(KEY_MIN_INTERVAL_MINUTES, DEFAULT_MIN_INTERVAL_MINUTES)
+        val safeIntervalMinutes = maxOf(15, minIntervalMinutes)
+        val intervalMs = safeIntervalMinutes * 60 * 1000L
+        val nextPromptElapsed = nowElapsed + intervalMs
+
+        // Helper to advance next_prompt_elapsed even when skipping
+        fun advanceNextPrompt(reason: String) {
+            prefs.edit().putLong(KEY_NEXT_PROMPT_ELAPSED, nextPromptElapsed).apply()
+            Timber.d("Rating prompt skipped - $reason. Next check in ${safeIntervalMinutes}m")
+        }
+
         val today = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
         
         // Check "don't ask today" setting
         val dontAskDate = prefs.getString(KEY_DONT_ASK_DATE, null)
         if (dontAskDate == today) {
-            Timber.d("Rating prompt skipped - user set 'don't ask today'")
+            advanceNextPrompt("user set 'don't ask today'")
             return
         }
         
@@ -193,7 +204,9 @@ class RatingPromptReceiver : BroadcastReceiver() {
         
         val maxDailyPrompts = prefs.getInt(KEY_MAX_DAILY_PROMPTS, DEFAULT_MAX_DAILY_PROMPTS)
         if (promptsToday >= maxDailyPrompts) {
-            Timber.d("Rating prompt skipped - daily limit reached ($promptsToday/$maxDailyPrompts)")
+            // When daily limit is reached, cancel alarms until tomorrow
+            Timber.d("Rating prompt skipped - daily limit reached ($promptsToday/$maxDailyPrompts). Pausing until tomorrow.")
+            cancelPrompt(context)
             return
         }
         
@@ -203,14 +216,11 @@ class RatingPromptReceiver : BroadcastReceiver() {
         val endHour = prefs.getInt(KEY_ACTIVE_HOURS_END, 22)
         
         if (currentHour < startHour || currentHour >= endHour) {
-            Timber.d("Rating prompt skipped - outside active hours ($currentHour not in $startHour-$endHour)")
+            advanceNextPrompt("outside active hours ($currentHour not in $startHour-$endHour)")
             return
         }
         
         // Increment prompt count and record next prompt time
-        val minIntervalMinutes = prefs.getInt(KEY_MIN_INTERVAL_MINUTES, DEFAULT_MIN_INTERVAL_MINUTES)
-        val safeIntervalMinutes = maxOf(15, minIntervalMinutes)
-        val nextPromptElapsed = nowElapsed + (safeIntervalMinutes * 60 * 1000L)
         prefs.edit()
             .putInt(KEY_PROMPTS_TODAY, promptsToday + 1)
             .putLong(KEY_NEXT_PROMPT_ELAPSED, nextPromptElapsed)

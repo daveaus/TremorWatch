@@ -1285,6 +1285,16 @@ class TremorService : LifecycleService(), SensorEventListener {
     }
 
     private fun applyRatingConfig(config: RatingConfig) {
+        val prefs = getSharedPreferences(RATING_PREFS_NAME, Context.MODE_PRIVATE)
+        
+        // Check if we should trigger a prompt immediately after config change
+        // This handles the case where prompts were stopped due to daily limit
+        // but the phone has now increased the limit
+        val oldMaxDaily = prefs.getInt(KEY_MAX_DAILY_PROMPTS, 6)
+        val promptsToday = prefs.getInt(KEY_PROMPTS_TODAY, 0)
+        val wasAtLimit = promptsToday >= oldMaxDaily
+        val nowHasRoom = promptsToday < config.maxPromptsPerDay
+        
         RatingPromptReceiver.applyConfig(
             context = this,
             promptsEnabled = config.promptsEnabled,
@@ -1297,12 +1307,21 @@ class TremorService : LifecycleService(), SensorEventListener {
             promptFollowupVibration = config.promptFollowupVibration,
             scheduleAlarm = false
         )
-        val prefs = getSharedPreferences(RATING_PREFS_NAME, Context.MODE_PRIVATE)
+        
         if (!config.promptsEnabled || !config.promptFollowupVibration) {
             prefs.edit().putBoolean(KEY_PROMPT_FOLLOWUP_PENDING, false).apply()
             ratingFollowupHandler.removeCallbacks(ratingFollowupRunnable)
         }
+        
         cancelRatingPromptAlarm()
+        
+        // If we were at the daily limit but now have room (limit increased),
+        // reset next_prompt_elapsed to trigger an immediate check
+        if (wasAtLimit && nowHasRoom && config.promptsEnabled) {
+            Timber.i("Daily limit increased from $oldMaxDaily to ${config.maxPromptsPerDay} (currently at $promptsToday). Triggering immediate prompt check.")
+            prefs.edit().putLong(KEY_NEXT_PROMPT_ELAPSED, 0L).apply()
+        }
+        
         scheduleNextRatingPromptTick()
     }
 
@@ -1345,20 +1364,41 @@ class TremorService : LifecycleService(), SensorEventListener {
         }
     }
 
+    /**
+     * Check conditions and show a rating prompt if appropriate.
+     * 
+     * CRITICAL: This function now always advances the next prompt time, even when
+     * skipping. Previously, early returns without updating next_prompt_elapsed
+     * caused permanent suppression when conditions weren't met.
+     */
     private fun maybeShowRatingPrompt(prefs: android.content.SharedPreferences) {
+        val nowElapsed = SystemClock.elapsedRealtime()
+        val minIntervalMinutes = prefs.getInt(KEY_MIN_INTERVAL_MINUTES, 60)
+        val safeIntervalMinutes = maxOf(15, minIntervalMinutes)
+        val intervalMs = safeIntervalMinutes * 60 * 1000L
+        val nextPromptElapsed = nowElapsed + intervalMs
+
+        // Helper to advance the next prompt time and schedule the next tick
+        fun advanceAndSchedule(reason: String) {
+            prefs.edit().putLong(KEY_NEXT_PROMPT_ELAPSED, nextPromptElapsed).apply()
+            Timber.d("Rating prompt skipped - $reason. Next check in ${safeIntervalMinutes}m")
+            ratingPromptHandler.removeCallbacks(ratingPromptRunnable)
+            ratingPromptHandler.postDelayed(ratingPromptRunnable, intervalMs)
+        }
+
         if (isCharging) {
-            Timber.d("Rating prompt skipped - watch is charging")
+            advanceAndSchedule("watch is charging")
             return
         }
         if (hasOffBodySensor && !isWatchWorn) {
-            Timber.d("Rating prompt skipped - watch not worn")
+            advanceAndSchedule("watch not worn")
             return
         }
 
         val today = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
         val dontAskDate = prefs.getString(KEY_DONT_ASK_DATE, null)
         if (dontAskDate == today) {
-            Timber.d("Rating prompt skipped - user set 'don't ask today'")
+            advanceAndSchedule("user set 'don't ask today'")
             return
         }
 
@@ -1372,7 +1412,9 @@ class TremorService : LifecycleService(), SensorEventListener {
 
         val maxDailyPrompts = prefs.getInt(KEY_MAX_DAILY_PROMPTS, 6)
         if (promptsToday >= maxDailyPrompts) {
-            Timber.d("Rating prompt skipped - daily limit reached ($promptsToday/$maxDailyPrompts)")
+            // When daily limit is reached, stop scheduling until tomorrow
+            Timber.d("Rating prompt skipped - daily limit reached ($promptsToday/$maxDailyPrompts). Pausing until tomorrow.")
+            ratingPromptHandler.removeCallbacks(ratingPromptRunnable)
             return
         }
 
@@ -1380,15 +1422,16 @@ class TremorService : LifecycleService(), SensorEventListener {
         val startHour = prefs.getInt(KEY_ACTIVE_HOURS_START, 6)
         val endHour = prefs.getInt(KEY_ACTIVE_HOURS_END, 22)
         if (currentHour < startHour || currentHour >= endHour) {
-            Timber.d("Rating prompt skipped - outside active hours ($currentHour not in $startHour-$endHour)")
+            advanceAndSchedule("outside active hours ($currentHour not in $startHour-$endHour)")
             return
         }
 
-        val nowElapsed = SystemClock.elapsedRealtime()
+        // All checks passed - show the prompt
         val followupEnabled = prefs.getBoolean(KEY_PROMPT_FOLLOWUP_VIBRATION, false)
         if (prefs.edit()
                 .putInt(KEY_PROMPTS_TODAY, promptsToday + 1)
                 .putLong(KEY_PROMPT_LAST_SHOWN_ELAPSED, nowElapsed)
+                .putLong(KEY_NEXT_PROMPT_ELAPSED, nextPromptElapsed)
                 .putBoolean(KEY_PROMPT_FOLLOWUP_PENDING, followupEnabled)
                 .commit()
         ) {
@@ -1398,6 +1441,9 @@ class TremorService : LifecycleService(), SensorEventListener {
             if (followupEnabled) {
                 scheduleFollowupVibration()
             }
+            // Schedule the next prompt
+            ratingPromptHandler.removeCallbacks(ratingPromptRunnable)
+            ratingPromptHandler.postDelayed(ratingPromptRunnable, intervalMs)
         }
     }
 
