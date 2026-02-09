@@ -98,6 +98,39 @@ object MonitoringConstants {
      */
     const val MAX_PENDING_BATCHES = 144  // 24 hours of 10-minute batches (144 batches/day)
 
+    // ====================== SENSOR BATCHING ======================
+
+    /**
+     * Gyroscope sample interval in microseconds for active monitoring.
+     * 50Hz (20,000µs) needed for FFT tremor analysis in the 4-12Hz range.
+     */
+    const val GYRO_SAMPLE_INTERVAL_US = 20_000 // 50Hz
+
+    /**
+     * Gyroscope sample interval in microseconds for "still" power-saving mode.
+     * 10Hz (100,000µs) reduces CPU wake-ups by 5x while still catching tremor onset.
+     */
+    const val GYRO_STILL_SAMPLE_INTERVAL_US = 100_000 // 10Hz
+
+    /**
+     * Maximum report latency for gyroscope batching in microseconds.
+     * Allows the AP to sleep for up to 5 seconds between sensor event deliveries.
+     * Must be shorter than the FFT window duration to avoid data gaps.
+     */
+    const val GYRO_MAX_REPORT_LATENCY_US = 5_000_000 // 5 seconds
+
+    /**
+     * Maximum report latency for accelerometer batching in microseconds.
+     * Accelerometer already runs at SENSOR_DELAY_NORMAL; add 10s batching.
+     */
+    const val ACCEL_MAX_REPORT_LATENCY_US = 10_000_000 // 10 seconds
+
+    /**
+     * Activity confidence threshold for switching to low-power sensor mode.
+     * Only downgrade sensors when activity recognition is highly confident the user is still.
+     */
+    const val SENSOR_DOWNGRADE_CONFIDENCE_THRESHOLD = 80
+
     // ====================== ACTIVITY RECOGNITION ======================
 
     /**

@@ -93,6 +93,9 @@ class TremorService : LifecycleService(), SensorEventListener {
         private const val KEY_PROMPT_LAST_SHOWN_ELAPSED = "prompt_last_shown_elapsed"
         private const val RATING_CHANNEL_ID = "rating_prompts"
         private const val PROMPT_FOLLOWUP_DELAY_MS = 5 * 60 * 1000L
+
+        /** WakeLock auto-release timeout. Monitor renews every 10 min, so 15 min gives safety margin. */
+        private const val WAKELOCK_TIMEOUT_MS = 15 * 60 * 1000L // 15 minutes
     }
 
     private lateinit var sensorManager: SensorManager
@@ -100,6 +103,8 @@ class TremorService : LifecycleService(), SensorEventListener {
     private var accelerometer: Sensor? = null
     private var offBodySensor: Sensor? = null
     private var wakeLock: PowerManager.WakeLock? = null
+    /** True when gyroscope is running at reduced rate due to STILL activity. */
+    private var isGyroInLowPowerMode = false
 
     // Activity Recognition
     private var activityRecognitionClient: ActivityRecognitionClient? = null
@@ -490,6 +495,8 @@ class TremorService : LifecycleService(), SensorEventListener {
                                 pendingBatchCount-- // Decrement cached count instead of rescanning
                                 batchesSent++
                                 lastSuccessfulUploadTime = System.currentTimeMillis()
+                                // Reset backoff counter on successful upload
+                                BatchRetryAlarmReceiver.resetRetryCount(this@TremorService)
                                 Timber.i("SUCCESS: Sent batch ${file.name} via queue worker, deleted. $pendingBatchCount pending")
                             }
                         } else {
@@ -636,37 +643,39 @@ class TremorService : LifecycleService(), SensorEventListener {
         val now = System.currentTimeMillis()
 
         wakeLock?.let { wl ->
-            val isHeld = wl.isHeld
-            if (!isHeld) {
-                // Samsung FreecessController disabled our wakelock!
-                Timber.e("★★★ CRITICAL: WakeLock was DISABLED by system (Samsung FreecessController) - RE-ACQUIRING NOW!")
+            if (!wl.isHeld) {
+                // Wakelock expired or was disabled by Samsung FreecessController
+                Timber.e("★★★ CRITICAL: WakeLock not held (timeout expired or Samsung FreecessController) - RE-ACQUIRING NOW!")
 
                 // Track disruption for sleeping apps detection
                 trackWakeLockDisruption(now)
 
                 try {
-                    wl.acquire()
-                    Timber.w("★★★ WakeLock successfully RE-ACQUIRED - fighting Samsung freeze")
+                    wl.acquire(WAKELOCK_TIMEOUT_MS)
+                    Timber.w("★★★ WakeLock RE-ACQUIRED with ${WAKELOCK_TIMEOUT_MS / 60000}min timeout")
                 } catch (e: Exception) {
                     Timber.e("★★★ FAILED to re-acquire wakelock: ${e.message}", e)
                 }
             } else {
-                // Wakelock still held - no action needed (battery optimized)
-                // Only refresh if we detect it's about to expire or has been held too long
-                // Since we use PARTIAL_WAKE_LOCK without timeout, it should stay held
-                Timber.v("WakeLock still held - no refresh needed (battery optimized)")
+                // Wakelock still held - renew the timeout so it doesn't expire between checks
+                try {
+                    wl.release()
+                    wl.acquire(WAKELOCK_TIMEOUT_MS)
+                    Timber.v("WakeLock timeout renewed for ${WAKELOCK_TIMEOUT_MS / 60000}min")
+                } catch (e: Exception) {
+                    Timber.e("Failed to renew wakelock timeout: ${e.message}", e)
+                }
             }
         } ?: run {
             Timber.e("★★★ CRITICAL: WakeLock is NULL - this should never happen!")
-            // Re-acquire if null (shouldn't happen but safety check)
             try {
                 val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
                 wakeLock = powerManager.newWakeLock(
                     PowerManager.PARTIAL_WAKE_LOCK or PowerManager.ON_AFTER_RELEASE,
                     "TremorWatch::SensorWakeLock"
                 ).apply {
-                    acquire()
-                    Timber.w("WakeLock recreated and acquired")
+                    acquire(WAKELOCK_TIMEOUT_MS)
+                    Timber.w("WakeLock recreated with ${WAKELOCK_TIMEOUT_MS / 60000}min timeout")
                 }
             } catch (e: Exception) {
                 Timber.e("Failed to recreate wakelock: ${e.message}", e)
@@ -923,16 +932,14 @@ class TremorService : LifecycleService(), SensorEventListener {
         // Acquire wake lock to keep sensors active (CRITICAL for Samsung devices)
         // Samsung FreecessController tries to freeze the app even with foreground service
         // Use wakelock strategy: PARTIAL_WAKE_LOCK + ON_AFTER_RELEASE
-        // Battery-optimized: Acquire without timeout, only refresh if disrupted by system
+        // Battery-safe: 10-minute timeout auto-releases if not renewed by monitor
         val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
         wakeLock = powerManager.newWakeLock(
             PowerManager.PARTIAL_WAKE_LOCK or PowerManager.ON_AFTER_RELEASE,
             "TremorWatch::SensorWakeLock"
         ).apply {
-            // Acquire WITHOUT timeout - will stay held until manually released
-            // Battery-optimized: Only refresh if system disrupts it (Samsung FreecessController)
-            acquire()
-            Timber.w("★★★ WakeLock acquired (PARTIAL_WAKE_LOCK | ON_AFTER_RELEASE) - battery optimized")
+            acquire(WAKELOCK_TIMEOUT_MS)
+            Timber.w("★★★ WakeLock acquired with ${WAKELOCK_TIMEOUT_MS / 60000}min timeout (PARTIAL_WAKE_LOCK | ON_AFTER_RELEASE)")
         }
 
         // Start periodic wakelock verification to fight Samsung FreecessController
@@ -987,39 +994,44 @@ class TremorService : LifecycleService(), SensorEventListener {
         Timber.d("Local storage enabled: ${DataConfig.isLocalStorageEnabled(this)}")
 
         // Register sensors with the monitoring engine as listener
+        // Use maxReportLatencyUs for batching - allows AP to sleep between deliveries
         gyroscope?.let {
             try {
-                // SENSOR_DELAY_GAME (~50Hz) for FFT analysis, samples saved at 1Hz
-                val sensorDelay = SensorManager.SENSOR_DELAY_GAME
-                val result = sensorManager.registerListener(monitoringEngine, it, sensorDelay)
+                val result = sensorManager.registerListener(
+                    monitoringEngine, it,
+                    MonitoringConstants.GYRO_SAMPLE_INTERVAL_US,
+                    MonitoringConstants.GYRO_MAX_REPORT_LATENCY_US
+                )
                 Timber.d("Gyroscope registration result: $result")
-                Timber.d("TremorWatch: Gyroscope registered at GAME (~50Hz) rate")
+                Timber.d("TremorWatch: Gyroscope registered at ${1_000_000 / MonitoringConstants.GYRO_SAMPLE_INTERVAL_US}Hz with ${MonitoringConstants.GYRO_MAX_REPORT_LATENCY_US / 1_000_000}s batching")
+                isGyroInLowPowerMode = false
             } catch (e: Exception) {
                 Timber.e("ERROR: Failed to register gyroscope: ${e.message}", e)
-                Timber.e("TremorWatch: ERROR: Failed to register gyroscope: ${e.message}")
                 e.printStackTrace()
             }
         }
             accelerometer?.let {
                 try {
-                    // Use SENSOR_DELAY_NORMAL (~10Hz) for battery optimization
-                    val result = sensorManager.registerListener(monitoringEngine, it, SensorManager.SENSOR_DELAY_NORMAL)
+                    val result = sensorManager.registerListener(
+                        monitoringEngine, it,
+                        SensorManager.SENSOR_DELAY_NORMAL,
+                        MonitoringConstants.ACCEL_MAX_REPORT_LATENCY_US
+                    )
                     Timber.d("Linear acceleration sensor registration result: $result")
-                    Timber.d("TremorWatch: Linear acceleration sensor registered at NORMAL rate (battery optimized)")
+                    Timber.d("TremorWatch: Linear acceleration registered at NORMAL rate with ${MonitoringConstants.ACCEL_MAX_REPORT_LATENCY_US / 1_000_000}s batching")
                 } catch (e: Exception) {
                     Timber.e("ERROR: Failed to register linear acceleration sensor: ${e.message}", e)
-                    Timber.e("TremorWatch: ERROR: Failed to register linear acceleration sensor: ${e.message}")
                     e.printStackTrace()
                 }
             }
             offBodySensor?.let {
                 try {
+                    // Off-body sensor: no batching needed, events are infrequent
                     val result = sensorManager.registerListener(monitoringEngine, it, SensorManager.SENSOR_DELAY_NORMAL)
                     Timber.d("Off-body sensor registration result: $result")
                     Timber.d("TremorWatch: Off-body sensor registered for wear detection")
                 } catch (e: Exception) {
                     Timber.e("ERROR: Failed to register off-body sensor: ${e.message}", e)
-                    Timber.e("TremorWatch: ERROR: Failed to register off-body sensor: ${e.message}")
                     e.printStackTrace()
                 }
             }
@@ -1219,6 +1231,9 @@ class TremorService : LifecycleService(), SensorEventListener {
     }
 
     private fun scheduleBatchRetryAlarm() {
+        // Reset backoff counter when freshly scheduling
+        BatchRetryAlarmReceiver.resetRetryCount(this)
+
         val alarmManager = getSystemService(Context.ALARM_SERVICE) as AlarmManager
         val intent = Intent(this, BatchRetryAlarmReceiver::class.java)
         val pendingIntent = PendingIntent.getBroadcast(
@@ -1228,33 +1243,24 @@ class TremorService : LifecycleService(), SensorEventListener {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        // Schedule batch retry every hour (same as upload interval) - battery optimized
-        // Only retry during upload window to avoid unnecessary wake-ups
-        val intervalMinutes = MonitoringState.getUploadIntervalMinutes(this)
-        val triggerAtMillis = SystemClock.elapsedRealtime() + intervalMinutes * 60 * 1000L
+        // Initial retry after 2 minutes; receiver handles backoff for subsequent retries
+        val triggerAtMillis = SystemClock.elapsedRealtime() + 2 * 60 * 1000L
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            if (alarmManager.canScheduleExactAlarms()) {
-                alarmManager.setExactAndAllowWhileIdle(
-                    AlarmManager.ELAPSED_REALTIME_WAKEUP,
-                    triggerAtMillis,
-                    pendingIntent
-                )
-            } else {
-                alarmManager.setAndAllowWhileIdle(
-                    AlarmManager.ELAPSED_REALTIME_WAKEUP,
-                    triggerAtMillis,
-                    pendingIntent
-                )
-            }
+        // Use inexact alarm - retries don't need exact timing
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            alarmManager.setAndAllowWhileIdle(
+                AlarmManager.ELAPSED_REALTIME_WAKEUP,
+                triggerAtMillis,
+                pendingIntent
+            )
         } else {
-            alarmManager.setExactAndAllowWhileIdle(
+            alarmManager.set(
                 AlarmManager.ELAPSED_REALTIME_WAKEUP,
                 triggerAtMillis,
                 pendingIntent
             )
         }
-        Timber.d("Batch retry alarm scheduled (retry every $intervalMinutes minutes - battery optimized)")
+        Timber.d("Batch retry alarm scheduled with exponential backoff (initial: 2min)")
     }
 
     private fun cancelBatchRetryAlarm() {
@@ -1920,53 +1926,58 @@ class TremorService : LifecycleService(), SensorEventListener {
             // Unregister all sensors
             sensorManager.unregisterListener(this)
 
-                // Re-register gyroscope
+                // Re-register gyroscope with batching
                 gyroscope?.let {
                     try {
-                        val sensorDelay = SensorManager.SENSOR_DELAY_GAME  // ~50 Hz for standard mode
-                        val result = sensorManager.registerListener(monitoringEngine, it, sensorDelay)
-                        Timber.d("Gyroscope re-registered: $result")
-                        Timber.d("TremorWatch: Gyroscope re-registered after freeze")
+                        val gyroRate = if (isGyroInLowPowerMode) {
+                            MonitoringConstants.GYRO_STILL_SAMPLE_INTERVAL_US
+                        } else {
+                            MonitoringConstants.GYRO_SAMPLE_INTERVAL_US
+                        }
+                        val result = sensorManager.registerListener(
+                            monitoringEngine, it,
+                            gyroRate,
+                            MonitoringConstants.GYRO_MAX_REPORT_LATENCY_US
+                        )
+                        Timber.d("Gyroscope re-registered: $result (lowPower=$isGyroInLowPowerMode)")
                     } catch (e: Exception) {
                         Timber.e("Failed to re-register gyroscope: ${e.message}", e)
-                        Timber.e("TremorWatch: ERROR: Failed to re-register gyroscope: ${e.message}")
                     }
                 }
 
-                // Re-register accelerometer
+                // Re-register accelerometer with batching
                 accelerometer?.let {
                     try {
-                        val result = sensorManager.registerListener(monitoringEngine, it, SensorManager.SENSOR_DELAY_NORMAL)
-                        Timber.d("Linear acceleration re-registered: $result")
-                        Timber.d("TremorWatch: Linear acceleration re-registered after freeze at NORMAL rate (battery optimized)")
+                        val result = sensorManager.registerListener(
+                            monitoringEngine, it,
+                            SensorManager.SENSOR_DELAY_NORMAL,
+                            MonitoringConstants.ACCEL_MAX_REPORT_LATENCY_US
+                        )
+                        Timber.d("Linear acceleration re-registered: $result (batched)")
                     } catch (e: Exception) {
                         Timber.e("Failed to re-register accelerometer: ${e.message}", e)
-                        Timber.e("TremorWatch: ERROR: Failed to re-register accelerometer: ${e.message}")
                     }
                 }
 
-                // Re-register off-body sensor
+                // Re-register off-body sensor (no batching)
                 offBodySensor?.let {
                     try {
                         val result = sensorManager.registerListener(monitoringEngine, it, SensorManager.SENSOR_DELAY_NORMAL)
                         Timber.d("Off-body sensor re-registered: $result")
-                        Timber.d("TremorWatch: Off-body sensor re-registered after freeze")
                     } catch (e: Exception) {
                         Timber.e("Failed to re-register off-body sensor: ${e.message}", e)
-                        Timber.e("TremorWatch: ERROR: Failed to re-register off-body sensor: ${e.message}")
                     }
                 }
         }
 
         // Renew wake lock (backup to the 10-minute wakelock monitor)
-        // Battery optimized: Less frequent renewal (watchdog now runs every 30 minutes)
+        // Battery-safe: Always use timeout to prevent indefinite holds
         wakeLock?.let {
             if (!it.isHeld) {
-                // Only re-acquire if it was released (battery optimization)
-                it.acquire()
-                Timber.d("Wake lock re-acquired by watchdog")
+                it.acquire(WAKELOCK_TIMEOUT_MS)
+                Timber.d("Wake lock re-acquired by watchdog with ${WAKELOCK_TIMEOUT_MS / 60000}min timeout")
             } else {
-                Timber.d("Wake lock still held - no renewal needed (battery optimized)")
+                Timber.d("Wake lock still held - skipping (monitor will renew)")
             }
         }
 
@@ -2292,6 +2303,48 @@ class TremorService : LifecycleService(), SensorEventListener {
             Timber.d("Activity update: ${getActivityName(activity.type)} (${activity.confidence}%)")
             lastLoggedActivityType = activity.type
             lastLoggedActivityConfidenceBucket = confidenceBucket
+        }
+
+        // Duty-cycle gyroscope based on activity: downgrade to 10Hz when STILL (high confidence)
+        updateGyroDutyCycle(activity.type, activity.confidence)
+    }
+
+    /**
+     * Adjust gyroscope sampling rate based on detected activity.
+     * When user is STILL with high confidence, switch to 10Hz to save power.
+     * When movement resumes, switch back to 50Hz for accurate FFT analysis.
+     */
+    private fun updateGyroDutyCycle(activityType: Int, confidence: Int) {
+        val shouldUseLowPower = activityType == DetectedActivity.STILL &&
+            confidence >= MonitoringConstants.SENSOR_DOWNGRADE_CONFIDENCE_THRESHOLD
+
+        if (shouldUseLowPower == isGyroInLowPowerMode) return // No change needed
+        if (isPausedDueToWearState) return // Sensors are paused; don't re-register
+
+        val gyro = gyroscope ?: return
+        if (!::sensorManager.isInitialized) return
+
+        try {
+            // Unregister and re-register gyroscope at new rate
+            sensorManager.unregisterListener(monitoringEngine, gyro)
+
+            val newRate = if (shouldUseLowPower) {
+                MonitoringConstants.GYRO_STILL_SAMPLE_INTERVAL_US
+            } else {
+                MonitoringConstants.GYRO_SAMPLE_INTERVAL_US
+            }
+
+            val result = sensorManager.registerListener(
+                monitoringEngine, gyro,
+                newRate,
+                MonitoringConstants.GYRO_MAX_REPORT_LATENCY_US
+            )
+
+            isGyroInLowPowerMode = shouldUseLowPower
+            val rateHz = 1_000_000 / newRate
+            Timber.i("Gyroscope duty-cycle: ${if (shouldUseLowPower) "LOW POWER" else "FULL"} (${rateHz}Hz, registered=$result)")
+        } catch (e: Exception) {
+            Timber.e("Failed to update gyro duty cycle: ${e.message}", e)
         }
     }
 
