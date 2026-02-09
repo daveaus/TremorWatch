@@ -1338,7 +1338,18 @@ class TremorService : LifecycleService(), SensorEventListener {
             return
         }
         val nowElapsed = SystemClock.elapsedRealtime()
-        val nextElapsed = prefs.getLong(KEY_NEXT_PROMPT_ELAPSED, 0L)
+        val minIntervalMinutes = prefs.getInt(KEY_MIN_INTERVAL_MINUTES, 60)
+        val safeIntervalMinutes = maxOf(15, minIntervalMinutes)
+        val intervalMs = safeIntervalMinutes * 60 * 1000L
+        var nextElapsed = prefs.getLong(KEY_NEXT_PROMPT_ELAPSED, 0L)
+
+        // Reboot/stale detection: if stored nextElapsed is far in the future, reset.
+        val maxReasonableDelay = intervalMs * 2
+        if (nextElapsed > nowElapsed + maxReasonableDelay) {
+            Timber.w("Detected stale next_prompt_elapsed ($nextElapsed) during schedule tick (now=$nowElapsed). Resetting.")
+            nextElapsed = nowElapsed + 60_000L // Trigger in 1 minute
+            prefs.edit().putLong(KEY_NEXT_PROMPT_ELAPSED, nextElapsed).apply()
+        }
         val delay = if (nextElapsed > nowElapsed) {
             nextElapsed - nowElapsed
         } else {
