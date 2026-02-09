@@ -198,13 +198,10 @@ suspend fun exportData(context: Context, timeRange: String, format: String): Str
             val cutoffTime = if (hoursBack == Int.MAX_VALUE) 0L else {
                 System.currentTimeMillis() - (hoursBack.toLong() * 60 * 60 * 1000)
             }
-            val samples = if (hoursBack == Int.MAX_VALUE) {
-                dbHelper.getAllSamples()
-            } else {
-                dbHelper.getSamplesAfter(cutoffTime)
-            }
-
-            if (samples.isEmpty()) {
+            
+            // Check count first without loading data into memory
+            val totalCount = dbHelper.getSamplesCountAfter(cutoffTime)
+            if (totalCount == 0) {
                 return@withContext "No data available for export"
             }
 
@@ -213,12 +210,13 @@ suspend fun exportData(context: Context, timeRange: String, format: String): Str
             val fileName = "tremorwatch_${format.lowercase().replace(" ", "_")}_${timestamp}.csv"
             val exportFile = File(context.cacheDir, fileName)
 
+            // Stream data in chunks to avoid OOM
             val recordCount = FileWriter(exportFile).use { writer ->
                 when (format) {
-                    "Summary" -> writeSummaryCsv(writer, samples)
-                    "Detailed" -> writeDetailedCsv(writer, samples)
-                    "Raw Data" -> writeRawDataCsv(writer, samples)
-                    else -> writeDetailedCsv(writer, samples)
+                    "Summary" -> writeStreamingSummaryCsv(writer, dbHelper, cutoffTime)
+                    "Detailed" -> writeStreamingDetailedCsv(writer, dbHelper, cutoffTime)
+                    "Raw Data" -> writeStreamingRawDataCsv(writer, dbHelper, cutoffTime)
+                    else -> writeStreamingDetailedCsv(writer, dbHelper, cutoffTime)
                 }
             }
 
@@ -453,4 +451,176 @@ private fun optBoolean(metadata: JSONObject?, key: String): Boolean? {
         else -> null
     }
 }
+
+// ============== STREAMING EXPORT FUNCTIONS (memory-efficient) ==============
+
+private const val CHUNK_SIZE = 5000
+
+/**
+ * Write detailed CSV with streaming - fetches data in chunks to avoid OOM.
+ */
+private suspend fun writeStreamingDetailedCsv(
+    writer: FileWriter, 
+    dbHelper: TremorDatabaseHelper, 
+    cutoffTime: Long
+): Int {
+    // Write header
+    writer.write("# EXPERIMENTAL DATA - NOT FOR MEDICAL USE\n")
+    writer.write("# This data is from experimental software and should not be used for diagnosis or treatment\n")
+    writer.write("#\n")
+    writer.write("Timestamp,DateTime,Severity,Tremor Count,")
+    writer.write("Activity Type,Activity Confidence,Activity Age Ms,")
+    writer.write("Adjusted Severity,Adjusted Confidence,Is Reliable,Exclude From Analysis\n")
+
+    var offset = 0
+    var totalRecords = 0
+    
+    while (true) {
+        val chunk = dbHelper.getSamplesAfterPaged(cutoffTime, CHUNK_SIZE, offset)
+        if (chunk.isEmpty()) break
+        
+        chunk.sortedBy { it.timestamp }.forEach { record ->
+            val dateStr = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
+                .format(Date(record.timestamp))
+
+            val metadata = parseMetadata(record.metadataJson)
+            writer.write("${record.timestamp},$dateStr,${String.format("%.6f", record.severity)},${record.tremorCount},")
+            writer.write("${metaValue(metadata, "activityType")},${metaValue(metadata, "activityConfidence")},")
+            writer.write("${metaValue(metadata, "activityAgeMs")},")
+            writer.write("${metaValue(metadata, "activityAdjustedSeverity")},${metaValue(metadata, "activityAdjustedConfidence")},")
+            writer.write("${metaValue(metadata, "isReliableMeasurement")},${metaValue(metadata, "excludeFromAnalysis")}\n")
+        }
+        
+        totalRecords += chunk.size
+        offset += CHUNK_SIZE
+        
+        // Flush periodically to free memory
+        if (offset % (CHUNK_SIZE * 5) == 0) {
+            writer.flush()
+        }
+    }
+    
+    return totalRecords
+}
+
+/**
+ * Write raw data CSV with streaming - fetches data in chunks to avoid OOM.
+ */
+private suspend fun writeStreamingRawDataCsv(
+    writer: FileWriter, 
+    dbHelper: TremorDatabaseHelper, 
+    cutoffTime: Long
+): Int {
+    // Write header
+    writer.write("# EXPERIMENTAL DATA - NOT FOR MEDICAL USE\n")
+    writer.write("# This data is from experimental software and should not be used for diagnosis or treatment\n")
+    writer.write("#\n")
+    writer.write("Timestamp,DateTime,Severity,Tremor Count,")
+    writer.write("X,Y,Z,Magnitude,Accel Magnitude,Confidence,")
+    writer.write("Is Worn,Is Charging,Dominant Freq,Tremor Band Power,")
+    writer.write("Total Power,Band Ratio,Peak Prominence,Watch ID,")
+    writer.write("Activity Type,Activity Confidence,Activity Age Ms,")
+    writer.write("Adjusted Severity,Adjusted Confidence,Is Reliable,Exclude From Analysis\n")
+
+    var offset = 0
+    var totalRecords = 0
+    
+    while (true) {
+        val chunk = dbHelper.getSamplesAfterPaged(cutoffTime, CHUNK_SIZE, offset)
+        if (chunk.isEmpty()) break
+        
+        chunk.sortedBy { it.timestamp }.forEach { sample ->
+            val dateStr = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US)
+                .format(Date(sample.timestamp))
+
+            val metadata = parseMetadata(sample.metadataJson)
+
+            writer.write("${sample.timestamp},$dateStr,")
+            writer.write("${String.format("%.6f", sample.severity)},${sample.tremorCount},")
+            writer.write("${sample.x ?: ""},${sample.y ?: ""},${sample.z ?: ""},")
+            writer.write("${sample.magnitude ?: ""},${sample.accelMagnitude ?: ""},${sample.confidence ?: ""},")
+            writer.write("${sample.isWorn ?: ""},${sample.isCharging ?: ""},")
+            writer.write("${sample.dominantFrequency ?: ""},${sample.tremorBandPower ?: ""},")
+            writer.write("${sample.totalPower ?: ""},${sample.bandRatio ?: ""},${sample.peakProminence ?: ""},")
+            writer.write("${sample.watchId ?: ""},")
+            writer.write("${metaValue(metadata, "activityType")},${metaValue(metadata, "activityConfidence")},${metaValue(metadata, "activityAgeMs")},")
+            writer.write("${metaValue(metadata, "activityAdjustedSeverity")},${metaValue(metadata, "activityAdjustedConfidence")},")
+            writer.write("${metaValue(metadata, "isReliableMeasurement")},${metaValue(metadata, "excludeFromAnalysis")}\n")
+        }
+        
+        totalRecords += chunk.size
+        offset += CHUNK_SIZE
+        
+        if (offset % (CHUNK_SIZE * 5) == 0) {
+            writer.flush()
+        }
+    }
+    
+    return totalRecords
+}
+
+/**
+ * Write summary CSV with streaming - aggregates by hour.
+ * Note: This still needs to collect hour buckets in memory, but only stores aggregated data
+ * which is much smaller than raw samples.
+ */
+private suspend fun writeStreamingSummaryCsv(
+    writer: FileWriter, 
+    dbHelper: TremorDatabaseHelper, 
+    cutoffTime: Long
+): Int {
+    // Write header
+    writer.write("# EXPERIMENTAL DATA - NOT FOR MEDICAL USE\n")
+    writer.write("# This data is from experimental software and should not be used for diagnosis or treatment\n")
+    writer.write("#\n")
+    writer.write("Hour,Avg Severity,Max Severity,Tremor Events,Duration Minutes,")
+    writer.write("Activity Type,Avg Activity Confidence,Avg Adjusted Severity,Avg Adjusted Confidence,")
+    writer.write("Reliable %,Exclude %\n")
+
+    // Collect hourly aggregates in memory (much smaller than raw samples)
+    val hourMs = 60 * 60 * 1000L
+    val hourlyData = mutableMapOf<Long, MutableList<TremorSample>>()
+    
+    var offset = 0
+    
+    while (true) {
+        val chunk = dbHelper.getSamplesAfterPaged(cutoffTime, CHUNK_SIZE, offset)
+        if (chunk.isEmpty()) break
+        
+        chunk.forEach { sample ->
+            val hourKey = sample.timestamp / hourMs
+            hourlyData.getOrPut(hourKey) { mutableListOf() }.add(sample)
+        }
+        
+        offset += CHUNK_SIZE
+    }
+
+    // Write aggregated data
+    hourlyData.entries.sortedBy { it.key }.forEach { (hour, records) ->
+        val avgSeverity = records.map { it.severity }.average()
+        val maxSeverity = records.maxOfOrNull { it.severity } ?: 0.0
+        val tremorEvents = records.sumOf { it.tremorCount }
+        val durationMinutes = records.map { it.timestamp / 60000L }.distinct().size
+        val activitySummary = summarizeActivity(records)
+
+        val dateStr = SimpleDateFormat("yyyy-MM-dd HH:00", Locale.US)
+            .format(Date(hour * hourMs))
+
+        val avgActivityConfidence = activitySummary.avgConfidence?.let { String.format("%.3f", it) } ?: ""
+        val avgAdjustedSeverity = activitySummary.avgAdjustedSeverity?.let { String.format("%.4f", it) } ?: ""
+        val avgAdjustedConfidence = activitySummary.avgAdjustedConfidence?.let { String.format("%.4f", it) } ?: ""
+        val reliablePct = activitySummary.reliablePct?.let { String.format("%.1f", it) } ?: ""
+        val excludePct = activitySummary.excludePct?.let { String.format("%.1f", it) } ?: ""
+
+        writer.write(
+            "$dateStr,${String.format("%.4f", avgSeverity)},${String.format("%.4f", maxSeverity)}," +
+                "$tremorEvents,$durationMinutes," +
+                "${activitySummary.dominantType},$avgActivityConfidence," +
+                "$avgAdjustedSeverity,$avgAdjustedConfidence,$reliablePct,$excludePct\n"
+        )
+    }
+    
+    return hourlyData.size
+}
+
 

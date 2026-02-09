@@ -64,6 +64,19 @@ interface TremorDao {
     suspend fun getLatestTimestamp(): Long?
     
     /**
+     * Get samples after cutoff time with pagination for memory-efficient export.
+     * Uses LIMIT/OFFSET to avoid loading all data into memory at once.
+     */
+    @Query("SELECT * FROM tremor_samples WHERE timestamp >= :cutoffTime ORDER BY timestamp ASC LIMIT :limit OFFSET :offset")
+    suspend fun getSamplesAfterPaged(cutoffTime: Long, limit: Int, offset: Int): List<TremorSample>
+    
+    /**
+     * Get count of samples after cutoff time (for progress tracking).
+     */
+    @Query("SELECT COUNT(*) FROM tremor_samples WHERE timestamp >= :cutoffTime")
+    suspend fun getSamplesCountAfter(cutoffTime: Long): Int
+    
+    /**
      * Get aggregated chart data in 1-minute buckets.
      * This is MUCH faster than loading all samples and aggregating in Kotlin.
      * Groups by minute (timestamp / 60000) and computes AVG severity, SUM tremor count.

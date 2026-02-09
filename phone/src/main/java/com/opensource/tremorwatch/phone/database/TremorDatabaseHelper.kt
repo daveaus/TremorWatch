@@ -181,6 +181,31 @@ class TremorDatabaseHelper(private val context: Context) {
     }
     
     /**
+     * Get samples after cutoff with pagination for memory-efficient export.
+     * Call repeatedly with increasing offset until empty list returned.
+     */
+    suspend fun getSamplesAfterPaged(cutoffTime: Long, limit: Int, offset: Int): List<TremorSample> = withContext(Dispatchers.IO) {
+        try {
+            dao.getSamplesAfterPaged(cutoffTime, limit, offset)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to get paged samples: ${e.message}", e)
+            emptyList()
+        }
+    }
+    
+    /**
+     * Get count of samples after cutoff time.
+     */
+    suspend fun getSamplesCountAfter(cutoffTime: Long): Int = withContext(Dispatchers.IO) {
+        try {
+            dao.getSamplesCountAfter(cutoffTime)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to get sample count: ${e.message}", e)
+            0
+        }
+    }
+    
+    /**
      * Load subjective ratings for chart display.
      */
     suspend fun getRatingsAfter(cutoffTime: Long): List<SubjectiveRatingEntity> = withContext(Dispatchers.IO) {
