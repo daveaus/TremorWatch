@@ -1,5 +1,6 @@
 package com.opensource.tremorwatch
 
+import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -56,7 +57,7 @@ class RatingActivity : ComponentActivity() {
                                 .setDontAskToday(this@RatingActivity)
                         }
 
-                        finishAndRemoveTask()
+                        goToHome()
                     },
                     onUndo = {
                         Timber.d("Rating undone by user")
@@ -64,10 +65,22 @@ class RatingActivity : ComponentActivity() {
                     },
                     onCancel = {
                         Timber.d("Rating cancelled")
-                        finishAndRemoveTask()
+                        goToHome()
                     }
                 )
             }
         }
+    }
+
+    /**
+     * Navigate to the home screen (watchface) instead of returning to TremorWatch app.
+     */
+    private fun goToHome() {
+        val homeIntent = Intent(Intent.ACTION_MAIN).apply {
+            addCategory(Intent.CATEGORY_HOME)
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+        }
+        startActivity(homeIntent)
+        finishAndRemoveTask()
     }
 }

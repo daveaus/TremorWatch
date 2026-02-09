@@ -197,6 +197,18 @@ The app does NOT track your GPS location or send location data anywhere.
 - ✅ **Body Sensors**: Reads accelerometer data for tremor detection
 - ✅ **Battery Optimization Disable**: Prevents OS from killing the monitoring service
 
+### Troubleshooting: Rating Prompts Not Launching Directly
+
+On some Wear OS devices (especially Samsung Galaxy Watch with Wear OS 5/Android 14+), rating prompts may show as notifications instead of launching directly to the rating screen.
+
+**To fix this, grant the fullscreen intent permission via ADB:**
+
+```bash
+adb shell appops set com.opensource.tremorwatch USE_FULL_SCREEN_INTENT allow
+```
+
+This allows the app to launch the rating screen directly when a prompt fires, instead of showing a notification that requires an extra tap.
+
 ---
 
 ## Configuration

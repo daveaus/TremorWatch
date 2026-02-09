@@ -138,6 +138,8 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+
+
         // Request unrestricted battery access for 24/7 monitoring reliability
         // This is critical for continuous tremor monitoring on Wear OS
         val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
