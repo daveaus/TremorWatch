@@ -61,9 +61,7 @@ fun RatingConfigScreen(
     var calibrationDurationSeconds by remember { mutableIntStateOf(prefs.getInt("calibration_duration_seconds", 10)) }
     var autoCalibrationMode by remember { mutableStateOf(prefs.getBoolean("auto_calibration_mode", false)) }
     
-    // Display settings
-    var showRatingsOnGraph by remember { mutableStateOf(prefs.getBoolean("show_ratings_on_graph", true)) }
-    var includeRatingsInExport by remember { mutableStateOf(prefs.getBoolean("include_ratings_in_export", true)) }
+
     
     // Track if any setting has changed
     var hasChanges by remember { mutableStateOf(false) }
@@ -91,8 +89,6 @@ fun RatingConfigScreen(
             putBoolean("calibration_enabled", calibrationEnabled)
             putInt("calibration_duration_seconds", calibrationDurationSeconds)
             putBoolean("auto_calibration_mode", autoCalibrationMode)
-            putBoolean("show_ratings_on_graph", showRatingsOnGraph)
-            putBoolean("include_ratings_in_export", includeRatingsInExport)
             apply()
         }
         hasChanges = false
@@ -180,15 +176,7 @@ fun RatingConfigScreen(
                 )
             }
             
-            // Display Section
-            item {
-                DisplaySection(
-                    showOnGraph = showRatingsOnGraph,
-                    onShowOnGraphChange = { showRatingsOnGraph = it; hasChanges = true },
-                    includeInExport = includeRatingsInExport,
-                    onIncludeInExportChange = { includeRatingsInExport = it; hasChanges = true }
-                )
-            }
+
             
             // Save Button
             item {
@@ -481,34 +469,7 @@ private fun CalibrationSection(
     }
 }
 
-@Composable
-private fun DisplaySection(
-    showOnGraph: Boolean,
-    onShowOnGraphChange: (Boolean) -> Unit,
-    includeInExport: Boolean,
-    onIncludeInExportChange: (Boolean) -> Unit
-) {
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.padding(16.dp)) {
-            Text("Display & Export", style = MaterialTheme.typography.titleSmall)
-            Spacer(modifier = Modifier.height(16.dp))
-            
-            SwitchSetting(
-                label = "Show Ratings on Graph",
-                help = "Display rating markers on tremor chart",
-                checked = showOnGraph,
-                onCheckedChange = onShowOnGraphChange
-            )
-            
-            SwitchSetting(
-                label = "Include in Data Export",
-                help = "Add ratings to exported CSV files",
-                checked = includeInExport,
-                onCheckedChange = onIncludeInExportChange
-            )
-        }
-    }
-}
+
 
 @Composable
 private fun SwitchSetting(

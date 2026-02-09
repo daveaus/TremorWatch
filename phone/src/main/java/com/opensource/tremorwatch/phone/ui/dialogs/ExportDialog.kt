@@ -30,6 +30,7 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
 import android.content.Intent
 import com.opensource.tremorwatch.phone.database.TremorDatabaseHelper
+import com.opensource.tremorwatch.phone.database.TremorRoomDatabase
 import com.opensource.tremorwatch.phone.database.TremorSample
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -57,7 +58,7 @@ fun ExportDialog(
     val scope = rememberCoroutineScope()
 
     val timeRanges = listOf("1h", "6h", "12h", "24h", "48h", "7d", "30d", "All")
-    val formats = listOf("Summary", "Detailed", "Raw Data")
+    val formats = listOf("Summary", "Detailed", "Raw Data", "Subjective Ratings")
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -129,6 +130,7 @@ fun ExportDialog(
                                     "Summary" -> "Aggregated by hour, includes stats"
                                     "Detailed" -> "All data points with metadata"
                                     "Raw Data" -> "Complete sensor data dump"
+                                    "Subjective Ratings" -> "User ratings with calibration data"
                                     else -> ""
                                 },
                                 style = MaterialTheme.typography.bodySmall,
@@ -216,6 +218,7 @@ suspend fun exportData(context: Context, timeRange: String, format: String): Str
                     "Summary" -> writeStreamingSummaryCsv(writer, dbHelper, cutoffTime)
                     "Detailed" -> writeStreamingDetailedCsv(writer, dbHelper, cutoffTime)
                     "Raw Data" -> writeStreamingRawDataCsv(writer, dbHelper, cutoffTime)
+                    "Subjective Ratings" -> writeSubjectiveRatingsCsv(writer, context, cutoffTime)
                     else -> writeStreamingDetailedCsv(writer, dbHelper, cutoffTime)
                 }
             }
@@ -479,7 +482,8 @@ private suspend fun writeStreamingDetailedCsv(
         val chunk = dbHelper.getSamplesAfterPaged(cutoffTime, CHUNK_SIZE, offset)
         if (chunk.isEmpty()) break
         
-        chunk.sortedBy { it.timestamp }.forEach { record ->
+        // Filter out zero-severity entries to reduce file size
+        chunk.filter { it.severity > 0 }.sortedBy { it.timestamp }.forEach { record ->
             val dateStr = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
                 .format(Date(record.timestamp))
 
@@ -489,9 +493,9 @@ private suspend fun writeStreamingDetailedCsv(
             writer.write("${metaValue(metadata, "activityAgeMs")},")
             writer.write("${metaValue(metadata, "activityAdjustedSeverity")},${metaValue(metadata, "activityAdjustedConfidence")},")
             writer.write("${metaValue(metadata, "isReliableMeasurement")},${metaValue(metadata, "excludeFromAnalysis")}\n")
+            totalRecords++
         }
         
-        totalRecords += chunk.size
         offset += CHUNK_SIZE
         
         // Flush periodically to free memory
@@ -529,7 +533,8 @@ private suspend fun writeStreamingRawDataCsv(
         val chunk = dbHelper.getSamplesAfterPaged(cutoffTime, CHUNK_SIZE, offset)
         if (chunk.isEmpty()) break
         
-        chunk.sortedBy { it.timestamp }.forEach { sample ->
+        // Filter out zero-severity entries to reduce file size
+        chunk.filter { it.severity > 0 }.sortedBy { it.timestamp }.forEach { sample ->
             val dateStr = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US)
                 .format(Date(sample.timestamp))
 
@@ -546,9 +551,9 @@ private suspend fun writeStreamingRawDataCsv(
             writer.write("${metaValue(metadata, "activityType")},${metaValue(metadata, "activityConfidence")},${metaValue(metadata, "activityAgeMs")},")
             writer.write("${metaValue(metadata, "activityAdjustedSeverity")},${metaValue(metadata, "activityAdjustedConfidence")},")
             writer.write("${metaValue(metadata, "isReliableMeasurement")},${metaValue(metadata, "excludeFromAnalysis")}\n")
+            totalRecords++
         }
         
-        totalRecords += chunk.size
         offset += CHUNK_SIZE
         
         if (offset % (CHUNK_SIZE * 5) == 0) {
@@ -621,6 +626,81 @@ private suspend fun writeStreamingSummaryCsv(
     }
     
     return hourlyData.size
+}
+
+/**
+ * Write subjective ratings to CSV including calibration data if available.
+ * Exports from the subjective_ratings table with linked calibration_data.
+ */
+private suspend fun writeSubjectiveRatingsCsv(
+    writer: FileWriter,
+    context: Context,
+    cutoffTime: Long
+): Int {
+    val db = TremorRoomDatabase.getDatabase(context)
+    val dao = db.tremorDao()
+    
+    // Write header
+    writer.write("# SUBJECTIVE TREMOR RATINGS - EXPERIMENTAL DATA\n")
+    writer.write("# User-reported tremor severity ratings with optional calibration sensor data\n")
+    writer.write("#\n")
+    writer.write("Timestamp,DateTime,Rating,Source,Watch ID,")
+    writer.write("Detected Severity,Detected Confidence,Detected Frequency,")
+    writer.write("Calibration Enabled,Calibration Duration Sec,Notes,")
+    writer.write("Calibration Sample Count\n")
+    
+    // Get ratings in time range
+    val ratings = dao.getRatingsAfter(cutoffTime)
+    
+    var totalRecords = 0
+    for (rating in ratings) {
+        val dateStr = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
+            .format(Date(rating.timestamp))
+        
+        // Count calibration samples for this rating
+        val calibrationCount = if (rating.calibrationModeEnabled) {
+            dao.getCalibrationDataForRating(rating.id).size
+        } else {
+            0
+        }
+        
+        writer.write("${rating.timestamp},$dateStr,${rating.rating},${rating.source},")
+        writer.write("${rating.watchId ?: ""},")
+        writer.write("${rating.detectedSeverity?.let { String.format("%.6f", it) } ?: ""},")
+        writer.write("${rating.detectedConfidence?.let { String.format("%.3f", it) } ?: ""},")
+        writer.write("${rating.detectedFrequency?.let { String.format("%.2f", it) } ?: ""},")
+        writer.write("${rating.calibrationModeEnabled},${rating.calibrationDurationSeconds},")
+        writer.write("${rating.notes?.replace(",", ";")?.replace("\n", " ") ?: ""},")
+        writer.write("$calibrationCount\n")
+        totalRecords++
+    }
+    
+    // If there's calibration data, write it as a separate section
+    val ratingsWithCalibration = ratings.filter { it.calibrationModeEnabled }
+    if (ratingsWithCalibration.isNotEmpty()) {
+        writer.write("\n# CALIBRATION SENSOR DATA\n")
+        writer.write("Rating ID,Rating Timestamp,Sample Timestamp,X,Y,Z,Magnitude,")
+        writer.write("Dominant Freq,Tremor Band Power,Total Power,Band Ratio,Peak Prominence,")
+        writer.write("Confidence,Severity,Is Worn,Is Charging\n")
+        
+        for (rating in ratingsWithCalibration) {
+            val calibrationData = dao.getCalibrationDataForRating(rating.id)
+            val ratingDateStr = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
+                .format(Date(rating.timestamp))
+            
+            for (sample in calibrationData) {
+                writer.write("${rating.id},$ratingDateStr,${sample.timestamp},")
+                writer.write("${String.format("%.6f", sample.x)},${String.format("%.6f", sample.y)},${String.format("%.6f", sample.z)},")
+                writer.write("${String.format("%.6f", sample.magnitude)},${String.format("%.2f", sample.dominantFrequency)},")
+                writer.write("${String.format("%.6f", sample.tremorBandPower)},${String.format("%.6f", sample.totalPower)},")
+                writer.write("${String.format("%.4f", sample.bandRatio)},${String.format("%.4f", sample.peakProminence)},")
+                writer.write("${String.format("%.4f", sample.confidence)},${String.format("%.6f", sample.severity)},")
+                writer.write("${sample.isWorn},${sample.isCharging}\n")
+            }
+        }
+    }
+    
+    return totalRecords
 }
 
 

@@ -11,7 +11,7 @@ import androidx.room.PrimaryKey
 @Entity(
     tableName = "tremor_samples",
     indices = [
-        Index(value = ["timestamp"]),  // For fast time-range queries
+        Index(value = ["timestamp"], unique = true),  // Unique to prevent duplicates
         Index(value = ["severity"])  // For severity-based queries
     ]
 )
