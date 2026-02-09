@@ -1359,7 +1359,18 @@ class TremorService : LifecycleService(), SensorEventListener {
         val intervalMs = safeIntervalMinutes * 60 * 1000L
 
         val nowElapsed = SystemClock.elapsedRealtime()
-        val nextElapsed = prefs.getLong(KEY_NEXT_PROMPT_ELAPSED, 0L)
+        var nextElapsed = prefs.getLong(KEY_NEXT_PROMPT_ELAPSED, 0L)
+        
+        // Reboot detection: If nextElapsed is more than 2 intervals in the future,
+        // the device likely rebooted and the stored value is stale (SystemClock.elapsedRealtime
+        // resets on reboot but SharedPreferences persists). Reset to trigger prompt soon.
+        val maxReasonableDelay = intervalMs * 2
+        if (nextElapsed > nowElapsed + maxReasonableDelay) {
+            Timber.w("Detected stale next_prompt_elapsed ($nextElapsed) - device likely rebooted (now=$nowElapsed). Resetting.")
+            nextElapsed = nowElapsed + 60_000L // Trigger in 1 minute
+            prefs.edit().putLong(KEY_NEXT_PROMPT_ELAPSED, nextElapsed).apply()
+        }
+        
         if (nextElapsed <= nowElapsed) {
             maybeShowRatingPrompt(prefs)
             val newNextElapsed = nowElapsed + intervalMs
