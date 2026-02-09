@@ -1,5 +1,6 @@
 package com.opensource.tremorwatch
 
+import android.app.NotificationManager
 import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -25,6 +26,9 @@ class RatingActivity : ComponentActivity() {
             .edit()
             .putBoolean("prompt_followup_pending", false)
             .apply()
+
+        // Cancel the rating prompt notification so it can't be re-tapped to reopen
+        (getSystemService(NOTIFICATION_SERVICE) as NotificationManager).cancel(3)
         
         val sourceString = intent.getStringExtra("source") ?: "PROMPTED"
         val source = try {
