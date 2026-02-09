@@ -13,7 +13,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
  */
 @Database(
     entities = [TremorSample::class, SubjectiveRatingEntity::class, CalibrationDataEntity::class],
-    version = 2,
+    version = 3,
     exportSchema = false
 )
 abstract class TremorRoomDatabase : RoomDatabase() {
@@ -75,6 +75,28 @@ abstract class TremorRoomDatabase : RoomDatabase() {
             }
         }
         
+        /**
+         * Migration from v2 to v3: adds unique constraint on tremor_samples.timestamp.
+         * This deduplicates existing data and creates a unique index.
+         */
+        private val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                // First, delete duplicate entries keeping only the first one
+                database.execSQL("""
+                    DELETE FROM tremor_samples 
+                    WHERE id NOT IN (
+                        SELECT MIN(id) FROM tremor_samples GROUP BY timestamp
+                    )
+                """)
+                
+                // Drop the old non-unique index
+                database.execSQL("DROP INDEX IF EXISTS index_tremor_samples_timestamp")
+                
+                // Create new unique index on timestamp
+                database.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_tremor_samples_timestamp ON tremor_samples(timestamp)")
+            }
+        }
+        
         fun getDatabase(context: Context): TremorRoomDatabase {
             return INSTANCE ?: synchronized(this) {
                 val instance = Room.databaseBuilder(
@@ -82,7 +104,7 @@ abstract class TremorRoomDatabase : RoomDatabase() {
                     TremorRoomDatabase::class.java,
                     "tremor_data.db"
                 )
-                .addMigrations(MIGRATION_1_2)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
                 .build()
                 INSTANCE = instance
                 instance
