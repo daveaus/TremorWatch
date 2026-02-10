@@ -320,17 +320,18 @@ fun aggregateData(data: List<ChartData>, bucketMinutes: Int): List<ChartData> {
 }
 
 /**
- * Calculate tremor ratings from chart data
+ * Calculate tremor ratings from chart data.
+ * Severity uses a 0-10 clinical scale (SeverityCalculator output).
  */
 fun calculateTremorRatings(data: List<ChartData>): List<TremorRating> {
     return data.map { point ->
         val rating = when {
-            point.severity < 0.2 -> 0
-            point.severity < 0.4 -> 1
-            point.severity < 0.6 -> 2
-            point.severity < 0.8 -> 3
-            point.severity < 1.0 -> 4
-            else -> 5
+            point.severity < 1.0 -> 0   // Minimal/no tremor
+            point.severity < 2.0 -> 1   // Mild
+            point.severity < 4.0 -> 2   // Moderate
+            point.severity < 6.0 -> 3   // Moderate-severe
+            point.severity < 8.0 -> 4   // Severe
+            else -> 5                    // Very severe
         }
         TremorRating(point.timestamp, rating)
     }
@@ -1533,8 +1534,8 @@ fun TremorActivityChart(
                     if (blockTime >= startTime && blockTime <= endTime) {
                         val current = blocks.getOrDefault(blockTime, Triple(0, 0, 0))
                         val updated = when {
-                            point.severity < 0.3 -> Triple(current.first + 1, current.second, current.third)
-                            point.severity < 0.6 -> Triple(current.first, current.second + 1, current.third)
+                            point.severity < 2.0 -> Triple(current.first + 1, current.second, current.third)
+                            point.severity < 5.0 -> Triple(current.first, current.second + 1, current.third)
                             else -> Triple(current.first, current.second, current.third + 1)
                         }
                         blocks[blockTime] = updated

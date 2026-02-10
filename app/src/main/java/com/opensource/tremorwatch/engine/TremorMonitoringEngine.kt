@@ -61,6 +61,12 @@ class TremorMonitoringEngine(
         /** Maximum severity for a measurement to be considered reliable.
          *  High-severity outliers during "still" are likely sensor artifacts. */
         const val MAX_RELIABLE_SEVERITY = 5.0f
+
+        /** Accelerometer variance threshold for sensor-based "still" inference. */
+        const val FALLBACK_STILL_VARIANCE_THRESHOLD = 2.0f
+
+        /** Confidence assigned to sensor-based fallback activity (lower than API). */
+        const val FALLBACK_CONFIDENCE = 50
     }
 
     // Sensor data state
@@ -246,6 +252,22 @@ class TremorMonitoringEngine(
         else -> "unknown"
     }
 
+    /**
+     * Sensor-based activity fallback when Activity Recognition API data is stale.
+     * Uses accelerometer variance to infer STILL vs moving.
+     */
+    private fun inferActivityFromSensors(): Pair<Int, Int> {
+        if (accelWindow.size < 10) return Pair(DetectedActivity.UNKNOWN, 0)
+        val mean = accelWindow.average().toFloat()
+        val variance = accelWindow.map { (it - mean) * (it - mean) }.average().toFloat()
+        // Low variance + low gyro magnitude = likely still
+        return if (variance < FALLBACK_STILL_VARIANCE_THRESHOLD && lastAccelMagnitude < 0.5f) {
+            Pair(DetectedActivity.STILL, FALLBACK_CONFIDENCE)
+        } else {
+            Pair(DetectedActivity.UNKNOWN, 0)
+        }
+    }
+
     private fun adjustForActivity(
         baseConfidence: Float,
         baseSeverity: Float,
@@ -259,25 +281,29 @@ class TremorMonitoringEngine(
         }
         val isStale = ageMs > config.activityStaleThresholdMs
 
-        val activityType = if (isStale) DetectedActivity.UNKNOWN else state.type
-        val activityConfidence = if (isStale) 0 else state.confidence
+        // When Activity Recognition is stale, try sensor-based fallback
+        val (activityType, activityConfidence) = if (isStale) {
+            inferActivityFromSensors()
+        } else {
+            Pair(state.type, state.confidence)
+        }
 
-        // Exclude high-severity outliers from "reliable" classification.
-        // Extreme severity during STILL activity indicates sensor artifacts,
-        // not genuine tremor data suitable for clinical analysis.
-        val isReliable = !isStale &&
+        // Reliable measurement: STILL with sufficient confidence (API or fallback).
+        // Sensor-based fallback uses a lower confidence threshold since it's less certain.
+        val hasActivityData = activityConfidence > 0
+        val isReliable = hasActivityData &&
             activityType == DetectedActivity.STILL &&
-            activityConfidence >= config.activityHighConfidenceThreshold &&
+            activityConfidence >= FALLBACK_CONFIDENCE &&
             baseSeverity <= MAX_RELIABLE_SEVERITY
 
-        val excludeFromAnalysis = !isStale &&
+        val excludeFromAnalysis = hasActivityData &&
             activityConfidence >= config.activityHighConfidenceThreshold &&
             (activityType == DetectedActivity.RUNNING ||
              activityType == DetectedActivity.ON_BICYCLE ||
              activityType == DetectedActivity.IN_VEHICLE)
 
         if (!config.activityFilteringEnabled ||
-            isStale ||
+            !hasActivityData ||
             activityConfidence < config.activityLowConfidenceThreshold) {
             return ActivityAdjustment(
                 adjustedConfidence = baseConfidence,

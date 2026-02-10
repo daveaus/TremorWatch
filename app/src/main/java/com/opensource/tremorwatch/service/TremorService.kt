@@ -1029,6 +1029,11 @@ class TremorService : LifecycleService(), SensorEventListener {
         } else {
             Timber.i("Skipping gyro + accel registration - monitoring is paused (charging=$isCharging, worn=$isWatchWorn)")
         }
+        // Start Activity Recognition updates on boot (not just when config arrives from phone)
+        if (!isPausedDueToWearState) {
+            updateActivityRecognitionState(activityFilteringEnabled)
+        }
+
         // Off-body sensor: always register so we detect when watch is put back on
         offBodySensor?.let {
             try {
@@ -2302,9 +2307,12 @@ class TremorService : LifecycleService(), SensorEventListener {
     }
 
     private fun startActivityRecognitionUpdates() {
-        if (activityUpdatesRegistered) return
+        if (activityUpdatesRegistered) {
+            Timber.d("AR: Already registered, skipping")
+            return
+        }
         if (!hasActivityRecognitionPermission()) {
-            Timber.w("Activity Recognition permission not granted - skipping activity updates")
+            Timber.e("AR: ACTIVITY_RECOGNITION permission NOT granted - cannot start updates")
             return
         }
 
@@ -2315,18 +2323,19 @@ class TremorService : LifecycleService(), SensorEventListener {
         val pendingIntent = createActivityPendingIntent()
         activityUpdatePendingIntent = pendingIntent
 
+        Timber.i("AR: Requesting activity updates with interval=${MonitoringConstants.ACTIVITY_UPDATE_INTERVAL_MS}ms")
         try {
             activityRecognitionClient
                 ?.requestActivityUpdates(MonitoringConstants.ACTIVITY_UPDATE_INTERVAL_MS, pendingIntent)
                 ?.addOnSuccessListener {
                     activityUpdatesRegistered = true
-                    Timber.i("Activity Recognition updates enabled")
+                    Timber.i("AR: Activity Recognition updates ENABLED successfully")
                 }
                 ?.addOnFailureListener { e ->
-                    Timber.e("Failed to request activity updates: ${e.message}", e)
+                    Timber.e("AR: FAILED to request activity updates: ${e.message}", e)
                 }
         } catch (e: SecurityException) {
-            Timber.e("Missing ACTIVITY_RECOGNITION permission: ${e.message}")
+            Timber.e("AR: SecurityException - missing ACTIVITY_RECOGNITION permission: ${e.message}")
         }
     }
 

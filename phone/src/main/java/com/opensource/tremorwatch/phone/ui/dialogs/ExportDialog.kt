@@ -478,49 +478,60 @@ private const val CHUNK_SIZE = 5000
  * Write detailed CSV with streaming - fetches data in chunks to avoid OOM.
  */
 private suspend fun writeStreamingDetailedCsv(
-    writer: FileWriter, 
-    dbHelper: TremorDatabaseHelper, 
+    writer: FileWriter,
+    dbHelper: TremorDatabaseHelper,
     cutoffTime: Long
 ): Int {
-    // Write header
+    // Write header with scale documentation
     writer.write("# EXPERIMENTAL DATA - NOT FOR MEDICAL USE\n")
     writer.write("# This data is from experimental software and should not be used for diagnosis or treatment\n")
     writer.write("#\n")
-    writer.write("Timestamp,DateTime,Severity,Tremor Count,")
+    writer.write("# Severity Scale: 0-10 clinical score (0-1 minimal, 1-3 mild, 3-5 moderate, 5-7 moderate-severe, 7-10 severe)\n")
+    writer.write("# Severity Normalized: Severity / 10, clamped to 0-1 for analysis tools that expect a 0-1 range\n")
+    writer.write("# This export includes ALL samples (tremor and non-tremor) for unbiased analysis\n")
+    writer.write("#\n")
+    writer.write("Timestamp,DateTime,Severity,Severity Normalized,Tremor Count,")
     writer.write("Activity Type,Activity Confidence,Activity Age Ms,")
     writer.write("Adjusted Severity,Adjusted Confidence,Is Reliable,Exclude From Analysis\n")
 
     var offset = 0
     var totalRecords = 0
-    
+    var outlierCount = 0
+    var unknownActivityCount = 0
+    var reliableCount = 0
+
     while (true) {
         val chunk = dbHelper.getSamplesAfterPaged(cutoffTime, CHUNK_SIZE, offset)
         if (chunk.isEmpty()) break
-        
-        // Only export actual tremor events (tremorCount > 0) to avoid noise from
-        // non-tremor samples that had legacy fallback severity values
-        chunk.filter { it.tremorCount > 0 || it.severity > 0 }
-            .sortedBy { it.timestamp }.forEach { record ->
+
+        // Export ALL samples (unfiltered) for unbiased analysis
+        chunk.sortedBy { it.timestamp }.forEach { record ->
             val dateStr = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
                 .format(Date(record.timestamp))
 
             val metadata = parseMetadata(record.metadataJson)
-            writer.write("${record.timestamp},$dateStr,${String.format("%.6f", record.severity)},${record.tremorCount},")
+            val severityNorm = (record.severity / 10.0).coerceIn(0.0, 1.0)
+            writer.write("${record.timestamp},$dateStr,${String.format("%.6f", record.severity)},${String.format("%.6f", severityNorm)},${record.tremorCount},")
             writer.write("${metaValue(metadata, "activityType")},${metaValue(metadata, "activityConfidence")},")
             writer.write("${metaValue(metadata, "activityAgeMs")},")
             writer.write("${metaValue(metadata, "activityAdjustedSeverity")},${metaValue(metadata, "activityAdjustedConfidence")},")
             writer.write("${metaValue(metadata, "isReliableMeasurement")},${metaValue(metadata, "excludeFromAnalysis")}\n")
             totalRecords++
+
+            // Track quality metrics
+            if (record.severity > 10.0) outlierCount++
+            if (metaValue(metadata, "activityType") == "unknown") unknownActivityCount++
+            if (optBoolean(metadata, "isReliableMeasurement") == true) reliableCount++
         }
-        
+
         offset += CHUNK_SIZE
-        
+
         // Flush periodically to free memory
         if (offset % (CHUNK_SIZE * 5) == 0) {
             writer.flush()
         }
     }
-    
+
     return totalRecords
 }
 
@@ -528,15 +539,19 @@ private suspend fun writeStreamingDetailedCsv(
  * Write raw data CSV with streaming - fetches data in chunks to avoid OOM.
  */
 private suspend fun writeStreamingRawDataCsv(
-    writer: FileWriter, 
-    dbHelper: TremorDatabaseHelper, 
+    writer: FileWriter,
+    dbHelper: TremorDatabaseHelper,
     cutoffTime: Long
 ): Int {
-    // Write header
+    // Write header with scale documentation
     writer.write("# EXPERIMENTAL DATA - NOT FOR MEDICAL USE\n")
     writer.write("# This data is from experimental software and should not be used for diagnosis or treatment\n")
     writer.write("#\n")
-    writer.write("Timestamp,DateTime,Severity,Tremor Count,")
+    writer.write("# Severity Scale: 0-10 clinical score (0-1 minimal, 1-3 mild, 3-5 moderate, 5-7 moderate-severe, 7-10 severe)\n")
+    writer.write("# Severity Normalized: Severity / 10, clamped to 0-1 for analysis tools that expect a 0-1 range\n")
+    writer.write("# This export includes ALL samples (tremor and non-tremor) for unbiased analysis\n")
+    writer.write("#\n")
+    writer.write("Timestamp,DateTime,Severity,Severity Normalized,Tremor Count,")
     writer.write("X,Y,Z,Magnitude,Accel Magnitude,Confidence,")
     writer.write("Is Worn,Is Charging,Dominant Freq,Tremor Band Power,")
     writer.write("Total Power,Band Ratio,Peak Prominence,Watch ID,")
@@ -545,22 +560,21 @@ private suspend fun writeStreamingRawDataCsv(
 
     var offset = 0
     var totalRecords = 0
-    
+
     while (true) {
         val chunk = dbHelper.getSamplesAfterPaged(cutoffTime, CHUNK_SIZE, offset)
         if (chunk.isEmpty()) break
-        
-        // Only export actual tremor events to avoid noise from
-        // non-tremor samples that had legacy fallback severity values
-        chunk.filter { it.tremorCount > 0 || it.severity > 0 }
-            .sortedBy { it.timestamp }.forEach { sample ->
+
+        // Export ALL samples (unfiltered) for unbiased analysis
+        chunk.sortedBy { it.timestamp }.forEach { sample ->
             val dateStr = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US)
                 .format(Date(sample.timestamp))
 
             val metadata = parseMetadata(sample.metadataJson)
+            val severityNorm = (sample.severity / 10.0).coerceIn(0.0, 1.0)
 
             writer.write("${sample.timestamp},$dateStr,")
-            writer.write("${String.format("%.6f", sample.severity)},${sample.tremorCount},")
+            writer.write("${String.format("%.6f", sample.severity)},${String.format("%.6f", severityNorm)},${sample.tremorCount},")
             writer.write("${sample.x ?: ""},${sample.y ?: ""},${sample.z ?: ""},")
             writer.write("${sample.magnitude ?: ""},${sample.accelMagnitude ?: ""},${sample.confidence ?: ""},")
             writer.write("${sample.isWorn ?: ""},${sample.isCharging ?: ""},")
@@ -572,9 +586,9 @@ private suspend fun writeStreamingRawDataCsv(
             writer.write("${metaValue(metadata, "isReliableMeasurement")},${metaValue(metadata, "excludeFromAnalysis")}\n")
             totalRecords++
         }
-        
+
         offset += CHUNK_SIZE
-        
+
         if (offset % (CHUNK_SIZE * 5) == 0) {
             writer.flush()
         }
@@ -589,13 +603,15 @@ private suspend fun writeStreamingRawDataCsv(
  * which is much smaller than raw samples.
  */
 private suspend fun writeStreamingSummaryCsv(
-    writer: FileWriter, 
-    dbHelper: TremorDatabaseHelper, 
+    writer: FileWriter,
+    dbHelper: TremorDatabaseHelper,
     cutoffTime: Long
 ): Int {
-    // Write header
+    // Write header with scale documentation
     writer.write("# EXPERIMENTAL DATA - NOT FOR MEDICAL USE\n")
     writer.write("# This data is from experimental software and should not be used for diagnosis or treatment\n")
+    writer.write("#\n")
+    writer.write("# Severity Scale: 0-10 clinical score (0-1 minimal, 1-3 mild, 3-5 moderate, 5-7 moderate-severe, 7-10 severe)\n")
     writer.write("#\n")
     writer.write("Hour,Avg Severity,Max Severity,Tremor Events,Duration Minutes,")
     writer.write("Activity Type,Avg Activity Confidence,Avg Adjusted Severity,Avg Adjusted Confidence,")
