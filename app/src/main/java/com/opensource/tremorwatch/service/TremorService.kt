@@ -857,7 +857,11 @@ class TremorService : LifecycleService(), SensorEventListener {
             onBatchReady = { batch ->
                 // Called when engine has collected a full batch
                 saveBatchLocally(batch)
-                
+
+                // Immediately attempt to send pending batches to phone
+                // This avoids waiting for the next upload alarm (which could be 60 min away)
+                retryFailedUploads(forceUpload = false)
+
                 // If calibration is active, record samples for subjective rating calibration
                 if (::calibrationCaptureManager.isInitialized && calibrationCaptureManager.isCapturing()) {
                     for (data in batch) {
@@ -1709,11 +1713,11 @@ class TremorService : LifecycleService(), SensorEventListener {
                             // Reschedule next upload alarm for automatic uploads only
                             scheduleUploadAlarm()
                         }
-                        // Run upload in background thread to avoid blocking broadcast receiver
-                        Thread {
+                        // Run upload in background coroutine to avoid blocking broadcast receiver
+                        serviceScope.launch {
                             retryFailedUploads(forceUpload = isManual)
                             cleanupOldLocalStorage()
-                        }.start()
+                        }
                     }
                     "com.opensource.tremorwatch.EMERGENCY_CLEAR" -> {
                         Timber.w("EMERGENCY CLEAR triggered - deleting all pending batches")

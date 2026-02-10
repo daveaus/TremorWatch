@@ -30,8 +30,11 @@ class UploadAlarmReceiver : BroadcastReceiver() {
         }
 
         // Trigger upload by sending broadcast to service
-        val uploadIntent = Intent("com.opensource.tremorwatch.TRIGGER_UPLOAD")
-        uploadIntent.putExtra("manual", false)  // Explicitly mark as automatic
+        // Must set package for RECEIVER_NOT_EXPORTED on Android 13+
+        val uploadIntent = Intent("com.opensource.tremorwatch.TRIGGER_UPLOAD").apply {
+            putExtra("manual", false)
+            setPackage(context.packageName)
+        }
         context.sendBroadcast(uploadIntent)
 
         Log.d(TAG, "Upload trigger broadcast sent (automatic)")
