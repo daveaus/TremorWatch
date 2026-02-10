@@ -26,6 +26,7 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.gestures.detectTapGestures
 import com.opensource.tremorwatch.shared.models.TremorBatch
@@ -1595,9 +1596,17 @@ fun SubjectiveRatingsChart(
     val ChartBackgroundGradientEnd = Color(0xFF1A2530)
     val ChartGridColor = Color(0xFF4A5A6A)
     val ChartVerticalGridColor = Color(0xFF7A8A9A)
-    val ManualRatingColor = Color(0xFF26D9B0)  // Teal for manual
-    val PromptedRatingColor = Color(0xFFFFAB40) // Orange for prompted
-    val ChangeRatingColor = Color(0xFFE040FB)   // Purple for tremor change
+    val ChartLabelColor = Color(0xFF8A9AAA)
+
+    // Color palette based on rating score (0-5)
+    val ratingColors = listOf(
+        Color(0xFF4CAF50),  // 0 - none (green)
+        Color(0xFF8BC34A),  // 1 - minimal (light green)
+        Color(0xFFFFC107),  // 2 - mild (yellow)
+        Color(0xFFFFEB3B),  // 3 - moderate (light orange)
+        Color(0xFFFF9800),  // 4 - high (orange)
+        Color(0xFFFF5252)   // 5 - severe (red)
+    )
     
     Card(
         modifier = modifier,
@@ -1608,23 +1617,39 @@ fun SubjectiveRatingsChart(
             val visibleRatings = remember(ratings, startTime, endTime) {
                 ratings.filter { it.timestamp >= startTime && it.timestamp <= endTime }
             }
-            
+
+            // State for selected rating dot
+            var selectedRating by remember { mutableStateOf<RatingChartPoint?>(null) }
+
             Text(
                 text = "Subjective Ratings",
                 style = MaterialTheme.typography.titleSmall
             )
-            
-            Text(
-                text = "${visibleRatings.size} ratings • 1 (minimal) to 5 (severe)",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            
+
+            // Show selected dot info or default subtitle
+            if (selectedRating != null) {
+                val timeFormat = SimpleDateFormat("h:mm a", Locale.getDefault())
+                val timeStr = timeFormat.format(Date(selectedRating!!.timestamp))
+                val ratingLabels = listOf("None", "Minimal", "Mild", "Moderate", "High", "Severe")
+                val label = ratingLabels.getOrElse(selectedRating!!.rating) { "Unknown" }
+                Text(
+                    text = "$timeStr • Rating: ${selectedRating!!.rating} ($label)",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary
+                )
+            } else {
+                Text(
+                    text = "${visibleRatings.size} ratings • Tap for details",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+
             Spacer(modifier = Modifier.height(8.dp))
-            
+
             // Chart Canvas
             val timeRange = endTime - startTime
-            
+
             // Calculate hour interval for grid lines
             val hoursInRange = remember(timeRange) { (timeRange / (60 * 60 * 1000)).toInt().coerceAtLeast(1) }
             val hourInterval = remember(hoursInRange) {
@@ -1636,24 +1661,54 @@ fun SubjectiveRatingsChart(
                     else -> 12
                 }
             }
-            
+
             BoxWithConstraints(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(120.dp)
+                    .height(180.dp)
                     .clip(RoundedCornerShape(8.dp))
                     .background(
                         Brush.verticalGradient(
                             colors = listOf(ChartBackgroundGradientStart, ChartBackgroundGradientEnd)
                         )
                     )
+                    .pointerInput(visibleRatings, startTime, endTime, timeRange) {
+                        detectTapGestures { offset ->
+                            val chartPadding = 16.dp.toPx()
+                            val chartWidth = size.width - (2 * chartPadding)
+                            val chartHeight = size.height - (2 * chartPadding)
+                            val adjustedX = offset.x - chartPadding
+                            val adjustedY = offset.y - chartPadding
+
+                            if (adjustedX >= 0 && adjustedX <= chartWidth && timeRange > 0) {
+                                // Find nearest dot within a reasonable tap radius
+                                val tapRadius = 30.dp.toPx()
+                                var nearest: RatingChartPoint? = null
+                                var nearestDist = Float.MAX_VALUE
+
+                                visibleRatings.forEach { rating ->
+                                    val dotX = ((rating.timestamp - startTime).toFloat() / timeRange) * chartWidth
+                                    val dotY = chartHeight - (chartHeight * rating.rating / 5f)
+                                    val dist = kotlin.math.sqrt(
+                                        (adjustedX - dotX) * (adjustedX - dotX) +
+                                        (adjustedY - dotY) * (adjustedY - dotY)
+                                    )
+                                    if (dist < tapRadius && dist < nearestDist) {
+                                        nearestDist = dist
+                                        nearest = rating
+                                    }
+                                }
+                                selectedRating = nearest
+                            }
+                        }
+                    }
             ) {
                 Canvas(modifier = Modifier.fillMaxSize().padding(16.dp)) {
                     val width = size.width
                     val height = size.height
-                    
+
                     if (timeRange <= 0) return@Canvas
-                    
+
                     // Draw vertical grid lines at hour intervals
                     val calendar = Calendar.getInstance()
                     calendar.timeInMillis = startTime
@@ -1663,7 +1718,7 @@ fun SubjectiveRatingsChart(
                     if (calendar.timeInMillis < startTime) {
                         calendar.add(Calendar.HOUR_OF_DAY, 1)
                     }
-                    
+
                     while (calendar.timeInMillis <= endTime) {
                         val hour = calendar.get(Calendar.HOUR_OF_DAY)
                         if (hour % hourInterval == 0) {
@@ -1677,10 +1732,10 @@ fun SubjectiveRatingsChart(
                         }
                         calendar.add(Calendar.HOUR_OF_DAY, 1)
                     }
-                    
-                    // Draw horizontal grid lines for ratings 1-5
-                    for (i in 1..5) {
-                        val y = height - (height * (i - 1) / 4f)
+
+                    // Draw horizontal grid lines for ratings 0-5
+                    for (i in 0..5) {
+                        val y = height - (height * i / 5f)
                         drawLine(
                             color = ChartGridColor.copy(alpha = 0.4f),
                             start = Offset(0f, y),
@@ -1689,66 +1744,129 @@ fun SubjectiveRatingsChart(
                             pathEffect = PathEffect.dashPathEffect(floatArrayOf(4f, 4f))
                         )
                     }
-                    
+
+                    // Draw faint connecting line between sorted points
+                    val sortedRatings = visibleRatings.sortedBy { it.timestamp }
+                    if (sortedRatings.size > 1) {
+                        for (i in 0 until sortedRatings.lastIndex) {
+                            val current = sortedRatings[i]
+                            val next = sortedRatings[i + 1]
+                            val x1 = ((current.timestamp - startTime).toFloat() / timeRange) * width
+                            val y1 = height - (height * current.rating / 5f)
+                            val x2 = ((next.timestamp - startTime).toFloat() / timeRange) * width
+                            val y2 = height - (height * next.rating / 5f)
+                            drawLine(
+                                color = Color.Gray.copy(alpha = 0.5f),
+                                start = Offset(x1.coerceIn(6f, width - 6f), y1),
+                                end = Offset(x2.coerceIn(6f, width - 6f), y2),
+                                strokeWidth = 1.5f
+                            )
+                        }
+                    }
+
                     // Draw rating dots
                     visibleRatings.forEach { rating ->
                         val x = ((rating.timestamp - startTime).toFloat() / timeRange) * width
-                        // Rating 1 = bottom, Rating 5 = top
-                        val y = height - (height * (rating.rating - 1) / 4f)
-                        
-                        val dotColor = when (rating.source) {
-                            "MANUAL" -> ManualRatingColor
-                            "PROMPTED" -> PromptedRatingColor
-                            else -> ChangeRatingColor
+                        // Rating 0 = bottom, Rating 5 = top
+                        val y = height - (height * rating.rating / 5f)
+
+                        val dotColor = ratingColors.getOrElse(rating.rating) { Color.Gray }
+                        val clampedX = x.coerceIn(6f, width - 6f)
+
+                        val isSelected = selectedRating?.timestamp == rating.timestamp
+
+                        // Draw selection highlight ring
+                        if (isSelected) {
+                            drawCircle(
+                                color = Color.White.copy(alpha = 0.4f),
+                                radius = 10f,
+                                center = Offset(clampedX, y)
+                            )
                         }
-                        
+
                         // Draw outer circle (border effect)
                         drawCircle(
                             color = dotColor.copy(alpha = 0.3f),
-                            radius = 12f,
-                            center = Offset(x.coerceIn(12f, width - 12f), y)
+                            radius = 6f,
+                            center = Offset(clampedX, y)
                         )
-                        
+
                         // Draw inner circle
                         drawCircle(
                             color = dotColor,
-                            radius = 8f,
-                            center = Offset(x.coerceIn(12f, width - 12f), y)
+                            radius = 4f,
+                            center = Offset(clampedX, y)
                         )
                     }
                 }
             }
             
+            // Time axis labels - matching UnifiedTremorChart style
             Spacer(modifier = Modifier.height(8.dp))
-            
-            // Legend
+            BoxWithConstraints(modifier = Modifier.fillMaxWidth().height(20.dp).padding(horizontal = 16.dp)) {
+                val containerWidth = maxWidth
+                val timeLabels = remember(startTime, endTime, timeRange) {
+                    val labels = mutableListOf<Pair<String, Float>>()
+                    val hoursInRange = (timeRange / (60 * 60 * 1000)).toInt()
+
+                    if (hoursInRange <= 1) {
+                        listOf(0f, 0.5f, 1f).forEach { pos ->
+                            val timestamp = startTime + (timeRange * pos).toLong()
+                            labels.add(Pair(formatTimeWithMinutes(timestamp), pos))
+                        }
+                    } else {
+                        listOf(0f, 0.25f, 0.5f, 0.75f, 1f).forEach { pos ->
+                            val timestamp = startTime + (timeRange * pos).toLong()
+                            labels.add(Pair(formatTime(timestamp), pos))
+                        }
+                    }
+                    labels
+                }
+
+                timeLabels.forEach { (label, xPos) ->
+                    val xOffset = (containerWidth * xPos) - 20.dp
+                    Text(
+                        text = label,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = ChartLabelColor,
+                        modifier = Modifier
+                            .offset(x = xOffset)
+                            .width(50.dp),
+                        textAlign = TextAlign.Center
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(6.dp))
+
+            // Color legend for rating scale
+            val ratingLabels = listOf("0 None", "1 Min", "2 Mild", "3 Mod", "4 High", "5 Sev")
             Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.Center,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 4.dp),
+                horizontalArrangement = Arrangement.SpaceEvenly,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                LegendItem("Manual", ManualRatingColor)
-                Spacer(modifier = Modifier.width(16.dp))
-                LegendItem("Prompted", PromptedRatingColor)
-                Spacer(modifier = Modifier.width(16.dp))
-                LegendItem("Auto", ChangeRatingColor)
-            }
-            
-            // Y-axis labels
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Text(
-                    text = "1 (Minimal)",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
-                )
-                Text(
-                    text = "5 (Severe)",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
-                )
+                ratingLabels.forEachIndexed { index, label ->
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(3.dp)
+                    ) {
+                        Canvas(modifier = Modifier.size(8.dp)) {
+                            drawCircle(
+                                color = ratingColors[index],
+                                radius = size.minDimension / 2f
+                            )
+                        }
+                        Text(
+                            text = label,
+                            style = MaterialTheme.typography.labelSmall,
+                            fontSize = 9.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                        )
+                    }
+                }
             }
         }
     }
