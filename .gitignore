@@ -15,17 +15,33 @@
 .agent/
 .claude/
 
+# Project Context
+CLAUDE.md
+CLAUDE_CODE_BRIEFING.md
+PR_DESCRIPTION.md
+codexchanges*.md
+codexreview*.md
+codextremordetectionimprovements.md
+investigation_report*.md
+subjectiveratingsissue.md
+tremordetection.md
+version020*.md
+
+
 # Syncthing
 .stfolder/
 .stignore
 
 # Screenshots and temporary files
 *.png
-!app/src/main/res/**/ic_launcher*.png
-!phone/src/main/res/**/ic_launcher*.png
-!screenshot.png
-!watch_screenshot.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+*.mp4
 *.ps1
+*.bat
+
 
 # Generated files
 bin/
@@ -91,7 +107,11 @@ tobedeleted/
 *.orig
 *.bak
 *.swp
-version020.md
+*.jsonl
+*.csv
+*_dump.txt
+investigation_report.md
+
 
 # Windows reserved filenames
 NUL
