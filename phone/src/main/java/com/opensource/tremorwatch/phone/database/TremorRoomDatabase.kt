@@ -13,7 +13,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
  */
 @Database(
     entities = [TremorSample::class, SubjectiveRatingEntity::class, CalibrationDataEntity::class],
-    version = 3,
+    version = 4,
     exportSchema = false
 )
 abstract class TremorRoomDatabase : RoomDatabase() {
@@ -97,6 +97,16 @@ abstract class TremorRoomDatabase : RoomDatabase() {
             }
         }
         
+        /**
+         * Migration from v3 to v4: adds metadataJson column to calibration_data.
+         * Stores extended fields (tremor type, activity context, accelerometer) as JSON.
+         */
+        private val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL("ALTER TABLE calibration_data ADD COLUMN metadataJson TEXT DEFAULT NULL")
+            }
+        }
+
         fun getDatabase(context: Context): TremorRoomDatabase {
             return INSTANCE ?: synchronized(this) {
                 val instance = Room.databaseBuilder(
@@ -104,7 +114,7 @@ abstract class TremorRoomDatabase : RoomDatabase() {
                     TremorRoomDatabase::class.java,
                     "tremor_data.db"
                 )
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
                 .build()
                 INSTANCE = instance
                 instance

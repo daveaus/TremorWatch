@@ -147,5 +147,18 @@ interface TremorDao {
      */
     @Query("SELECT COUNT(*) FROM subjective_ratings WHERE timestamp >= :startOfDay")
     suspend fun getRatingCountSince(startOfDay: Long): Int
+
+    /**
+     * Count calibration samples for a specific rating.
+     */
+    @Query("SELECT COUNT(*) FROM calibration_data WHERE ratingId = :ratingId")
+    suspend fun getCalibrationCountForRating(ratingId: String): Int
+
+    /**
+     * Mark a rating as having calibration data (set flag to true).
+     * Called after calibration file is parsed and inserted into DB.
+     */
+    @Query("UPDATE subjective_ratings SET calibrationModeEnabled = 1 WHERE id = :ratingId")
+    suspend fun markRatingCalibrated(ratingId: String)
 }
 

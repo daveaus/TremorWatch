@@ -674,55 +674,61 @@ private suspend fun writeSubjectiveRatingsCsv(
 ): Int {
     val db = TremorRoomDatabase.getDatabase(context)
     val dao = db.tremorDao()
-    
+
     // Write header
     writer.write("# SUBJECTIVE TREMOR RATINGS - EXPERIMENTAL DATA\n")
     writer.write("# User-reported tremor severity ratings with optional calibration sensor data\n")
+    writer.write("# Detected Severity: 0-10 clinical score at rating time (from watch algorithm)\n")
+    writer.write("# Rating: 0-5 user-reported scale (0=no tremor, 5=severe)\n")
     writer.write("#\n")
     writer.write("Timestamp,DateTime,Rating,Source,Watch ID,")
     writer.write("Detected Severity,Detected Confidence,Detected Frequency,")
     writer.write("Calibration Enabled,Calibration Duration Sec,Notes,")
     writer.write("Calibration Sample Count\n")
-    
+
     // Get ratings in time range
     val ratings = dao.getRatingsAfter(cutoffTime)
-    
+
+    // Pre-compute calibration counts for ALL ratings (not gated on flag)
+    val calibrationCounts = mutableMapOf<String, Int>()
+    for (rating in ratings) {
+        val count = dao.getCalibrationCountForRating(rating.id)
+        if (count > 0) calibrationCounts[rating.id] = count
+    }
+
     var totalRecords = 0
     for (rating in ratings) {
         val dateStr = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
             .format(Date(rating.timestamp))
-        
-        // Count calibration samples for this rating
-        val calibrationCount = if (rating.calibrationModeEnabled) {
-            dao.getCalibrationDataForRating(rating.id).size
-        } else {
-            0
-        }
-        
+
+        val calibrationCount = calibrationCounts[rating.id] ?: 0
+        val hasCalibration = calibrationCount > 0
+
         writer.write("${rating.timestamp},$dateStr,${rating.rating},${rating.source},")
         writer.write("${rating.watchId ?: ""},")
         writer.write("${rating.detectedSeverity?.let { String.format("%.6f", it) } ?: ""},")
         writer.write("${rating.detectedConfidence?.let { String.format("%.3f", it) } ?: ""},")
         writer.write("${rating.detectedFrequency?.let { String.format("%.2f", it) } ?: ""},")
-        writer.write("${rating.calibrationModeEnabled},${rating.calibrationDurationSeconds},")
+        writer.write("${rating.calibrationModeEnabled || hasCalibration},${rating.calibrationDurationSeconds},")
         writer.write("${rating.notes?.replace(",", ";")?.replace("\n", " ") ?: ""},")
         writer.write("$calibrationCount\n")
         totalRecords++
     }
-    
-    // If there's calibration data, write it as a separate section
-    val ratingsWithCalibration = ratings.filter { it.calibrationModeEnabled }
+
+    // Write calibration sensor data section if ANY rating has actual calibration data
+    val ratingsWithCalibration = ratings.filter { (calibrationCounts[it.id] ?: 0) > 0 }
     if (ratingsWithCalibration.isNotEmpty()) {
         writer.write("\n# CALIBRATION SENSOR DATA\n")
+        writer.write("# Extended fields (accelMagnitude, tremorType, activityType, etc.) are in the Metadata JSON column\n")
         writer.write("Rating ID,Rating Timestamp,Sample Timestamp,X,Y,Z,Magnitude,")
         writer.write("Dominant Freq,Tremor Band Power,Total Power,Band Ratio,Peak Prominence,")
-        writer.write("Confidence,Severity,Is Worn,Is Charging\n")
-        
+        writer.write("Confidence,Severity,Is Worn,Is Charging,Metadata JSON\n")
+
         for (rating in ratingsWithCalibration) {
             val calibrationData = dao.getCalibrationDataForRating(rating.id)
             val ratingDateStr = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
                 .format(Date(rating.timestamp))
-            
+
             for (sample in calibrationData) {
                 writer.write("${rating.id},$ratingDateStr,${sample.timestamp},")
                 writer.write("${String.format("%.6f", sample.x)},${String.format("%.6f", sample.y)},${String.format("%.6f", sample.z)},")
@@ -730,11 +736,14 @@ private suspend fun writeSubjectiveRatingsCsv(
                 writer.write("${String.format("%.6f", sample.tremorBandPower)},${String.format("%.6f", sample.totalPower)},")
                 writer.write("${String.format("%.4f", sample.bandRatio)},${String.format("%.4f", sample.peakProminence)},")
                 writer.write("${String.format("%.4f", sample.confidence)},${String.format("%.6f", sample.severity)},")
-                writer.write("${sample.isWorn},${sample.isCharging}\n")
+                writer.write("${sample.isWorn},${sample.isCharging},")
+                // Metadata JSON - escape any commas within the JSON by quoting the field
+                val meta = sample.metadataJson?.replace("\"", "\"\"") ?: ""
+                writer.write("\"$meta\"\n")
             }
         }
     }
-    
+
     return totalRecords
 }
 

@@ -272,17 +272,43 @@ fun TremorMonitorApp(
                     )
                 }
                 showRating -> {
+                    val ratingPrefs = context.getSharedPreferences("rating_prefs", Context.MODE_PRIVATE)
+                    val calibrationEnabled = ratingPrefs.getBoolean("calibration_enabled", false)
+                    val calibrationDuration = ratingPrefs.getInt("calibration_duration_seconds", 60)
+                    val watchId = try {
+                        android.provider.Settings.Secure.getString(
+                            context.contentResolver,
+                            android.provider.Settings.Secure.ANDROID_ID
+                        ) ?: "unknown"
+                    } catch (e: Exception) { "unknown" }
+
                     RatingScreen(
                         source = RatingSource.MANUAL,
-                        calibrationModeEnabled = false,
+                        calibrationModeEnabled = calibrationEnabled,
                         onRatingSubmit = { rating, dontAskToday ->
-                            // Send rating to phone using WatchDataSender
+                            val ratingId = java.util.UUID.randomUUID().toString()
+
                             WatchDataSender(context).sendSubjectiveRating(
+                                ratingId = ratingId,
                                 rating = rating,
-                                source = "MANUAL"
+                                source = "MANUAL",
+                                watchId = watchId,
+                                calibrationModeEnabled = calibrationEnabled,
+                                calibrationDurationSeconds = calibrationDuration
                             ) { success ->
                                 android.util.Log.i("MainActivity", "Rating sent: $success")
                             }
+
+                            // Start calibration capture if enabled
+                            if (calibrationEnabled) {
+                                val calibIntent = Intent(context, com.opensource.tremorwatch.service.TremorService::class.java).apply {
+                                    action = com.opensource.tremorwatch.service.TremorService.ACTION_START_CALIBRATION
+                                    putExtra(com.opensource.tremorwatch.service.TremorService.EXTRA_RATING_ID, ratingId)
+                                    putExtra(com.opensource.tremorwatch.service.TremorService.EXTRA_CALIBRATION_DURATION, calibrationDuration)
+                                }
+                                context.startService(calibIntent)
+                            }
+
                             showRating = false
                         },
                         onUndo = {

@@ -52,13 +52,13 @@ data class CalibrationDataEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val ratingId: String,                     // Links to SubjectiveRatingEntity
     val timestamp: Long,
-    
-    // Raw accelerometer values
+
+    // Raw gyroscope values
     val x: Float,
     val y: Float,
     val z: Float,
     val magnitude: Float,
-    
+
     // FFT analysis results
     val dominantFrequency: Float,
     val tremorBandPower: Float,
@@ -67,8 +67,12 @@ data class CalibrationDataEntity(
     val peakProminence: Float,
     val confidence: Float,
     val severity: Double,
-    
+
     // Context
     val isWorn: Boolean,
-    val isCharging: Boolean
+    val isCharging: Boolean,
+
+    // Extended metadata JSON (tremor type, activity context, accelerometer, etc.)
+    // Avoids schema churn for new fields - stored as JSON blob
+    val metadataJson: String? = null
 )

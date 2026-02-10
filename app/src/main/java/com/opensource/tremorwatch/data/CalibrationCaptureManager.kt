@@ -92,7 +92,7 @@ class CalibrationCaptureManager(private val context: Context) {
      * @param durationSeconds How long to capture (30-120s)
      * @return true if capture started, false if already capturing or limit reached
      */
-    fun startCapture(ratingId: String, durationSeconds: Int): Boolean {
+    fun startCapture(ratingId: String, durationSeconds: Int, watchId: String = "", algorithmVersion: String = ""): Boolean {
         if (isCapturing.get()) {
             Timber.w("Already capturing calibration data")
             return false
@@ -123,7 +123,9 @@ class CalibrationCaptureManager(private val context: Context) {
                 ratingId = ratingId,
                 startTime = System.currentTimeMillis(),
                 durationSeconds = durationSeconds,
-                schemaVersion = 1
+                schemaVersion = 2,
+                watchId = watchId,
+                algorithmVersion = algorithmVersion
             )
             currentWriter?.write(json.encodeToString(header))
             currentWriter?.newLine()
@@ -311,7 +313,9 @@ data class CalibrationHeader(
     val ratingId: String,
     val startTime: Long,
     val durationSeconds: Int,
-    val schemaVersion: Int
+    val schemaVersion: Int,
+    val watchId: String = "",
+    val algorithmVersion: String = ""
 )
 
 /**
@@ -325,16 +329,21 @@ data class CalibrationFooter(
 )
 
 /**
- * Individual calibration sample (sensor + FFT data)
+ * Individual calibration sample (sensor + FFT data + full context)
+ * Captures everything from TremorMonitoringEngine.TremorData for research analysis.
  */
 @Serializable
 data class CalibrationSample(
     val type: String = "sample",
     val timestamp: Long,
+    // Gyroscope axes
     val x: Float,
     val y: Float,
     val z: Float,
     val magnitude: Float,
+    // Accelerometer
+    val accelMagnitude: Float = 0f,
+    // FFT analysis
     val dominantFrequency: Float,
     val tremorBandPower: Float,
     val totalPower: Float,
@@ -342,6 +351,22 @@ data class CalibrationSample(
     val peakProminence: Float,
     val confidence: Float,
     val severity: Double,
+    val baselineMultiplier: Float = 1f,
+    // Tremor classification
+    val tremorType: String = "unknown",
+    val tremorTypeConfidence: Float = 0f,
+    val isRestingState: Boolean = false,
+    // Activity context
+    val activityType: String = "unknown",
+    val activityConfidence: Float = 0f,
+    val activityAgeMs: Long = -1L,
+    // Activity-adjusted metrics
+    val activityAdjustedConfidence: Float = 0f,
+    val activityAdjustedSeverity: Float = 0f,
+    // Quality flags
+    val isReliableMeasurement: Boolean = false,
+    val excludeFromAnalysis: Boolean = false,
+    // Context
     val isWorn: Boolean,
     val isCharging: Boolean
 )

@@ -387,6 +387,9 @@ class WatchDataListenerService : WearableListenerService() {
 
             Log.i(TAG, "✓ Saved calibration file to: ${calibrationFile.absolutePath}")
 
+            // Parse JSONL file and insert calibration data into database
+            parseCalibrationFileIntoDB(calibrationJson)
+
             // Close channel
             channelClient.close(channel).await()
             Log.d(TAG, "Calibration channel closed")
@@ -398,6 +401,101 @@ class WatchDataListenerService : WearableListenerService() {
             } catch (closeError: Exception) {
                 Log.w(TAG, "Failed to close channel after error: ${closeError.message}")
             }
+        }
+    }
+
+    /**
+     * Parse a JSONL calibration file and insert samples into the database.
+     * Format: one JSON object per line - header, then samples, then footer.
+     * Links calibration data to the SubjectiveRatingEntity via ratingId.
+     */
+    private suspend fun parseCalibrationFileIntoDB(jsonlContent: String) {
+        try {
+            val lines = jsonlContent.lines().filter { it.isNotBlank() }
+            if (lines.isEmpty()) {
+                Log.w(TAG, "Empty calibration file, skipping DB insert")
+                return
+            }
+
+            var ratingId: String? = null
+            val calibrationEntities = mutableListOf<CalibrationDataEntity>()
+
+            for (line in lines) {
+                try {
+                    val obj = JSONObject(line)
+                    when (obj.optString("type")) {
+                        "header" -> {
+                            ratingId = obj.getString("ratingId")
+                            Log.d(TAG, "Calibration header: ratingId=$ratingId")
+                        }
+                        "sample" -> {
+                            val rid = ratingId ?: continue
+
+                            // Build metadata JSON with extended fields
+                            val metadata = JSONObject()
+                            if (obj.has("accelMagnitude")) metadata.put("accelMagnitude", obj.getDouble("accelMagnitude"))
+                            if (obj.has("baselineMultiplier")) metadata.put("baselineMultiplier", obj.getDouble("baselineMultiplier"))
+                            if (obj.has("tremorType")) metadata.put("tremorType", obj.getString("tremorType"))
+                            if (obj.has("tremorTypeConfidence")) metadata.put("tremorTypeConfidence", obj.getDouble("tremorTypeConfidence"))
+                            if (obj.has("isRestingState")) metadata.put("isRestingState", obj.getBoolean("isRestingState"))
+                            if (obj.has("activityType")) metadata.put("activityType", obj.getString("activityType"))
+                            if (obj.has("activityConfidence")) metadata.put("activityConfidence", obj.getDouble("activityConfidence"))
+                            if (obj.has("activityAgeMs")) metadata.put("activityAgeMs", obj.getLong("activityAgeMs"))
+                            if (obj.has("activityAdjustedConfidence")) metadata.put("activityAdjustedConfidence", obj.getDouble("activityAdjustedConfidence"))
+                            if (obj.has("activityAdjustedSeverity")) metadata.put("activityAdjustedSeverity", obj.getDouble("activityAdjustedSeverity"))
+                            if (obj.has("isReliableMeasurement")) metadata.put("isReliableMeasurement", obj.getBoolean("isReliableMeasurement"))
+                            if (obj.has("excludeFromAnalysis")) metadata.put("excludeFromAnalysis", obj.getBoolean("excludeFromAnalysis"))
+
+                            calibrationEntities.add(
+                                CalibrationDataEntity(
+                                    ratingId = rid,
+                                    timestamp = obj.getLong("timestamp"),
+                                    x = obj.getDouble("x").toFloat(),
+                                    y = obj.getDouble("y").toFloat(),
+                                    z = obj.getDouble("z").toFloat(),
+                                    magnitude = obj.getDouble("magnitude").toFloat(),
+                                    dominantFrequency = obj.optDouble("dominantFrequency", 0.0).toFloat(),
+                                    tremorBandPower = obj.optDouble("tremorBandPower", 0.0).toFloat(),
+                                    totalPower = obj.optDouble("totalPower", 0.0).toFloat(),
+                                    bandRatio = obj.optDouble("bandRatio", 0.0).toFloat(),
+                                    peakProminence = obj.optDouble("peakProminence", 0.0).toFloat(),
+                                    confidence = obj.optDouble("confidence", 0.0).toFloat(),
+                                    severity = obj.optDouble("severity", 0.0),
+                                    isWorn = obj.optBoolean("isWorn", true),
+                                    isCharging = obj.optBoolean("isCharging", false),
+                                    metadataJson = if (metadata.length() > 0) metadata.toString() else null
+                                )
+                            )
+                        }
+                        "footer" -> {
+                            Log.d(TAG, "Calibration footer: totalSamples=${obj.optInt("totalSamples")}")
+                        }
+                    }
+                } catch (lineError: Exception) {
+                    Log.w(TAG, "Skipping malformed calibration line: ${lineError.message}")
+                }
+            }
+
+            if (calibrationEntities.isNotEmpty() && ratingId != null) {
+                val db = TremorRoomDatabase.getDatabase(this@WatchDataListenerService)
+                val dao = db.tremorDao()
+                dao.insertCalibrationData(calibrationEntities)
+                dao.markRatingCalibrated(ratingId)
+
+                Log.i(TAG, "✓ Inserted ${calibrationEntities.size} calibration samples for rating $ratingId into DB")
+
+                // Update prefs for UI
+                val prefs = getSharedPreferences("calibration_prefs", MODE_PRIVATE)
+                prefs.edit()
+                    .putLong("last_calibration_time", System.currentTimeMillis())
+                    .putString("last_calibration_rating_id", ratingId)
+                    .putInt("last_calibration_sample_count", calibrationEntities.size)
+                    .apply()
+            } else {
+                Log.w(TAG, "No calibration samples parsed (ratingId=$ratingId, samples=${calibrationEntities.size})")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to parse calibration file into DB: ${e.message}", e)
         }
     }
 

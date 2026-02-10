@@ -709,14 +709,22 @@ class WatchDataSender(private val context: Context) {
     }
 
     /**
-     * Send a subjective rating to the phone for logging to InfluxDB.
-     * Uses MessageClient for lightweight data transfer.
-     *
-     * @param rating The subjective rating (1-5)
-     * @param source Rating source: "MANUAL", "PROMPTED", or "TREMOR_CHANGE"
-     * @param onComplete Callback with success status
+     * Send a subjective rating to the phone for logging.
+     * Includes detection state at rating time for disagreement analysis
+     * and calibration flags for linking with calibration sensor data.
      */
-    fun sendSubjectiveRating(rating: Int, source: String, onComplete: (Boolean) -> Unit) {
+    fun sendSubjectiveRating(
+        ratingId: String = java.util.UUID.randomUUID().toString(),
+        rating: Int,
+        source: String,
+        watchId: String? = null,
+        detectedSeverity: Double? = null,
+        detectedConfidence: Float? = null,
+        detectedFrequency: Float? = null,
+        calibrationModeEnabled: Boolean = false,
+        calibrationDurationSeconds: Int = 60,
+        onComplete: (Boolean) -> Unit
+    ) {
         scope.launch {
             try {
                 val nodes = getConnectedNodes()
@@ -727,10 +735,16 @@ class WatchDataSender(private val context: Context) {
                 }
 
                 val ratingData = JSONObject().apply {
-                    put("id", java.util.UUID.randomUUID().toString())
+                    put("id", ratingId)
                     put("timestamp", System.currentTimeMillis())
                     put("rating", rating)
                     put("source", source)
+                    watchId?.let { put("watchId", it) }
+                    detectedSeverity?.let { put("detectedSeverity", it) }
+                    detectedConfidence?.let { put("detectedConfidence", it.toDouble()) }
+                    detectedFrequency?.let { put("detectedFrequency", it.toDouble()) }
+                    put("calibrationModeEnabled", calibrationModeEnabled)
+                    put("calibrationDurationSeconds", calibrationDurationSeconds)
                 }.toString().toByteArray()
 
                 // Fire-and-forget: send without blocking
@@ -740,7 +754,7 @@ class WatchDataSender(private val context: Context) {
                     ratingData
                 )
 
-                Log.i(TAG, "✓ Subjective rating sent: $rating (source: $source)")
+                Log.i(TAG, "✓ Subjective rating sent: $rating (source: $source, calibration: $calibrationModeEnabled)")
                 onComplete(true)
 
             } catch (e: Exception) {

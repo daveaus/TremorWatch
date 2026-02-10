@@ -75,6 +75,9 @@ class TremorService : LifecycleService(), SensorEventListener {
     companion object {
         // TAG removed - Timber uses class name automatically
         private const val ACTION_ACTIVITY_UPDATE = "com.opensource.tremorwatch.ACTION_ACTIVITY_UPDATE"
+        const val ACTION_START_CALIBRATION = "com.opensource.tremorwatch.ACTION_START_CALIBRATION"
+        const val EXTRA_RATING_ID = "extra_rating_id"
+        const val EXTRA_CALIBRATION_DURATION = "extra_calibration_duration"
         private const val ACTIVITY_UPDATE_REQUEST_CODE = 4101
         private const val RATING_PREFS_NAME = "rating_prefs"
         private const val KEY_PROMPTS_ENABLED = "prompts_enabled"
@@ -871,6 +874,7 @@ class TremorService : LifecycleService(), SensorEventListener {
                             y = data.y,
                             z = data.z,
                             magnitude = data.magnitude,
+                            accelMagnitude = data.accelMagnitude,
                             dominantFrequency = data.dominantFrequency,
                             tremorBandPower = data.tremorBandPower,
                             totalPower = data.totalPower,
@@ -878,6 +882,17 @@ class TremorService : LifecycleService(), SensorEventListener {
                             peakProminence = data.peakProminence,
                             confidence = data.confidence,
                             severity = data.severity.toDouble(),
+                            baselineMultiplier = data.baselineMultiplier,
+                            tremorType = data.tremorType,
+                            tremorTypeConfidence = data.tremorTypeConfidence,
+                            isRestingState = data.isRestingState,
+                            activityType = data.activityType,
+                            activityConfidence = data.activityConfidence,
+                            activityAgeMs = data.activityAgeMs,
+                            activityAdjustedConfidence = data.activityAdjustedConfidence,
+                            activityAdjustedSeverity = data.activityAdjustedSeverity,
+                            isReliableMeasurement = data.isReliableMeasurement,
+                            excludeFromAnalysis = data.excludeFromAnalysis,
                             isWorn = data.isWorn,
                             isCharging = data.isCharging
                         )
@@ -1289,6 +1304,13 @@ class TremorService : LifecycleService(), SensorEventListener {
         val wasAtLimit = promptsToday >= oldMaxDaily
         val nowHasRoom = promptsToday < config.maxPromptsPerDay
         
+        // Store calibration config so RatingActivity can read it
+        prefs.edit()
+            .putBoolean("calibration_enabled", config.calibrationModeEnabled)
+            .putInt("calibration_duration_seconds", config.calibrationDurationSeconds)
+            .apply()
+        Timber.i("Calibration config stored: enabled=${config.calibrationModeEnabled}, duration=${config.calibrationDurationSeconds}s")
+
         RatingPromptReceiver.applyConfig(
             context = this,
             promptsEnabled = config.promptsEnabled,
@@ -1317,6 +1339,52 @@ class TremorService : LifecycleService(), SensorEventListener {
         }
         
         scheduleNextRatingPromptTick()
+    }
+
+    /**
+     * Start calibration data capture for the given rating.
+     * Called via intent from RatingActivity/MainActivity after a rating is submitted.
+     * Wires the onCaptureComplete callback to send the file to the phone.
+     */
+    private fun startCalibrationCapture(ratingId: String, durationSeconds: Int) {
+        if (!::calibrationCaptureManager.isInitialized) {
+            Timber.w("CalibrationCaptureManager not initialized, cannot start capture")
+            return
+        }
+
+        val watchId = try {
+            android.provider.Settings.Secure.getString(
+                contentResolver,
+                android.provider.Settings.Secure.ANDROID_ID
+            ) ?: "unknown"
+        } catch (e: Exception) { "unknown" }
+
+        // Wire the completion callback to send calibration file to phone
+        calibrationCaptureManager.onCaptureComplete = { file, count ->
+            Timber.i("Calibration capture complete: $count samples in ${file.name}")
+            serviceScope.launch {
+                try {
+                    val channelSender = com.opensource.tremorwatch.communication.WatchChannelSender(this@TremorService)
+                    val nodes = com.google.android.gms.wearable.Wearable.getNodeClient(this@TremorService).connectedNodes
+                    val connectedNodes = com.google.android.gms.tasks.Tasks.await(nodes, 10, java.util.concurrent.TimeUnit.SECONDS)
+                    if (connectedNodes.isNotEmpty()) {
+                        val success = channelSender.sendCalibrationFile(file, connectedNodes.first())
+                        Timber.i("Calibration file send ${if (success) "succeeded" else "failed"}: ${file.name}")
+                    } else {
+                        Timber.w("No phone connected - calibration file not sent (saved locally)")
+                    }
+                } catch (e: Exception) {
+                    Timber.e(e, "Failed to send calibration file: ${file.name}")
+                }
+            }
+        }
+
+        val started = calibrationCaptureManager.startCapture(ratingId, durationSeconds, watchId)
+        if (started) {
+            Timber.i("Calibration capture started: ratingId=$ratingId, duration=${durationSeconds}s")
+        } else {
+            Timber.w("Failed to start calibration capture (already capturing or limit reached)")
+        }
     }
 
     private fun scheduleNextRatingPromptTick() {
@@ -1936,6 +2004,13 @@ class TremorService : LifecycleService(), SensorEventListener {
             Timber.i("★ AR intent received. extras=${intent.extras}")
             Timber.i("★ AR hasResult=${ActivityRecognitionResult.hasResult(intent)}")
             handleActivityUpdate(intent)
+            return START_STICKY
+        }
+
+        if (intent?.action == ACTION_START_CALIBRATION) {
+            val ratingId = intent.getStringExtra(EXTRA_RATING_ID) ?: return START_STICKY
+            val duration = intent.getIntExtra(EXTRA_CALIBRATION_DURATION, 60)
+            startCalibrationCapture(ratingId, duration)
             return START_STICKY
         }
 
