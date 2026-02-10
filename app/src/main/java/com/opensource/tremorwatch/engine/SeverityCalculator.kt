@@ -61,29 +61,37 @@ object SeverityCalculator {
         episodeDuration: Float = 0f,
         baselineMultiplier: Float = 1.0f
     ): Float {
+        // Guard against invalid inputs that could produce NaN/Infinity
+        if (magnitude.isNaN() || magnitude.isInfinite() || magnitude <= 0f) return 0f
+        if (confidence.isNaN() || confidence.isInfinite()) return 0f
+
         // 1. Base severity from magnitude
         // Use logarithmic scaling to compress the range
         val baseSeverity = calculateBaseSeverity(magnitude)
-        
+
         // 2. Frequency weighting
         val frequencyWeight = calculateFrequencyWeight(dominantFrequency)
-        
+
         // 3. Band ratio quality factor
         val qualityFactor = calculateQualityFactor(bandRatio)
-        
+
         // 4. Duration factor
         val durationFactor = calculateDurationFactor(episodeDuration)
-        
+
         // 5. Baseline-relative boost
         val baselineBoost = calculateBaselineBoost(baselineMultiplier)
-        
+
         // Combine factors
         val rawSeverity = baseSeverity * frequencyWeight * qualityFactor * durationFactor * baselineBoost
-        
+
         // Apply confidence as a gate (low confidence reduces final severity)
         val confidenceGate = (confidence * 1.5f).coerceIn(0.3f, 1.0f)
-        
-        return (rawSeverity * confidenceGate).coerceIn(0f, MAX_SEVERITY)
+
+        val result = rawSeverity * confidenceGate
+        // Guard against NaN/Infinity from floating point edge cases
+        if (result.isNaN() || result.isInfinite()) return 0f
+
+        return result.coerceIn(0f, MAX_SEVERITY)
     }
     
     /**

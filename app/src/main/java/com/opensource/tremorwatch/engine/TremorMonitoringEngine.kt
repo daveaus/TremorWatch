@@ -57,6 +57,10 @@ class TremorMonitoringEngine(
         // Default values - now configurable via TremorDetectionConfig
         const val DEFAULT_MIN_EPISODE_DURATION_SAMPLES = 3  // Require 3+ consecutive samples to start episode
         const val DEFAULT_MAX_GAP_SAMPLES = 2               // Allow 2 non-tremor samples within episode
+
+        /** Maximum severity for a measurement to be considered reliable.
+         *  High-severity outliers during "still" are likely sensor artifacts. */
+        const val MAX_RELIABLE_SEVERITY = 5.0f
     }
 
     // Sensor data state
@@ -258,9 +262,13 @@ class TremorMonitoringEngine(
         val activityType = if (isStale) DetectedActivity.UNKNOWN else state.type
         val activityConfidence = if (isStale) 0 else state.confidence
 
+        // Exclude high-severity outliers from "reliable" classification.
+        // Extreme severity during STILL activity indicates sensor artifacts,
+        // not genuine tremor data suitable for clinical analysis.
         val isReliable = !isStale &&
             activityType == DetectedActivity.STILL &&
-            activityConfidence >= config.activityHighConfidenceThreshold
+            activityConfidence >= config.activityHighConfidenceThreshold &&
+            baseSeverity <= MAX_RELIABLE_SEVERITY
 
         val excludeFromAnalysis = !isStale &&
             activityConfidence >= config.activityHighConfidenceThreshold &&

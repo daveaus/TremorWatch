@@ -151,6 +151,21 @@ fun ExportDialog(
                             MaterialTheme.colorScheme.error
                     )
                 }
+                
+                // EMERGENCY IMPORT BUTTON (Hidden feature for recovery)
+                Spacer(modifier = Modifier.height(16.dp))
+                Button(
+                    onClick = {
+                        scope.launch {
+                            exportStatus = "Importing data..."
+                            val result = importRecoveryData(context)
+                            exportStatus = result
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Import Recovery Data (CSV)")
+                }
             }
         },
         confirmButton = {
@@ -482,8 +497,10 @@ private suspend fun writeStreamingDetailedCsv(
         val chunk = dbHelper.getSamplesAfterPaged(cutoffTime, CHUNK_SIZE, offset)
         if (chunk.isEmpty()) break
         
-        // Filter out zero-severity entries to reduce file size
-        chunk.filter { it.severity > 0 }.sortedBy { it.timestamp }.forEach { record ->
+        // Only export actual tremor events (tremorCount > 0) to avoid noise from
+        // non-tremor samples that had legacy fallback severity values
+        chunk.filter { it.tremorCount > 0 || it.severity > 0 }
+            .sortedBy { it.timestamp }.forEach { record ->
             val dateStr = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
                 .format(Date(record.timestamp))
 
@@ -533,8 +550,10 @@ private suspend fun writeStreamingRawDataCsv(
         val chunk = dbHelper.getSamplesAfterPaged(cutoffTime, CHUNK_SIZE, offset)
         if (chunk.isEmpty()) break
         
-        // Filter out zero-severity entries to reduce file size
-        chunk.filter { it.severity > 0 }.sortedBy { it.timestamp }.forEach { sample ->
+        // Only export actual tremor events to avoid noise from
+        // non-tremor samples that had legacy fallback severity values
+        chunk.filter { it.tremorCount > 0 || it.severity > 0 }
+            .sortedBy { it.timestamp }.forEach { sample ->
             val dateStr = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US)
                 .format(Date(sample.timestamp))
 
@@ -701,6 +720,118 @@ private suspend fun writeSubjectiveRatingsCsv(
     }
     
     return totalRecords
+}
+
+/**
+ * Import data from recovery CSV file.
+ * Handles timestamp deduplication by adding milliseconds to corrupted/rounded timestamps.
+ */
+private suspend fun importRecoveryData(context: Context): String {
+    return withContext(Dispatchers.IO) {
+        try {
+            val db = TremorRoomDatabase.getDatabase(context)
+            val dao = db.tremorDao()
+            
+            // Check possible locations
+            val externalFile = File(context.getExternalFilesDir(null), "recovery.csv")
+            val cacheFile = File(context.cacheDir, "recovery.csv")
+            val importFile = if (externalFile.exists()) externalFile else if (cacheFile.exists()) cacheFile else null
+            
+            if (importFile == null || !importFile.exists()) {
+                return@withContext "Recovery file not found"
+            }
+            
+            var importedCount = 0
+            val batchSize = 500
+            val batch = mutableListOf<TremorSample>()
+            
+            // Track timestamp to prevent duplicates (since CSV timestamp might be rounded)
+            var lastTimestamp = 0L
+            
+            importFile.useLines { lines ->
+                lines.forEach { line ->
+                    // Skip headers
+                    if (line.startsWith("#") || line.startsWith("Timestamp")) return@forEach
+                    
+                    try {
+                        val parts = line.split(",")
+                        if (parts.size >= 4) {
+                            // Part 0: Timestamp (might be scientific notation 1.77E12, useless)
+                            // Part 1: DateTime (d/MM/yyyy H:mm or similar)
+                            val dateStr = parts[1]
+                            val severity = parts[2].toDoubleOrNull() ?: 0.0
+                            val tremorCount = parts[3].toIntOrNull() ?: 0
+                            
+                            // Parse timestamp from DateTime string
+                            var timestamp: Long = 0
+                            val formats = listOf(
+                                SimpleDateFormat("d/MM/yyyy H:mm", Locale.US),
+                                SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US),
+                                SimpleDateFormat("M/d/yyyy H:mm", Locale.US)
+                            )
+                            
+                            for (fmt in formats) {
+                                try {
+                                    timestamp = fmt.parse(dateStr)?.time ?: 0
+                                    if (timestamp > 0) break
+                                } catch (e: Exception) { continue }
+                            }
+                            
+                            // If timestamp parsing failed or is scientific, rely on synthesis
+                            if (timestamp == 0L) {
+                                // Try parsing column 0 as fallback
+                                timestamp = parts[0].toDoubleOrNull()?.toLong() ?: System.currentTimeMillis()
+                            }
+                            
+                            // Ensure uniqueness by incrementing if <= lastTimestamp
+                            if (timestamp <= lastTimestamp) {
+                                timestamp = lastTimestamp + 1
+                            }
+                            lastTimestamp = timestamp
+                            
+                            // Reconstruct metadata
+                            val metadata = JSONObject()
+                            if (parts.size > 4 && parts[4].isNotEmpty()) metadata.put("activityType", parts[4])
+                            if (parts.size > 5 && parts[5].isNotEmpty()) metadata.put("activityConfidence", parts[5].toDoubleOrNull())
+                            if (parts.size > 6 && parts[6].isNotEmpty()) metadata.put("activityAgeMs", parts[6].toIntOrNull())
+                            if (parts.size > 7 && parts[7].isNotEmpty()) metadata.put("activityAdjustedSeverity", parts[7].toDoubleOrNull())
+                            if (parts.size > 8 && parts[8].isNotEmpty()) metadata.put("activityAdjustedConfidence", parts[8].toDoubleOrNull())
+                            if (parts.size > 9 && parts[9].isNotEmpty()) metadata.put("isReliableMeasurement", parts[9].toBoolean())
+                            if (parts.size > 10 && parts[10].isNotEmpty()) metadata.put("excludeFromAnalysis", parts[10].toBoolean())
+                            
+                            val sample = TremorSample(
+                                timestamp = timestamp,
+                                severity = severity,
+                                tremorCount = tremorCount,
+                                isWorn = severity > 0, // Infer
+                                metadataJson = metadata.toString()
+                            )
+                            
+                            batch.add(sample)
+                            
+                            if (batch.size >= batchSize) {
+                                dao.insertAll(batch)
+                                importedCount += batch.size
+                                batch.clear()
+                            }
+                        }
+                    } catch (e: Exception) {
+                        // Skip malformed line
+                    }
+                }
+            }
+            
+            // Insert remaining
+            if (batch.isNotEmpty()) {
+                dao.insertAll(batch)
+                importedCount += batch.size
+            }
+            
+            "Success: Imported $importedCount samples"
+        } catch (e: Exception) {
+            "Import failed: ${e.message}"
+        }
+    }
 }
 
 

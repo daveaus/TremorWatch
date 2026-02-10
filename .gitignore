@@ -95,3 +95,24 @@ version020.md
 
 # Windows reserved filenames
 NUL
+
+# Runtime state — these are generated during use, not part of the template
+docs/summaries/
+docs/archive/
+output/
+.claude/
+templates/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor files
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# The research file used to build the README (not part of the public repo)
+Claude-Compaction-Problem.md

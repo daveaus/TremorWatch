@@ -208,12 +208,8 @@ class TremorService : LifecycleService(), SensorEventListener {
      */
     private fun convertToSharedFormat(data: TremorMonitoringEngine.TremorData): com.opensource.tremorwatch.shared.models.TremorData {
         // Phase 5: Use clinically calculated severity from engine (opus45)
-        // Falls back to simple calculation if severity not set
-        val severity = if (data.severity > 0f) {
-            data.severity
-        } else {
-            data.magnitude * data.confidence  // Legacy fallback
-        }
+        // Non-tremor samples correctly have severity 0
+        val severity = data.severity
 
         // Count as tremor if flagged as tremor
         val tremorCount = if (data.isTremor) 1 else 0
@@ -439,12 +435,15 @@ class TremorService : LifecycleService(), SensorEventListener {
             return
         }
 
-        // Run file scan in background thread to avoid blocking UI
-        Thread {
+        // DATA GAP FIX: Use serviceScope (coroutine) instead of raw Thread.
+        // Coroutines are tied to the service lifecycle via CoroutineScope and survive
+        // better than raw threads. If the service is destroyed, the scope is cancelled
+        // cleanly, and pending batch files remain on disk for the next service start.
+        serviceScope.launch {
             val pendingFiles = getPendingBatchFiles()
             if (pendingFiles.isEmpty()) {
                 Timber.d("No pending batches to send")
-                return@Thread
+                return@launch
             }
 
             if (forceUpload) {
@@ -458,21 +457,18 @@ class TremorService : LifecycleService(), SensorEventListener {
             var completedBatches = 0
             val totalBatches = pendingFiles.size
 
-            // Send batches to phone via Data Layer API using the queue worker
-            // Fixed: Now properly uses sendBatch() which feeds the queue worker instead of bypassing it
-                // Process in smaller chunks to avoid blocking and ANRs
-                val filesToProcess = pendingFiles.take(MonitoringConstants.MAX_BATCHES_PER_UPLOAD)
-                val remainingBatches = maxOf(0, pendingFiles.size - MonitoringConstants.MAX_BATCHES_PER_UPLOAD)
+            // Process in smaller chunks to avoid blocking and ANRs
+            val filesToProcess = pendingFiles.take(MonitoringConstants.MAX_BATCHES_PER_UPLOAD)
+            val remainingBatches = maxOf(0, pendingFiles.size - MonitoringConstants.MAX_BATCHES_PER_UPLOAD)
 
             filesToProcess.forEachIndexed { index, file ->
                 try {
                     // Add small delay between file reads to avoid overwhelming the system
                     if (index > 0 && index % 5 == 0) {
-                        Thread.sleep(50) // Small delay every 5 files
+                        kotlinx.coroutines.delay(50)
                     }
-                    
+
                     // Read and parse the batch from file
-                    // Use bufferedReader for better performance on large files
                     val jsonContent = try {
                         file.bufferedReader().use { it.readText() }
                     } catch (e: Exception) {
@@ -486,16 +482,13 @@ class TremorService : LifecycleService(), SensorEventListener {
                     }
                     val batch = TremorBatch.fromJsonString(jsonContent)
 
-                    // Use sendBatch() instead of sendBatchFromFile() to properly utilize queue worker
                     phoneCommunication.sendBatch(batch) { success ->
                         if (success) {
-                            // Delete file after successful transmission to phone
                             if (file.exists()) {
                                 file.delete()
-                                pendingBatchCount-- // Decrement cached count instead of rescanning
+                                pendingBatchCount--
                                 batchesSent++
                                 lastSuccessfulUploadTime = System.currentTimeMillis()
-                                // Reset backoff counter on successful upload
                                 BatchRetryAlarmReceiver.resetRetryCount(this@TremorService)
                                 Timber.i("SUCCESS: Sent batch ${file.name} via queue worker, deleted. $pendingBatchCount pending")
                             }
@@ -504,34 +497,9 @@ class TremorService : LifecycleService(), SensorEventListener {
                             Timber.w("FAILED: Queue worker failed to send batch ${file.name} - will retry later. $pendingBatchCount pending")
                         }
 
-                        // Track completion and clear flag when all batches processed
                         completedBatches++
                         if (completedBatches >= filesToProcess.size) {
                             isUploadInProgress = false
-                                if (remainingBatches > 0) {
-                                    Timber.i("BATCH COMPLETE: Processed ${MonitoringConstants.MAX_BATCHES_PER_UPLOAD} of $totalBatches. Scheduling next cycle for remaining $remainingBatches batches...")
-                                    // Schedule next upload cycle after a short delay to allow data layer to catch up
-                                    Handler(Looper.getMainLooper()).postDelayed({
-                                        retryFailedUploads(forceUpload = forceUpload)
-                                    }, 2000)
-                                } else {
-                                    Timber.i("COMPLETE: Upload batch processing finished: $completedBatches/$totalBatches processed")
-                                }
-                        }
-                    }
-                } catch (e: OutOfMemoryError) {
-                    // CRITICAL: OutOfMemoryError - stop immediately and log
-                    Timber.e("CRITICAL: OutOfMemoryError during batch upload - stopping immediately. Already processed: $completedBatches/$filesToProcess.size", e)
-                    isUploadInProgress = false
-                    batchesFailed++
-                    return@Thread
-                } catch (e: Exception) {
-                    Timber.e("ERROR: Failed to read/parse batch file ${file.name}: ${e.message}", e)
-                    // Skip this file and continue with others
-                    completedBatches++
-                    batchesFailed++
-                    if (completedBatches >= filesToProcess.size) {
-                        isUploadInProgress = false
                             if (remainingBatches > 0) {
                                 Timber.i("BATCH COMPLETE: Processed ${MonitoringConstants.MAX_BATCHES_PER_UPLOAD} of $totalBatches. Scheduling next cycle for remaining $remainingBatches batches...")
                                 Handler(Looper.getMainLooper()).postDelayed({
@@ -540,10 +508,31 @@ class TremorService : LifecycleService(), SensorEventListener {
                             } else {
                                 Timber.i("COMPLETE: Upload batch processing finished: $completedBatches/$totalBatches processed")
                             }
+                        }
+                    }
+                } catch (e: OutOfMemoryError) {
+                    Timber.e("CRITICAL: OutOfMemoryError during batch upload - stopping immediately. Already processed: $completedBatches/${filesToProcess.size}", e)
+                    isUploadInProgress = false
+                    batchesFailed++
+                    return@launch
+                } catch (e: Exception) {
+                    Timber.e("ERROR: Failed to read/parse batch file ${file.name}: ${e.message}", e)
+                    completedBatches++
+                    batchesFailed++
+                    if (completedBatches >= filesToProcess.size) {
+                        isUploadInProgress = false
+                        if (remainingBatches > 0) {
+                            Timber.i("BATCH COMPLETE: Processed ${MonitoringConstants.MAX_BATCHES_PER_UPLOAD} of $totalBatches. Scheduling next cycle for remaining $remainingBatches batches...")
+                            Handler(Looper.getMainLooper()).postDelayed({
+                                retryFailedUploads(forceUpload = forceUpload)
+                            }, 2000)
+                        } else {
+                            Timber.i("COMPLETE: Upload batch processing finished: $completedBatches/$totalBatches processed")
+                        }
                     }
                 }
             }
-        }.start()
+        }
     }
 
     /**
@@ -640,6 +629,13 @@ class TremorService : LifecycleService(), SensorEventListener {
      * Also detects if app has been re-added to Samsung's sleeping apps list.
      */
     private fun verifyAndRenewWakeLock() {
+        // BATTERY FIX: Don't re-acquire wake lock while monitoring is paused.
+        // The wake lock is intentionally released during pause to save battery.
+        if (isPausedDueToWearState) {
+            Timber.v("WakeLock monitor: skipping - monitoring is paused")
+            return
+        }
+
         val now = System.currentTimeMillis()
 
         wakeLock?.let { wl ->
@@ -925,22 +921,18 @@ class TremorService : LifecycleService(), SensorEventListener {
         ratingConfigListener.register()
 
         // Clean up old local storage files based on retention period (run in background to avoid blocking onCreate)
-        Thread {
+        serviceScope.launch {
             cleanupOldLocalStorage()
-        }.start()
+        }
 
-        // Acquire wake lock to keep sensors active (CRITICAL for Samsung devices)
-        // Samsung FreecessController tries to freeze the app even with foreground service
-        // Use wakelock strategy: PARTIAL_WAKE_LOCK + ON_AFTER_RELEASE
-        // Battery-safe: 10-minute timeout auto-releases if not renewed by monitor
+        // Create wake lock for sensor monitoring (CRITICAL for Samsung devices)
+        // BATTERY FIX: Create but don't acquire yet - will be acquired only if not paused.
+        // updateMonitoringState() (called below via updateChargingState) will decide.
         val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
         wakeLock = powerManager.newWakeLock(
             PowerManager.PARTIAL_WAKE_LOCK or PowerManager.ON_AFTER_RELEASE,
             "TremorWatch::SensorWakeLock"
-        ).apply {
-            acquire(WAKELOCK_TIMEOUT_MS)
-            Timber.w("★★★ WakeLock acquired with ${WAKELOCK_TIMEOUT_MS / 60000}min timeout (PARTIAL_WAKE_LOCK | ON_AFTER_RELEASE)")
-        }
+        )
 
         // Start periodic wakelock verification to fight Samsung FreecessController
         startWakeLockMonitor()
@@ -994,22 +986,28 @@ class TremorService : LifecycleService(), SensorEventListener {
         Timber.d("Local storage enabled: ${DataConfig.isLocalStorageEnabled(this)}")
 
         // Register sensors with the monitoring engine as listener
-        // Use maxReportLatencyUs for batching - allows AP to sleep between deliveries
-        gyroscope?.let {
-            try {
-                val result = sensorManager.registerListener(
-                    monitoringEngine, it,
-                    MonitoringConstants.GYRO_SAMPLE_INTERVAL_US,
-                    MonitoringConstants.GYRO_MAX_REPORT_LATENCY_US
-                )
-                Timber.d("Gyroscope registration result: $result")
-                Timber.d("TremorWatch: Gyroscope registered at ${1_000_000 / MonitoringConstants.GYRO_SAMPLE_INTERVAL_US}Hz with ${MonitoringConstants.GYRO_MAX_REPORT_LATENCY_US / 1_000_000}s batching")
-                isGyroInLowPowerMode = false
-            } catch (e: Exception) {
-                Timber.e("ERROR: Failed to register gyroscope: ${e.message}", e)
-                e.printStackTrace()
+        // BATTERY FIX: Only register gyro + accel and acquire wake lock if not already paused.
+        // Off-body sensor always registered so we detect when watch is put back on.
+        if (!isPausedDueToWearState) {
+            // Acquire wake lock for active monitoring
+            wakeLock?.acquire(WAKELOCK_TIMEOUT_MS)
+            Timber.w("★★★ WakeLock acquired with ${WAKELOCK_TIMEOUT_MS / 60000}min timeout (active monitoring)")
+
+            gyroscope?.let {
+                try {
+                    val result = sensorManager.registerListener(
+                        monitoringEngine, it,
+                        MonitoringConstants.GYRO_SAMPLE_INTERVAL_US,
+                        MonitoringConstants.GYRO_MAX_REPORT_LATENCY_US
+                    )
+                    Timber.d("Gyroscope registration result: $result")
+                    Timber.d("TremorWatch: Gyroscope registered at ${1_000_000 / MonitoringConstants.GYRO_SAMPLE_INTERVAL_US}Hz with ${MonitoringConstants.GYRO_MAX_REPORT_LATENCY_US / 1_000_000}s batching")
+                    isGyroInLowPowerMode = false
+                } catch (e: Exception) {
+                    Timber.e("ERROR: Failed to register gyroscope: ${e.message}", e)
+                    e.printStackTrace()
+                }
             }
-        }
             accelerometer?.let {
                 try {
                     val result = sensorManager.registerListener(
@@ -1024,51 +1022,32 @@ class TremorService : LifecycleService(), SensorEventListener {
                     e.printStackTrace()
                 }
             }
-            offBodySensor?.let {
-                try {
-                    // Off-body sensor: no batching needed, events are infrequent
-                    val result = sensorManager.registerListener(monitoringEngine, it, SensorManager.SENSOR_DELAY_NORMAL)
-                    Timber.d("Off-body sensor registration result: $result")
-                    Timber.d("TremorWatch: Off-body sensor registered for wear detection")
-                } catch (e: Exception) {
-                    Timber.e("ERROR: Failed to register off-body sensor: ${e.message}", e)
-                    e.printStackTrace()
-                }
+        } else {
+            Timber.i("Skipping gyro + accel registration - monitoring is paused (charging=$isCharging, worn=$isWatchWorn)")
+        }
+        // Off-body sensor: always register so we detect when watch is put back on
+        offBodySensor?.let {
+            try {
+                val result = sensorManager.registerListener(monitoringEngine, it, SensorManager.SENSOR_DELAY_NORMAL)
+                Timber.d("Off-body sensor registration result: $result")
+                Timber.d("TremorWatch: Off-body sensor registered for wear detection")
+            } catch (e: Exception) {
+                Timber.e("ERROR: Failed to register off-body sensor: ${e.message}", e)
+                e.printStackTrace()
             }
+        }
 
         // Update initial pending batch count and trigger send of pending batches on startup
-        // CRITICAL: This clears the queue of accumulated batches when the app/service restarts
-        Thread {
+        // DATA GAP FIX: Use serviceScope instead of raw Thread for lifecycle safety
+        serviceScope.launch {
             val fileCount = getPendingBatchFiles().size
             pendingBatchCount = fileCount
 
             if (pendingBatchCount > 0) {
                 Timber.i("Service started with $pendingBatchCount pending batch(es) - SENDING NOW via retryFailedUploads")
-                
-                // Immediately send all pending batches using retryFailedUploads
-                // This uses the correct directory (filesDir with tremor_batch_*.json files)
-                // and properly processes them through the queue worker
                 retryFailedUploads(forceUpload = false)
-                // Note: retryFailedUploads handles success/failure tracking internally
-                return@Thread
             }
-            
-            // Old code block removed - keeping for reference
-            if (false) {
-                val dataSender = WatchDataSender(this@TremorService)
-                dataSender.sendPendingBatches { successCount, failureCount ->
-                    Timber.i("Pending batch send complete: $successCount sent, $failureCount failed")
-                    if (successCount > 0) {
-                        pendingBatchCount -= successCount
-                        batchesSent += successCount
-                        lastSuccessfulUploadTime = System.currentTimeMillis()
-                    }
-                    if (failureCount > 0) {
-                        batchesFailed += failureCount
-                    }
-                }
-            }
-        }.start()
+        }
 
         // Start periodic status updates
         schedulePeriodicStatusUpdate()
@@ -1823,21 +1802,37 @@ class TremorService : LifecycleService(), SensorEventListener {
             monitoringEngine.setPaused(true)
         }
         stopActivityRecognitionUpdates()
+
+        // BATTERY FIX: Unregister gyroscope and accelerometer to stop 50Hz sensor wake-ups.
+        // Keep off-body sensor registered so we detect when the watch is put back on.
+        if (::sensorManager.isInitialized && ::monitoringEngine.isInitialized) {
+            gyroscope?.let { sensorManager.unregisterListener(monitoringEngine, it) }
+            accelerometer?.let { sensorManager.unregisterListener(monitoringEngine, it) }
+            Timber.i("Sensors unregistered (gyro + accel) to save battery while paused")
+        }
+
+        // BATTERY FIX: Release wake lock so the device can enter doze mode.
+        wakeLock?.let {
+            if (it.isHeld) {
+                it.release()
+                Timber.i("WakeLock released for pause - device can doze")
+            }
+        }
+
         val reason = when {
             !isWatchWorn && isCharging -> "not worn and charging"
             !isWatchWorn -> "not worn"
             isCharging -> "charging"
             else -> "unknown"
         }
-        Timber.w("★★★ MONITORING PAUSED: $reason ★★★")
-        Timber.w("TremorWatch: ★★★ Monitoring paused: $reason (data collection stopped)")
-        
+        Timber.w("★★★ MONITORING PAUSED: $reason (sensors off, wakelock released) ★★★")
+
         // Store monitoring state for UI using PreferencesRepository
         serviceScope.launch {
             preferencesRepository.setMonitoringPaused(true, reason)
             Timber.d("Stored monitoring state: paused=true, reason=$reason")
         }
-        
+
         // Send diagnostic event
         sendMonitoringStateDiagnosticEvent(true, reason)
     }
@@ -1848,15 +1843,56 @@ class TremorService : LifecycleService(), SensorEventListener {
             monitoringEngine.setPaused(false)
         }
         updateActivityRecognitionState(activityFilteringEnabled)
-        Timber.i("★★★ MONITORING RESUMED: worn=${isWatchWorn}, charging=${isCharging} ★★★")
-        Timber.i("TremorWatch: ★★★ Monitoring resumed: worn=${isWatchWorn}, charging=${isCharging} (data collection active)")
-        
+
+        // BATTERY FIX: Re-acquire wake lock before re-registering sensors.
+        wakeLock?.let {
+            if (!it.isHeld) {
+                it.acquire(WAKELOCK_TIMEOUT_MS)
+                Timber.i("WakeLock re-acquired for resume with ${WAKELOCK_TIMEOUT_MS / 60000}min timeout")
+            }
+        }
+
+        // BATTERY FIX: Re-register gyroscope and accelerometer that were unregistered during pause.
+        if (::sensorManager.isInitialized && ::monitoringEngine.isInitialized) {
+            gyroscope?.let {
+                try {
+                    val gyroRate = if (isGyroInLowPowerMode) {
+                        MonitoringConstants.GYRO_STILL_SAMPLE_INTERVAL_US
+                    } else {
+                        MonitoringConstants.GYRO_SAMPLE_INTERVAL_US
+                    }
+                    sensorManager.registerListener(
+                        monitoringEngine, it,
+                        gyroRate,
+                        MonitoringConstants.GYRO_MAX_REPORT_LATENCY_US
+                    )
+                    Timber.i("Gyroscope re-registered on resume (lowPower=$isGyroInLowPowerMode)")
+                } catch (e: Exception) {
+                    Timber.e("Failed to re-register gyroscope on resume: ${e.message}", e)
+                }
+            }
+            accelerometer?.let {
+                try {
+                    sensorManager.registerListener(
+                        monitoringEngine, it,
+                        SensorManager.SENSOR_DELAY_NORMAL,
+                        MonitoringConstants.ACCEL_MAX_REPORT_LATENCY_US
+                    )
+                    Timber.i("Accelerometer re-registered on resume")
+                } catch (e: Exception) {
+                    Timber.e("Failed to re-register accelerometer on resume: ${e.message}", e)
+                }
+            }
+        }
+
+        Timber.i("★★★ MONITORING RESUMED: worn=${isWatchWorn}, charging=${isCharging} (sensors on, wakelock held) ★★★")
+
         // Store monitoring state for UI using PreferencesRepository
         serviceScope.launch {
             preferencesRepository.setMonitoringPaused(false, "")
             Timber.d("Stored monitoring state: paused=false")
         }
-        
+
         // Send diagnostic event
         sendMonitoringStateDiagnosticEvent(false, "")
     }
@@ -1993,13 +2029,15 @@ class TremorService : LifecycleService(), SensorEventListener {
         }
 
         // Renew wake lock (backup to the 10-minute wakelock monitor)
-        // Battery-safe: Always use timeout to prevent indefinite holds
-        wakeLock?.let {
-            if (!it.isHeld) {
-                it.acquire(WAKELOCK_TIMEOUT_MS)
-                Timber.d("Wake lock re-acquired by watchdog with ${WAKELOCK_TIMEOUT_MS / 60000}min timeout")
-            } else {
-                Timber.d("Wake lock still held - skipping (monitor will renew)")
+        // BATTERY FIX: Only renew when actively monitoring - not when paused
+        if (!isPausedDueToWearState) {
+            wakeLock?.let {
+                if (!it.isHeld) {
+                    it.acquire(WAKELOCK_TIMEOUT_MS)
+                    Timber.d("Wake lock re-acquired by watchdog with ${WAKELOCK_TIMEOUT_MS / 60000}min timeout")
+                } else {
+                    Timber.d("Wake lock still held - skipping (monitor will renew)")
+                }
             }
         }
 
