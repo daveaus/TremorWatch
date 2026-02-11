@@ -24,6 +24,31 @@ interface TremorDao {
      */
     @Query("SELECT * FROM tremor_samples WHERE timestamp >= :startTime AND timestamp <= :endTime ORDER BY timestamp ASC")
     suspend fun getSamplesInRange(startTime: Long, endTime: Long): List<TremorSample>
+
+    /**
+     * Get minute-level aggregated objective data in a fixed time range.
+     * Uses existing timestamp index to constrain scan range.
+     */
+    @Query(
+        """
+        SELECT
+            (timestamp / 60000) * 60000 AS minuteBucketTimestamp,
+            AVG(severity) AS avgSeverity,
+            COUNT(*) AS sampleCount,
+            MAX(CASE WHEN isCharging = 1 THEN 1 ELSE 0 END) AS anyCharging,
+            MAX(CASE WHEN isWorn = 0 THEN 1 ELSE 0 END) AS anyOffWrist,
+            AVG(confidence) AS avgConfidence
+        FROM tremor_samples
+        WHERE timestamp >= :startTime
+          AND timestamp <= :endTime
+        GROUP BY timestamp / 60000
+        ORDER BY minuteBucketTimestamp ASC
+        """
+    )
+    suspend fun getMinuteAggregatesInRange(
+        startTime: Long,
+        endTime: Long
+    ): List<MinuteAggregateRow>
     
     /**
      * Delete samples older than cutoff timestamp.
@@ -117,6 +142,27 @@ interface TremorDao {
      */
     @Query("SELECT * FROM subjective_ratings WHERE timestamp >= :startTime ORDER BY timestamp DESC")
     suspend fun getRatingsAfter(startTime: Long): List<SubjectiveRatingEntity>
+
+    /**
+     * Get subjective rating points in time range for Daily Tremor Profile.
+     */
+    @Query(
+        """
+        SELECT
+            timestamp,
+            rating,
+            detectedSeverity,
+            source
+        FROM subjective_ratings
+        WHERE timestamp >= :startTime
+          AND timestamp <= :endTime
+        ORDER BY timestamp ASC
+        """
+    )
+    suspend fun getRatingsInRange(
+        startTime: Long,
+        endTime: Long
+    ): List<RatingSampleRow>
     
     /**
      * Get all ratings (for export).

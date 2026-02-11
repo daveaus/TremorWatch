@@ -216,6 +216,36 @@ class TremorDatabaseHelper(private val context: Context) {
             emptyList()
         }
     }
+
+    /**
+     * Load minute-level aggregates for Daily Tremor Profile calculations.
+     */
+    suspend fun getMinuteAggregatesInRange(
+        startTime: Long,
+        endTime: Long
+    ): List<MinuteAggregateRow> = withContext(Dispatchers.IO) {
+        try {
+            dao.getMinuteAggregatesInRange(startTime, endTime)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to load minute aggregates: ${e.message}", e)
+            emptyList()
+        }
+    }
+
+    /**
+     * Load subjective ratings in range for Daily Tremor Profile calculations.
+     */
+    suspend fun getRatingsInRange(
+        startTime: Long,
+        endTime: Long
+    ): List<RatingSampleRow> = withContext(Dispatchers.IO) {
+        try {
+            dao.getRatingsInRange(startTime, endTime)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to load ratings in range: ${e.message}", e)
+            emptyList()
+        }
+    }
 }
 
 data class DatabaseStats(

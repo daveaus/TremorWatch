@@ -95,6 +95,7 @@ dependencies {
     kapt("androidx.room:room-compiler:2.6.1")
 
     // Testing / Debug
+    testImplementation("junit:junit:4.13.2")
     androidTestImplementation(platform(libs.compose.bom))
     debugImplementation(libs.ui.tooling)
 }

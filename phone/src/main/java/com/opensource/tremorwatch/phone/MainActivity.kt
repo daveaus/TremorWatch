@@ -69,7 +69,6 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -86,6 +85,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import com.opensource.tremorwatch.phone.ui.theme.TremorWatchPhoneTheme
+import com.opensource.tremorwatch.phone.database.TremorDatabaseHelper
 import com.opensource.tremorwatch.phone.aggregateData
 import com.opensource.tremorwatch.phone.calculateTremorRatings
 import com.opensource.tremorwatch.phone.getStorageStats
@@ -97,7 +97,14 @@ import com.opensource.tremorwatch.phone.StatBox
 import com.opensource.tremorwatch.phone.ChartsSection
 import com.opensource.tremorwatch.phone.GapEvent
 import com.opensource.tremorwatch.phone.GapType
+import com.opensource.tremorwatch.phone.typicalday.DailyTremorProfile
+import com.opensource.tremorwatch.phone.typicalday.DailyTremorProfileAggregator
+import com.opensource.tremorwatch.phone.typicalday.DailyTremorProfileCard
+import com.opensource.tremorwatch.phone.typicalday.DailyTremorProfileConfig
+import com.opensource.tremorwatch.phone.typicalday.SubjectiveOverlayMode
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -434,6 +441,48 @@ fun MainScreen(
     var showRatingsOnGraph by remember { mutableStateOf(false) }
     var isDataLoading by remember { mutableStateOf(true) }  // Track loading state
     var dataLoadTrigger by remember { mutableStateOf(0) }
+
+    // Daily Tremor Profile state
+    val dailyProfilePrefs = remember(context) {
+        context.getSharedPreferences("daily_tremor_profile", Context.MODE_PRIVATE)
+    }
+    val allowedDayWindows = remember { listOf(7, 14, 30, 60) }
+    val allowedBucketSizes = remember { listOf(30, 60) }
+
+    var dailyProfileDays by remember {
+        mutableStateOf(
+            dailyProfilePrefs.getInt("days", 14).let {
+                if (it in allowedDayWindows) it else 14
+            }
+        )
+    }
+    var dailyProfileBucketMinutes by remember {
+        mutableStateOf(
+            dailyProfilePrefs.getInt("bucket_minutes", 60).let {
+                if (it in allowedBucketSizes) it else 60
+            }
+        )
+    }
+    var dailyProfileOverlayMode by remember {
+        mutableStateOf(
+            SubjectiveOverlayMode.fromStorage(
+                dailyProfilePrefs.getString("overlay_mode", SubjectiveOverlayMode.CALIBRATED_SCALED.name)
+            )
+        )
+    }
+    var dailyProfileState by remember { mutableStateOf<DailyTremorProfile?>(null) }
+    var isDailyProfileLoading by remember { mutableStateOf(false) }
+    var dailyProfileError by remember { mutableStateOf<String?>(null) }
+    var dailyProfileEmptyReason by remember { mutableStateOf<String?>(null) }
+
+    val dbHelper = remember(context) { TremorDatabaseHelper(context) }
+    val dailyProfileCache = remember {
+        object : LinkedHashMap<String, DailyTremorProfile>(8, 0.75f, true) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, DailyTremorProfile>?): Boolean {
+                return size > 6
+            }
+        }
+    }
     
     // Trigger data reload every 60 seconds
     LaunchedEffect(Unit) {
@@ -441,6 +490,14 @@ fun MainScreen(
             delay(60000)
             dataLoadTrigger++
         }
+    }
+
+    LaunchedEffect(dailyProfileDays, dailyProfileBucketMinutes, dailyProfileOverlayMode) {
+        dailyProfilePrefs.edit()
+            .putInt("days", dailyProfileDays)
+            .putInt("bucket_minutes", dailyProfileBucketMinutes)
+            .putString("overlay_mode", dailyProfileOverlayMode.name)
+            .apply()
     }
     
     // Load 48h of data for the unified chart (supports scrolling back)
@@ -457,7 +514,6 @@ fun MainScreen(
         }
         
         // Quick database check to skip loading state if empty
-        val dbHelper = com.opensource.tremorwatch.phone.database.TremorDatabaseHelper(context)
         val stats = withContext(Dispatchers.IO) { dbHelper.getStats() }
         if (stats.totalSamples == 0) {
             Log.d("MainActivity", "Database empty (0 samples), showing empty state immediately")
@@ -578,6 +634,109 @@ fun MainScreen(
         } catch (e: Exception) {
             Log.e("MainActivity", "Error loading chart data: ${e.message}", e)
             isDataLoading = false
+        }
+    }
+
+    LaunchedEffect(
+        dataLoadTrigger,
+        localStorageEnabled,
+        dailyProfileDays,
+        dailyProfileBucketMinutes,
+        dailyProfileOverlayMode,
+        showRatingsOnGraph
+    ) {
+        if (!localStorageEnabled) {
+            isDailyProfileLoading = false
+            dailyProfileError = null
+            dailyProfileEmptyReason = "Enable local storage to compute Daily Tremor Profile."
+            dailyProfileState = null
+            return@LaunchedEffect
+        }
+
+        delay(300) // Debounce rapid config changes
+
+        isDailyProfileLoading = true
+        dailyProfileError = null
+        dailyProfileEmptyReason = null
+
+        try {
+            val cappedDays = dailyProfileDays.coerceIn(allowedDayWindows.first(), allowedDayWindows.last())
+            if (cappedDays != dailyProfileDays) {
+                dailyProfileDays = cappedDays
+            }
+
+            val endTime = (System.currentTimeMillis() / 60000L) * 60000L
+            val startTime = endTime - (cappedDays * 24L * 60L * 60L * 1000L)
+
+            val (minuteRows, ratingRows) = coroutineScope {
+                val minuteDeferred = async(Dispatchers.IO) {
+                    dbHelper.getMinuteAggregatesInRange(startTime, endTime)
+                }
+                val ratingsDeferred = async(Dispatchers.IO) {
+                    if (showRatingsOnGraph) {
+                        dbHelper.getRatingsInRange(startTime, endTime)
+                    } else {
+                        emptyList()
+                    }
+                }
+                minuteDeferred.await() to ratingsDeferred.await()
+            }
+
+            if (minuteRows.isEmpty() && ratingRows.isEmpty()) {
+                dailyProfileState = null
+                dailyProfileEmptyReason = "No data available yet for Daily Tremor Profile."
+                return@LaunchedEffect
+            }
+
+            val cacheKey = buildString {
+                append("days=").append(cappedDays)
+                append("|bucket=").append(dailyProfileBucketMinutes)
+                append("|ratings=").append(showRatingsOnGraph)
+                append("|overlay=").append(dailyProfileOverlayMode.name)
+                append("|start=").append(startTime)
+                append("|end=").append(endTime)
+                append("|mCount=").append(minuteRows.size)
+                append("|rCount=").append(ratingRows.size)
+                append("|mLast=").append(minuteRows.lastOrNull()?.minuteBucketTimestamp ?: 0L)
+                append("|rLast=").append(ratingRows.lastOrNull()?.timestamp ?: 0L)
+            }
+
+            val cached = dailyProfileCache[cacheKey]
+            if (cached != null) {
+                dailyProfileState = cached
+                return@LaunchedEffect
+            }
+
+            val builtProfile = withContext(Dispatchers.Default) {
+                DailyTremorProfileAggregator.build(
+                    config = DailyTremorProfileConfig(
+                        days = cappedDays,
+                        bucketMinutes = dailyProfileBucketMinutes,
+                        includeSubjective = showRatingsOnGraph,
+                        subjectiveOverlayMode = dailyProfileOverlayMode,
+                        excludeCharging = true,
+                        excludeOffWrist = true,
+                        minConfidence = null,
+                        iqrMultiplier = 1.5,
+                        smoothingRadius = 1,
+                        mismatchThreshold = 3.0,
+                        minDistinctDaysPerBucket = 3,
+                        minCoveragePercentForConfidence = 10,
+                        minSamplesForConfidence = 100
+                    ),
+                    minuteRows = minuteRows,
+                    ratingRows = ratingRows
+                )
+            }
+
+            dailyProfileState = builtProfile
+            dailyProfileCache[cacheKey] = builtProfile
+        } catch (e: Exception) {
+            Log.e("MainActivity", "Failed to build Daily Tremor Profile: ${e.message}", e)
+            dailyProfileState = null
+            dailyProfileError = "Could not load Daily Tremor Profile"
+        } finally {
+            isDailyProfileLoading = false
         }
     }
     
@@ -1006,6 +1165,105 @@ fun MainScreen(
                         ratings = ratings,
                         showRatingsOnGraph = showRatingsOnGraph
                     )
+                }
+            }
+        }
+
+        // Daily Tremor Profile
+        when {
+            !localStorageEnabled -> {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text(
+                            text = "Daily Tremor Profile",
+                            style = MaterialTheme.typography.titleMedium
+                        )
+                        Text(
+                            text = "Enable local storage in Settings to compute this view.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+
+            isDailyProfileLoading && dailyProfileState == null -> {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text(
+                            text = "Daily Tremor Profile",
+                            style = MaterialTheme.typography.titleMedium
+                        )
+                        Text(
+                            text = "Loading profile...",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+
+            dailyProfileError != null -> {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text(
+                            text = "Daily Tremor Profile",
+                            style = MaterialTheme.typography.titleMedium
+                        )
+                        Text(
+                            text = dailyProfileError ?: "Unknown error",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    }
+                }
+            }
+
+            dailyProfileState != null -> {
+                DailyTremorProfileCard(
+                    profile = dailyProfileState!!,
+                    selectedDays = dailyProfileDays,
+                    selectedBucketMinutes = dailyProfileBucketMinutes,
+                    selectedOverlayMode = dailyProfileOverlayMode,
+                    onDaysSelected = { selected ->
+                        dailyProfileDays = selected.coerceIn(7, 60)
+                    },
+                    onBucketMinutesSelected = { selected ->
+                        if (selected == 30 || selected == 60) {
+                            dailyProfileBucketMinutes = selected
+                        }
+                    },
+                    onOverlayModeSelected = { selected ->
+                        dailyProfileOverlayMode = selected
+                    }
+                )
+            }
+
+            else -> {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text(
+                            text = "Daily Tremor Profile",
+                            style = MaterialTheme.typography.titleMedium
+                        )
+                        Text(
+                            text = dailyProfileEmptyReason ?: "Not enough data yet to build a profile.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 }
             }
         }
