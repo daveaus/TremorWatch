@@ -13,6 +13,18 @@ enum class SubjectiveOverlayMode {
     }
 }
 
+enum class DailyProfileSeriesMode {
+    BOTH,
+    OBJECTIVE_ONLY,
+    SUBJECTIVE_ONLY;
+
+    companion object {
+        fun fromStorage(value: String?): DailyProfileSeriesMode {
+            return values().firstOrNull { it.name == value } ?: BOTH
+        }
+    }
+}
+
 data class SubjectiveCalibrationInfo(
     val requestedMode: SubjectiveOverlayMode,
     val appliedMode: SubjectiveOverlayMode,

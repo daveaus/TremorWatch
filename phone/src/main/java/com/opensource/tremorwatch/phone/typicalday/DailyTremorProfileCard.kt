@@ -2,6 +2,7 @@ package com.opensource.tremorwatch.phone.typicalday
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -11,12 +12,19 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -24,11 +32,14 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import java.util.Locale
+import kotlin.math.abs
 import kotlin.math.max
+import kotlin.math.roundToInt
 
 @Composable
 fun DailyTremorProfileCard(
@@ -36,18 +47,21 @@ fun DailyTremorProfileCard(
     selectedDays: Int,
     selectedBucketMinutes: Int,
     selectedOverlayMode: SubjectiveOverlayMode,
+    selectedSeriesMode: DailyProfileSeriesMode,
     onDaysSelected: (Int) -> Unit,
     onBucketMinutesSelected: (Int) -> Unit,
     onOverlayModeSelected: (SubjectiveOverlayMode) -> Unit,
+    onSeriesModeSelected: (DailyProfileSeriesMode) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val daysOptions = listOf(7, 14, 30, 60)
+    val dayOptions = listOf(7, 14, 30, 60)
     val bucketOptions = listOf(30, 60)
-    val overlayOptions = listOf(
-        SubjectiveOverlayMode.RAW_X2 to "Raw x2",
-        SubjectiveOverlayMode.CALIBRATED_SCALED to "Calibrated"
-    )
-    val chartAxis = resolveChartAxis(profile)
+    val showObjective = selectedSeriesMode != DailyProfileSeriesMode.SUBJECTIVE_ONLY
+    val showSubjective = profile.config.includeSubjective && selectedSeriesMode != DailyProfileSeriesMode.OBJECTIVE_ONLY
+    val chartAxis = resolveChartAxis(profile, showObjective = showObjective, showSubjective = showSubjective)
+
+    var showAdvanced by rememberSaveable { mutableStateOf(false) }
+    var selectedBucketIndex by rememberSaveable { mutableStateOf<Int?>(null) }
 
     Card(
         modifier = modifier.fillMaxWidth(),
@@ -59,7 +73,7 @@ fun DailyTremorProfileCard(
                 style = MaterialTheme.typography.titleMedium
             )
             Text(
-                text = "Objective severity (raw) with optional subjective display calibration",
+                text = "Sensor vs self-rating trend comparison",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -75,7 +89,7 @@ fun DailyTremorProfileCard(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                daysOptions.forEach { days ->
+                dayOptions.forEach { days ->
                     FilterChip(
                         selected = selectedDays == days,
                         onClick = { onDaysSelected(days) },
@@ -104,25 +118,36 @@ fun DailyTremorProfileCard(
                 }
             }
 
-            if (profile.config.includeSubjective) {
-                Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(8.dp))
 
-                Text(
-                    text = "Subjective Overlay",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    overlayOptions.forEach { (mode, label) ->
-                        FilterChip(
-                            selected = selectedOverlayMode == mode,
-                            onClick = { onOverlayModeSelected(mode) },
-                            label = { Text(label) }
-                        )
+            Text(
+                text = "Show",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                listOf(
+                    DailyProfileSeriesMode.BOTH to "Both",
+                    DailyProfileSeriesMode.OBJECTIVE_ONLY to "Sensor",
+                    DailyProfileSeriesMode.SUBJECTIVE_ONLY to "Self"
+                ).forEach { (mode, label) ->
+                    val enabled = when (mode) {
+                        DailyProfileSeriesMode.SUBJECTIVE_ONLY -> profile.config.includeSubjective
+                        else -> true
                     }
+                    FilterChip(
+                        selected = selectedSeriesMode == mode,
+                        onClick = {
+                            if (enabled) {
+                                onSeriesModeSelected(mode)
+                            }
+                        },
+                        enabled = enabled,
+                        label = { Text(label) }
+                    )
                 }
             }
 
@@ -130,16 +155,21 @@ fun DailyTremorProfileCard(
 
             DailyTremorProfileChart(
                 profile = profile,
-                axis = chartAxis
+                axis = chartAxis,
+                showObjective = showObjective,
+                showSubjective = showSubjective,
+                onBucketTapped = { tappedIndex ->
+                    selectedBucketIndex = tappedIndex
+                }
             )
 
             Spacer(modifier = Modifier.height(4.dp))
 
             Text(
                 text = if (chartAxis.autoScaled) {
-                    "Y-axis: 0-${formatAxisValue(chartAxis.max)} (auto for calibrated overlay)"
+                    "Axis auto-scaled for readability"
                 } else {
-                    "Y-axis: 0-10 (fixed)"
+                    "Axis fixed to 0-10"
                 },
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -162,94 +192,162 @@ fun DailyTremorProfileCard(
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            DailyProfileLegend(includeSubjective = profile.config.includeSubjective)
+            DailyProfileLegend(
+                showObjective = showObjective,
+                showSubjective = showSubjective
+            )
 
             Spacer(modifier = Modifier.height(8.dp))
 
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = "Raw Correlation: ${
-                        profile.metrics.correlation?.let { "%.2f".format(it) } ?: "n/a"
-                    } (${profile.metrics.correlationLabel})",
+                    text = buildAlignmentSummary(
+                        correlation = profile.metrics.correlation,
+                        label = profile.metrics.correlationLabel
+                    ),
                     style = MaterialTheme.typography.labelSmall
                 )
-                Text(
-                    text = "Confidence: ${"%.0f".format(profile.metrics.confidenceScore * 100)}% ${profile.metrics.confidenceLabel}",
-                    style = MaterialTheme.typography.labelSmall
-                )
-            }
-
-            if (profile.config.includeSubjective) {
-                Spacer(modifier = Modifier.height(6.dp))
-                val calibration = profile.subjectiveCalibration
-                val calibrationText = when {
-                    calibration.appliedMode == SubjectiveOverlayMode.CALIBRATED_SCALED &&
-                        calibration.scale != null -> {
-                        "Calibrated overlay x${"%.4f".format(calibration.scale)} using ${calibration.trimmedBucketCount}/${calibration.pairedBucketCount} paired buckets."
-                    }
-                    calibration.requestedMode == SubjectiveOverlayMode.CALIBRATED_SCALED -> {
-                        "Calibration unavailable: ${calibration.fallbackReason ?: "insufficient paired data"}. Showing Raw x2."
-                    }
-                    else -> {
-                        "Subjective overlay in Raw x2 mode."
-                    }
-                }
-                val calibrationColor = if (
-                    calibration.requestedMode == SubjectiveOverlayMode.CALIBRATED_SCALED &&
-                    !calibration.applied
-                ) {
-                    MaterialTheme.colorScheme.error
-                } else {
-                    MaterialTheme.colorScheme.onSurfaceVariant
-                }
-                Text(
-                    text = calibrationText,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = calibrationColor
-                )
+                DataQualityBadge(metrics = profile.metrics)
             }
 
             Spacer(modifier = Modifier.height(6.dp))
 
             Text(
-                text = "Best: ${profile.metrics.bestBucketLabel ?: "n/a"}  •  Worst: ${profile.metrics.worstBucketLabel ?: "n/a"}",
+                text = "Self-ratings are scaled in calibrated mode for visual comparison only.",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
 
-            if (profile.metrics.warnings.isNotEmpty()) {
+            val calibration = profile.subjectiveCalibration
+            if (
+                profile.config.includeSubjective &&
+                selectedOverlayMode == SubjectiveOverlayMode.CALIBRATED_SCALED &&
+                !calibration.applied
+            ) {
                 Spacer(modifier = Modifier.height(6.dp))
                 Text(
-                    text = profile.metrics.warnings.joinToString(separator = " | "),
+                    text = "Calibration unavailable: ${calibration.fallbackReason ?: "insufficient overlap"}. Showing Raw x2.",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.error
                 )
             }
+
+            Spacer(modifier = Modifier.height(4.dp))
+
+            TextButton(onClick = { showAdvanced = !showAdvanced }) {
+                Text(if (showAdvanced) "Hide Details" else "Show Details")
+            }
+
+            if (showAdvanced) {
+                if (profile.config.includeSubjective) {
+                    Text(
+                        text = "Subjective Overlay",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        listOf(
+                            SubjectiveOverlayMode.CALIBRATED_SCALED to "Scaled",
+                            SubjectiveOverlayMode.RAW_X2 to "Raw x2"
+                        ).forEach { (mode, label) ->
+                            FilterChip(
+                                selected = selectedOverlayMode == mode,
+                                onClick = { onOverlayModeSelected(mode) },
+                                label = { Text(label) }
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(6.dp))
+                }
+
+                Text(
+                    text = "Raw correlation: ${profile.metrics.correlation?.let { formatValue(it, 2) } ?: "n/a"} (${profile.metrics.correlationLabel})",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Text(
+                    text = "Confidence: ${"%.0f".format(profile.metrics.confidenceScore * 100)}% ${profile.metrics.confidenceLabel}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Text(
+                    text = "Paired buckets: ${profile.metrics.pairedBucketCount}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                if (profile.config.includeSubjective) {
+                    val calibrationText = when {
+                        calibration.appliedMode == SubjectiveOverlayMode.CALIBRATED_SCALED &&
+                            calibration.scale != null -> {
+                            "Calibration factor: x${formatValue(calibration.scale, 4)} (${calibration.trimmedBucketCount}/${calibration.pairedBucketCount} buckets)"
+                        }
+
+                        else -> {
+                            "Calibration fallback: Raw x2"
+                        }
+                    }
+                    Text(
+                        text = calibrationText,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+
+                if (profile.metrics.warnings.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    profile.metrics.warnings.take(3).forEach { warning ->
+                        Text(
+                            text = "- $warning",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    selectedBucketIndex?.let { index ->
+        if (index in profile.buckets.indices) {
+            BucketDetailsDialog(
+                profile = profile,
+                bucketIndex = index,
+                onDismiss = { selectedBucketIndex = null }
+            )
         }
     }
 }
 
 @Composable
-private fun DailyProfileLegend(includeSubjective: Boolean) {
+private fun DailyProfileLegend(
+    showObjective: Boolean,
+    showSubjective: Boolean
+) {
     val objectiveColor = Color(0xFF26D9B0)
     val subjectiveColor = Color(0xFFFFA726)
-    val mismatchColor = Color(0xFFE53935)
-    val bandColor = objectiveColor.copy(alpha = 0.20f)
+    val bandColor = objectiveColor.copy(alpha = 0.14f)
 
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        LegendDot(label = "Objective", color = objectiveColor)
-        if (includeSubjective) {
-            LegendDot(label = "Subjective", color = subjectiveColor)
+        if (showObjective) {
+            LegendDot(label = "Sensor", color = objectiveColor)
+            LegendDot(label = "IQR", color = bandColor)
         }
-        LegendDot(label = "IQR Band", color = bandColor)
-        LegendDot(label = "Mismatch", color = mismatchColor)
+        if (showSubjective) {
+            LegendDot(label = "Self", color = subjectiveColor)
+        }
     }
 }
 
@@ -271,23 +369,58 @@ private fun LegendDot(label: String, color: Color) {
 }
 
 @Composable
+private fun DataQualityBadge(metrics: DailyTremorProfileMetrics) {
+    val (label, color) = when {
+        metrics.insufficientDataForConfidence -> "Limited" to MaterialTheme.colorScheme.error
+        metrics.confidenceScore >= 0.75 -> "High" to Color(0xFF2E7D32)
+        metrics.confidenceScore >= 0.50 -> "Moderate" to Color(0xFFEF6C00)
+        else -> "Low" to MaterialTheme.colorScheme.error
+    }
+
+    Card(
+        colors = CardDefaults.cardColors(containerColor = color.copy(alpha = 0.18f))
+    ) {
+        Text(
+            text = "Data: $label",
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+            style = MaterialTheme.typography.labelSmall,
+            color = color
+        )
+    }
+}
+
+@Composable
 private fun DailyTremorProfileChart(
     profile: DailyTremorProfile,
     axis: ChartAxis,
+    showObjective: Boolean,
+    showSubjective: Boolean,
+    onBucketTapped: (Int) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val objectiveColor = Color(0xFF26D9B0)
     val subjectiveColor = Color(0xFFFFA726)
-    val mismatchColor = Color(0xFFE53935)
-    val objectiveBand = objectiveColor.copy(alpha = 0.20f)
+    val objectiveBand = objectiveColor.copy(alpha = 0.14f)
     val gridColor = Color(0xFF4A5A6A)
+    val chartBackground = Color(0xFF1E2836)
 
     Canvas(
         modifier = modifier
             .fillMaxWidth()
             .height(220.dp)
-            .background(Color(0xFF1E2836), RoundedCornerShape(8.dp))
+            .background(chartBackground, RoundedCornerShape(8.dp))
             .padding(12.dp)
+            .pointerInput(profile.buckets.size) {
+                detectTapGestures { offset ->
+                    val count = profile.buckets.size
+                    if (count <= 0 || size.width <= 0f) {
+                        return@detectTapGestures
+                    }
+                    val normalized = (offset.x / size.width).coerceIn(0f, 1f)
+                    val index = (normalized * (count - 1).toFloat()).roundToInt().coerceIn(0, count - 1)
+                    onBucketTapped(index)
+                }
+            }
             .semantics {
                 contentDescription = profile.metrics.accessibilitySummary
             }
@@ -315,65 +448,140 @@ private fun DailyTremorProfileChart(
             )
         }
 
-        // Draw IQR band in contiguous valid segments only to avoid gap-bridging artifacts.
-        contiguousBandSegments(profile.objectiveQ1Smoothed, profile.objectiveQ3Smoothed).forEach { segment ->
-            val path = Path()
-            val start = segment.first
-            path.moveTo(xFor(start), yFor(profile.objectiveQ3Smoothed[start]!!))
+        if (showObjective) {
+            contiguousBandSegments(profile.objectiveQ1Smoothed, profile.objectiveQ3Smoothed).forEach { segment ->
+                val path = Path()
+                val start = segment.first
+                path.moveTo(xFor(start), yFor(profile.objectiveQ3Smoothed[start]!!))
 
-            for (i in (start + 1)..segment.last) {
-                path.lineTo(xFor(i), yFor(profile.objectiveQ3Smoothed[i]!!))
-            }
-            for (i in segment.last downTo segment.first) {
-                path.lineTo(xFor(i), yFor(profile.objectiveQ1Smoothed[i]!!))
-            }
-            path.close()
+                for (i in (start + 1)..segment.last) {
+                    path.lineTo(xFor(i), yFor(profile.objectiveQ3Smoothed[i]!!))
+                }
+                for (i in segment.last downTo segment.first) {
+                    path.lineTo(xFor(i), yFor(profile.objectiveQ1Smoothed[i]!!))
+                }
+                path.close()
 
-            drawPath(path = path, color = objectiveBand)
+                drawPath(path = path, color = objectiveBand)
+            }
+
+            drawSegmentedLine(
+                values = profile.objectiveMedianSmoothed,
+                xFor = ::xFor,
+                yFor = ::yFor,
+                color = objectiveColor,
+                dashed = false,
+                strokeWidth = 3f
+            )
         }
 
-        drawSegmentedLine(
-            values = profile.objectiveMedianSmoothed,
-            xFor = ::xFor,
-            yFor = ::yFor,
-            color = objectiveColor,
-            dashed = false,
-            strokeWidth = 3f
-        )
+        if (showSubjective) {
+            drawSegmentedLine(
+                values = profile.subjectiveSmoothed,
+                xFor = ::xFor,
+                yFor = ::yFor,
+                color = subjectiveColor,
+                dashed = true,
+                strokeWidth = 3.5f
+            )
 
-        drawSegmentedLine(
-            values = profile.subjectiveSmoothed,
-            xFor = ::xFor,
-            yFor = ::yFor,
-            color = subjectiveColor,
-            dashed = true,
-            strokeWidth = if (axis.autoScaled) 4f else 3f
-        )
-
-        if (axis.autoScaled) {
             profile.subjectiveSmoothed.forEachIndexed { index, value ->
                 if (value != null) {
+                    val center = Offset(xFor(index), yFor(value))
+                    drawCircle(
+                        color = chartBackground,
+                        radius = 3.6f,
+                        center = center
+                    )
                     drawCircle(
                         color = subjectiveColor,
-                        radius = 2.4f,
-                        center = Offset(xFor(index), yFor(value))
+                        radius = 3.6f,
+                        center = center,
+                        style = Stroke(width = 1.6f)
                     )
                 }
             }
         }
+    }
+}
 
-        // Draw mismatch markers
-        profile.buckets.forEachIndexed { index, bucket ->
-            if (bucket.mismatchFlag) {
-                val yValue = profile.objectiveMedianSmoothed[index] ?: return@forEachIndexed
-                drawCircle(
-                    color = mismatchColor,
-                    radius = 4f,
-                    center = Offset(xFor(index), yFor(yValue))
+@Composable
+private fun BucketDetailsDialog(
+    profile: DailyTremorProfile,
+    bucketIndex: Int,
+    onDismiss: () -> Unit
+) {
+    val bucket = profile.buckets[bucketIndex]
+    val calibrationScale = profile.subjectiveCalibration.scale
+    val displaySubjective = when {
+        bucket.subjectiveMean == null -> null
+        profile.subjectiveCalibration.appliedMode == SubjectiveOverlayMode.CALIBRATED_SCALED && calibrationScale != null -> {
+            bucket.subjectiveMean * calibrationScale
+        }
+
+        else -> bucket.subjectiveMean
+    }
+
+    val perceptionGap = if (bucket.objectiveMedian != null && displaySubjective != null) {
+        displaySubjective - bucket.objectiveMedian
+    } else {
+        null
+    }
+
+    val perceptionGapLabel = when {
+        perceptionGap == null -> "Perception gap: n/a"
+        abs(perceptionGap) <= 0.05 -> "Perception gap: high match"
+        perceptionGap > 0.0 -> "Perception gap: self-rating above sensor"
+        else -> "Perception gap: sensor above self-rating"
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Close")
+            }
+        },
+        title = {
+            Text(formatBucketRange(bucket.startMinuteOfDay, bucket.endMinuteOfDayInclusive))
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(
+                    text = "Sensor median: ${formatValue(bucket.objectiveMedian, 3)}",
+                    style = MaterialTheme.typography.bodySmall
+                )
+                Text(
+                    text = "Sensor IQR: ${formatValue(bucket.objectiveQ1, 3)} - ${formatValue(bucket.objectiveQ3, 3)}",
+                    style = MaterialTheme.typography.bodySmall
+                )
+                Text(
+                    text = "Self rating: ${formatValue(bucket.subjectiveMean?.div(2.0), 2)} / 5 (${formatValue(bucket.subjectiveMean, 2)} / 10)",
+                    style = MaterialTheme.typography.bodySmall
+                )
+                Text(
+                    text = "Display value: ${formatValue(displaySubjective, 3)}",
+                    style = MaterialTheme.typography.bodySmall
+                )
+                Text(
+                    text = "Days with data: ${bucket.distinctDaysWithData}",
+                    style = MaterialTheme.typography.bodySmall
+                )
+                Text(
+                    text = "Sensor minutes: ${bucket.objectiveRawSampleCount}  |  Self entries: ${bucket.subjectiveCount}",
+                    style = MaterialTheme.typography.bodySmall
+                )
+                Text(
+                    text = "Overall data quality: ${profile.metrics.confidenceLabel}",
+                    style = MaterialTheme.typography.bodySmall
+                )
+                Text(
+                    text = perceptionGapLabel,
+                    style = MaterialTheme.typography.bodySmall
                 )
             }
         }
-    }
+    )
 }
 
 private fun contiguousBandSegments(
@@ -448,11 +656,12 @@ private data class ChartAxis(
     val autoScaled: Boolean
 )
 
-private fun resolveChartAxis(profile: DailyTremorProfile): ChartAxis {
-    val calibratedApplied =
-        profile.subjectiveCalibration.appliedMode == SubjectiveOverlayMode.CALIBRATED_SCALED
-
-    if (!calibratedApplied) {
+private fun resolveChartAxis(
+    profile: DailyTremorProfile,
+    showObjective: Boolean,
+    showSubjective: Boolean
+): ChartAxis {
+    if (!showObjective && !showSubjective) {
         return ChartAxis(
             max = 10.0,
             ticks = listOf(0.0, 5.0, 10.0),
@@ -460,15 +669,28 @@ private fun resolveChartAxis(profile: DailyTremorProfile): ChartAxis {
         )
     }
 
-    val observedMax = buildList {
-        addAll(profile.objectiveMedianSmoothed.filterNotNull())
-        addAll(profile.objectiveQ3Smoothed.filterNotNull())
-        addAll(profile.subjectiveSmoothed.filterNotNull())
-    }.maxOrNull() ?: 0.2
+    val calibratedApplied =
+        profile.subjectiveCalibration.appliedMode == SubjectiveOverlayMode.CALIBRATED_SCALED
 
-    val paddedMax = (observedMax * 1.25).coerceAtLeast(0.2)
-    val snappedMax = snapAxisMax(paddedMax).coerceAtMost(10.0)
+    if (showSubjective && !calibratedApplied) {
+        return ChartAxis(
+            max = 10.0,
+            ticks = listOf(0.0, 5.0, 10.0),
+            autoScaled = false
+        )
+    }
 
+    val candidates = buildList {
+        if (showObjective) {
+            addAll(profile.objectiveMedianSmoothed.filterNotNull())
+            addAll(profile.objectiveQ3Smoothed.filterNotNull())
+        }
+        if (showSubjective) {
+            addAll(profile.subjectiveSmoothed.filterNotNull())
+        }
+    }.filter { it.isFinite() && it >= 0.0 }
+
+    val snappedMax = computeRobustAxisMax(candidates)
     return ChartAxis(
         max = snappedMax,
         ticks = listOf(0.0, snappedMax / 2.0, snappedMax),
@@ -476,16 +698,60 @@ private fun resolveChartAxis(profile: DailyTremorProfile): ChartAxis {
     )
 }
 
+private fun computeRobustAxisMax(values: List<Double>): Double {
+    if (values.isEmpty()) return 0.2
+
+    val sorted = values.sorted()
+    val p90 = percentile(sorted, 0.90)
+    val maxValue = sorted.last()
+
+    val target = max(
+        p90 * 1.25,
+        maxValue * 0.35
+    ).coerceIn(0.12, 10.0)
+
+    return snapAxisMax(target)
+}
+
 private fun snapAxisMax(value: Double): Double {
-    val steps = listOf(0.2, 0.25, 0.3, 0.4, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 5.0, 10.0)
+    val steps = listOf(0.12, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 5.0, 10.0)
     return steps.firstOrNull { value <= it } ?: 10.0
 }
 
-private fun formatAxisValue(value: Double): String {
-    val formatted = if (value >= 1.0) {
-        String.format(Locale.US, "%.2f", value)
+private fun percentile(sortedValues: List<Double>, p: Double): Double {
+    if (sortedValues.isEmpty()) return 0.0
+    val index = p.coerceIn(0.0, 1.0) * sortedValues.lastIndex
+    val lo = index.toInt()
+    val hi = (lo + 1).coerceAtMost(sortedValues.lastIndex)
+    val weight = index - lo
+    return sortedValues[lo] * (1.0 - weight) + sortedValues[hi] * weight
+}
+
+private fun buildAlignmentSummary(correlation: Double?, label: String): String {
+    return if (correlation == null) {
+        "Pattern alignment: Insufficient"
     } else {
-        String.format(Locale.US, "%.3f", value)
+        "Pattern alignment: $label (r=${formatValue(correlation, 2)})"
     }
-    return formatted.trimEnd('0').trimEnd('.')
+}
+
+private fun formatBucketRange(startMinute: Int, endMinuteInclusive: Int): String {
+    val endExclusive = (endMinuteInclusive + 1).coerceAtMost(1440)
+    return "${formatMinute(startMinute)}-${formatMinute(endExclusive)}"
+}
+
+private fun formatMinute(minuteOfDay: Int): String {
+    val safeMinute = ((minuteOfDay % 1440) + 1440) % 1440
+    val hour = safeMinute / 60
+    val minute = safeMinute % 60
+    return String.format(Locale.US, "%02d:%02d", hour, minute)
+}
+
+private fun formatValue(value: Double?, decimals: Int): String {
+    if (value == null || !value.isFinite()) return "n/a"
+    val pattern = when {
+        decimals <= 0 -> "%.0f"
+        else -> "%.${decimals}f"
+    }
+    return String.format(Locale.US, pattern, value)
 }

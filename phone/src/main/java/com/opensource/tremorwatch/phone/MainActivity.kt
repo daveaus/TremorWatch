@@ -101,6 +101,7 @@ import com.opensource.tremorwatch.phone.typicalday.DailyTremorProfile
 import com.opensource.tremorwatch.phone.typicalday.DailyTremorProfileAggregator
 import com.opensource.tremorwatch.phone.typicalday.DailyTremorProfileCard
 import com.opensource.tremorwatch.phone.typicalday.DailyTremorProfileConfig
+import com.opensource.tremorwatch.phone.typicalday.DailyProfileSeriesMode
 import com.opensource.tremorwatch.phone.typicalday.SubjectiveOverlayMode
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -470,6 +471,13 @@ fun MainScreen(
             )
         )
     }
+    var dailyProfileSeriesMode by remember {
+        mutableStateOf(
+            DailyProfileSeriesMode.fromStorage(
+                dailyProfilePrefs.getString("series_mode", DailyProfileSeriesMode.BOTH.name)
+            )
+        )
+    }
     var dailyProfileState by remember { mutableStateOf<DailyTremorProfile?>(null) }
     var isDailyProfileLoading by remember { mutableStateOf(false) }
     var dailyProfileError by remember { mutableStateOf<String?>(null) }
@@ -492,12 +500,19 @@ fun MainScreen(
         }
     }
 
-    LaunchedEffect(dailyProfileDays, dailyProfileBucketMinutes, dailyProfileOverlayMode) {
+    LaunchedEffect(dailyProfileDays, dailyProfileBucketMinutes, dailyProfileOverlayMode, dailyProfileSeriesMode) {
         dailyProfilePrefs.edit()
             .putInt("days", dailyProfileDays)
             .putInt("bucket_minutes", dailyProfileBucketMinutes)
             .putString("overlay_mode", dailyProfileOverlayMode.name)
+            .putString("series_mode", dailyProfileSeriesMode.name)
             .apply()
+    }
+
+    LaunchedEffect(showRatingsOnGraph) {
+        if (!showRatingsOnGraph && dailyProfileSeriesMode == DailyProfileSeriesMode.SUBJECTIVE_ONLY) {
+            dailyProfileSeriesMode = DailyProfileSeriesMode.OBJECTIVE_ONLY
+        }
     }
     
     // Load 48h of data for the unified chart (supports scrolling back)
@@ -1234,6 +1249,7 @@ fun MainScreen(
                     selectedDays = dailyProfileDays,
                     selectedBucketMinutes = dailyProfileBucketMinutes,
                     selectedOverlayMode = dailyProfileOverlayMode,
+                    selectedSeriesMode = dailyProfileSeriesMode,
                     onDaysSelected = { selected ->
                         dailyProfileDays = selected.coerceIn(7, 60)
                     },
@@ -1244,6 +1260,9 @@ fun MainScreen(
                     },
                     onOverlayModeSelected = { selected ->
                         dailyProfileOverlayMode = selected
+                    },
+                    onSeriesModeSelected = { selected ->
+                        dailyProfileSeriesMode = selected
                     }
                 )
             }
