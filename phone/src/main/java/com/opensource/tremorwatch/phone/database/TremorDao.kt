@@ -169,6 +169,12 @@ interface TremorDao {
      */
     @Query("SELECT * FROM subjective_ratings ORDER BY timestamp DESC")
     suspend fun getAllRatings(): List<SubjectiveRatingEntity>
+
+    /**
+     * Get a single rating by ID.
+     */
+    @Query("SELECT * FROM subjective_ratings WHERE id = :ratingId LIMIT 1")
+    suspend fun getRatingById(ratingId: String): SubjectiveRatingEntity?
     
     /**
      * Get calibration data for a specific rating.
@@ -199,6 +205,26 @@ interface TremorDao {
      */
     @Query("SELECT COUNT(*) FROM calibration_data WHERE ratingId = :ratingId")
     suspend fun getCalibrationCountForRating(ratingId: String): Int
+
+    /**
+     * Update detected objective metrics for a subjective rating.
+     * Used when calibration data arrives after the initial rating message.
+     */
+    @Query(
+        """
+        UPDATE subjective_ratings
+        SET detectedSeverity = :detectedSeverity,
+            detectedConfidence = :detectedConfidence,
+            detectedFrequency = :detectedFrequency
+        WHERE id = :ratingId
+        """
+    )
+    suspend fun updateDetectedMetricsForRating(
+        ratingId: String,
+        detectedSeverity: Double?,
+        detectedConfidence: Float?,
+        detectedFrequency: Float?
+    )
 
     /**
      * Mark a rating as having calibration data (set flag to true).

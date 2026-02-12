@@ -5,6 +5,7 @@ import android.util.Log
 import com.opensource.tremorwatch.phone.data.TremorDataRepository
 import com.opensource.tremorwatch.phone.database.CalibrationDataEntity
 import com.opensource.tremorwatch.phone.database.SubjectiveRatingEntity
+import com.opensource.tremorwatch.phone.database.TremorDao
 import com.opensource.tremorwatch.phone.database.TremorRoomDatabase
 import com.opensource.tremorwatch.shared.Constants
 import com.opensource.tremorwatch.shared.models.TremorBatch
@@ -94,6 +95,12 @@ class WatchDataListenerService : WearableListenerService() {
             return result.toByteArray()
         }
     }
+
+    private data class DetectedMetrics(
+        val severity: Double?,
+        val confidence: Float?,
+        val frequencyHz: Float?
+    )
 
     /**
      * Decompress GZIP data
@@ -479,8 +486,10 @@ class WatchDataListenerService : WearableListenerService() {
             if (calibrationEntities.isNotEmpty() && ratingId != null) {
                 val db = TremorRoomDatabase.getDatabase(this@WatchDataListenerService)
                 val dao = db.tremorDao()
+                val targetRatingId = ratingId
                 dao.insertCalibrationData(calibrationEntities)
-                dao.markRatingCalibrated(ratingId)
+                dao.markRatingCalibrated(targetRatingId)
+                updateDetectedMetricsFromCalibration(dao, targetRatingId, calibrationEntities)
 
                 Log.i(TAG, "✓ Inserted ${calibrationEntities.size} calibration samples for rating $ratingId into DB")
 
@@ -488,7 +497,7 @@ class WatchDataListenerService : WearableListenerService() {
                 val prefs = getSharedPreferences("calibration_prefs", MODE_PRIVATE)
                 prefs.edit()
                     .putLong("last_calibration_time", System.currentTimeMillis())
-                    .putString("last_calibration_rating_id", ratingId)
+                    .putString("last_calibration_rating_id", targetRatingId)
                     .putInt("last_calibration_sample_count", calibrationEntities.size)
                     .apply()
             } else {
@@ -867,6 +876,109 @@ class WatchDataListenerService : WearableListenerService() {
         }
     }
 
+    private suspend fun updateDetectedMetricsFromCalibration(
+        dao: TremorDao,
+        ratingId: String,
+        calibrationEntities: List<CalibrationDataEntity>
+    ) {
+        val fromCalibration = computeDetectedMetricsFromCalibration(calibrationEntities)
+        val finalMetrics = fromCalibration ?: run {
+            val rating = dao.getRatingById(ratingId)
+            if (rating == null) {
+                null
+            } else {
+                computeDetectedMetricsFromObjectiveWindow(
+                    dao = dao,
+                    ratingTimestamp = rating.timestamp,
+                    calibrationDurationSeconds = rating.calibrationDurationSeconds
+                )
+            }
+        }
+
+        if (finalMetrics == null) return
+        if (finalMetrics.severity == null && finalMetrics.confidence == null && finalMetrics.frequencyHz == null) return
+
+        dao.updateDetectedMetricsForRating(
+            ratingId = ratingId,
+            detectedSeverity = finalMetrics.severity,
+            detectedConfidence = finalMetrics.confidence,
+            detectedFrequency = finalMetrics.frequencyHz
+        )
+    }
+
+    private fun computeDetectedMetricsFromCalibration(
+        calibrationEntities: List<CalibrationDataEntity>
+    ): DetectedMetrics? {
+        if (calibrationEntities.isEmpty()) return null
+
+        val preferred = calibrationEntities.filter { it.isWorn && !it.isCharging }
+        val samples = if (preferred.isNotEmpty()) preferred else calibrationEntities
+        if (samples.isEmpty()) return null
+
+        val severity = samples.map { it.severity }.averageOrNull()
+        val confidence = samples.map { it.confidence.toDouble() }.averageOrNull()?.toFloat()
+        val frequency = samples
+            .map { it.dominantFrequency.toDouble() }
+            .filter { it > 0.0 }
+            .averageOrNull()
+            ?.toFloat()
+
+        return DetectedMetrics(
+            severity = severity,
+            confidence = confidence,
+            frequencyHz = frequency
+        )
+    }
+
+    private suspend fun computeDetectedMetricsFromObjectiveWindow(
+        dao: TremorDao,
+        ratingTimestamp: Long,
+        calibrationDurationSeconds: Int
+    ): DetectedMetrics? {
+        val durationMs = calibrationDurationSeconds.coerceIn(5, 300) * 1000L
+        val windowEnd = (ratingTimestamp - 500L).coerceAtLeast(0L)
+        val windowStart = (windowEnd - durationMs).coerceAtLeast(0L)
+        val samplesInWindow = dao.getSamplesInRange(windowStart, windowEnd)
+        if (samplesInWindow.isEmpty()) return null
+
+        val preferred = samplesInWindow.filter { it.isWorn != false && it.isCharging != true }
+        val samples = if (preferred.isNotEmpty()) preferred else samplesInWindow
+        if (samples.isEmpty()) return null
+
+        val severity = samples.map { it.severity }.averageOrNull()
+        val confidence = samples.mapNotNull { it.confidence }.averageOrNull()?.toFloat()
+        val frequency = samples
+            .mapNotNull { it.dominantFrequency }
+            .filter { it > 0.0 }
+            .averageOrNull()
+            ?.toFloat()
+
+        return DetectedMetrics(
+            severity = severity,
+            confidence = confidence,
+            frequencyHz = frequency
+        )
+    }
+
+    private fun List<Double>.averageOrNull(): Double? {
+        if (isEmpty()) return null
+        return average()
+    }
+
+    private fun JSONObject.optNullableDouble(key: String): Double? {
+        if (!has(key) || isNull(key)) return null
+        return when (val value = opt(key)) {
+            is Number -> value.toDouble()
+            is String -> value.toDoubleOrNull()
+            else -> null
+        }
+    }
+
+    private fun JSONObject.optNullableString(key: String): String? {
+        if (!has(key) || isNull(key)) return null
+        return optString(key, "").takeIf { it.isNotBlank() }
+    }
+
     /**
      * Handle subjective rating from watch.
      * Parse the rating JSON and save to local database immediately.
@@ -875,28 +987,58 @@ class WatchDataListenerService : WearableListenerService() {
         serviceScope.launch(Dispatchers.IO) {
             try {
                 val json = JSONObject(String(data, Charsets.UTF_8))
+                val db = TremorRoomDatabase.getDatabase(this@WatchDataListenerService)
+                val dao = db.tremorDao()
                 Log.i(TAG, "★ Received subjective rating: rating=${json.optInt("rating", 0)}")
                 
+                val ratingTimestamp = json.getLong("timestamp")
+                val calibrationDurationSeconds = json.optInt("calibrationDurationSeconds", 60)
+                val payloadMetrics = DetectedMetrics(
+                    severity = json.optNullableDouble("detectedSeverity"),
+                    confidence = json.optNullableDouble("detectedConfidence")?.toFloat(),
+                    frequencyHz = json.optNullableDouble("detectedFrequency")?.toFloat()
+                )
+                val hasPayloadMetrics = payloadMetrics.severity != null ||
+                    payloadMetrics.confidence != null ||
+                    payloadMetrics.frequencyHz != null
+                val inferredMetrics = if (!hasPayloadMetrics) {
+                    computeDetectedMetricsFromObjectiveWindow(
+                        dao = dao,
+                        ratingTimestamp = ratingTimestamp,
+                        calibrationDurationSeconds = calibrationDurationSeconds
+                    )
+                } else {
+                    null
+                }
+
                 // Parse rating from JSON
                 val ratingEntity = SubjectiveRatingEntity(
                     id = json.getString("id"),
-                    timestamp = json.getLong("timestamp"),
+                    timestamp = ratingTimestamp,
                     rating = json.getInt("rating"),
                     source = json.getString("source"),
-                    watchId = json.optString("watchId", null),
-                    detectedSeverity = if (json.has("detectedSeverity")) json.getDouble("detectedSeverity") else null,
-                    detectedConfidence = if (json.has("detectedConfidence")) json.getDouble("detectedConfidence").toFloat() else null,
-                    detectedFrequency = if (json.has("detectedFrequency")) json.getDouble("detectedFrequency").toFloat() else null,
+                    watchId = json.optNullableString("watchId"),
+                    detectedSeverity = payloadMetrics.severity ?: inferredMetrics?.severity,
+                    detectedConfidence = payloadMetrics.confidence ?: inferredMetrics?.confidence,
+                    detectedFrequency = payloadMetrics.frequencyHz ?: inferredMetrics?.frequencyHz,
                     calibrationModeEnabled = json.optBoolean("calibrationModeEnabled", false),
-                    calibrationDurationSeconds = json.optInt("calibrationDurationSeconds", 60),
-                    notes = json.optString("notes", null),
+                    calibrationDurationSeconds = calibrationDurationSeconds,
+                    notes = json.optNullableString("notes"),
                     schemaVersion = json.optInt("schemaVersion", 1)
                 )
-                
+
                 // Save to database immediately
-                val db = TremorRoomDatabase.getDatabase(this@WatchDataListenerService)
-                db.tremorDao().insertRating(ratingEntity)
-                
+                dao.insertRating(ratingEntity)
+
+                if (!hasPayloadMetrics && inferredMetrics != null) {
+                    Log.d(
+                        TAG,
+                        "Backfilled detected metrics for rating ${ratingEntity.id} " +
+                            "(severity=${inferredMetrics.severity}, confidence=${inferredMetrics.confidence}, " +
+                            "frequency=${inferredMetrics.frequencyHz})"
+                    )
+                }
+
                 Log.i(TAG, "✓ Saved subjective rating ${ratingEntity.id} (rating: ${ratingEntity.rating}, source: ${ratingEntity.source})")
                 
                 // Notify UI of new rating
@@ -953,9 +1095,16 @@ class WatchDataListenerService : WearableListenerService() {
                     )
                 }
                 
-                // Save to database in batch
-                val db = TremorRoomDatabase.getDatabase(this@WatchDataListenerService)
-                db.tremorDao().insertCalibrationData(calibrationEntities)
+                if (calibrationEntities.isNotEmpty()) {
+                    // Save to database in batch
+                    val db = TremorRoomDatabase.getDatabase(this@WatchDataListenerService)
+                    val dao = db.tremorDao()
+                    dao.insertCalibrationData(calibrationEntities)
+                    dao.markRatingCalibrated(ratingId)
+                    updateDetectedMetricsFromCalibration(dao, ratingId, calibrationEntities)
+                } else {
+                    Log.w(TAG, "Received empty calibration sample set for rating $ratingId")
+                }
                 
                 Log.i(TAG, "✓ Saved ${calibrationEntities.size} calibration samples for rating $ratingId")
                 

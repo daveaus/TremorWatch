@@ -37,9 +37,12 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileWriter
+import java.security.MessageDigest
+import java.util.Calendar
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.TimeZone
 import org.json.JSONObject
 
 /**
@@ -127,7 +130,7 @@ fun ExportDialog(
                             Text(format)
                             Text(
                                 text = when (format) {
-                                    "Summary" -> "Aggregated by hour, includes stats"
+                                    "Summary" -> "Daily clinician-friendly summary"
                                     "Detailed" -> "All data points with metadata"
                                     "Raw Data" -> "Complete sensor data dump"
                                     "Subjective Ratings" -> "User ratings with calibration data"
@@ -192,12 +195,35 @@ fun ExportDialog(
     )
 }
 
+private const val EXPORT_SCHEMA_VERSION = 2
+private const val NULL_TOKEN = "NA"
+private const val RELIABILITY_THRESHOLD = 0.40
+
+private data class ExportContext(
+    val exportId: String,
+    val formatName: String,
+    val requestedTimeRange: String,
+    val generatedAtMs: Long,
+    val cutoffTime: Long,
+    val localTimezoneId: String,
+    val localTimezoneOffsetMinutes: Int,
+    val watchAliases: MutableMap<String, String> = mutableMapOf()
+)
+
+private data class InferredMetrics(
+    val severity: Double?,
+    val confidence: Double?,
+    val frequencyHz: Double?
+)
+
 /**
  * Export data to CSV and share via Android share sheet
  */
 suspend fun exportData(context: Context, timeRange: String, format: String): String {
     return withContext(Dispatchers.IO) {
         try {
+            val nowMs = System.currentTimeMillis()
+
             // Calculate time range in hours
             val hoursBack = when (timeRange) {
                 "1h" -> 1
@@ -213,29 +239,39 @@ suspend fun exportData(context: Context, timeRange: String, format: String): Str
 
             val dbHelper = TremorDatabaseHelper(context)
             val cutoffTime = if (hoursBack == Int.MAX_VALUE) 0L else {
-                System.currentTimeMillis() - (hoursBack.toLong() * 60 * 60 * 1000)
-            }
-            
-            // Check count first without loading data into memory
-            val totalCount = dbHelper.getSamplesCountAfter(cutoffTime)
-            if (totalCount == 0) {
-                return@withContext "No data available for export"
+                nowMs - (hoursBack.toLong() * 60 * 60 * 1000)
             }
 
             // Create export file
-            val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-            val fileName = "tremorwatch_${format.lowercase().replace(" ", "_")}_${timestamp}.csv"
+            val exportTimestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date(nowMs))
+            val timeZone = TimeZone.getDefault()
+            val exportContext = ExportContext(
+                exportId = exportTimestamp,
+                formatName = format,
+                requestedTimeRange = timeRange,
+                generatedAtMs = nowMs,
+                cutoffTime = cutoffTime,
+                localTimezoneId = timeZone.id,
+                localTimezoneOffsetMinutes = timeZone.getOffset(nowMs) / 60000
+            )
+
+            val fileName = "tremorwatch_${format.lowercase().replace(" ", "_")}_${exportTimestamp}.csv"
             val exportFile = File(context.cacheDir, fileName)
 
             // Stream data in chunks to avoid OOM
             val recordCount = FileWriter(exportFile).use { writer ->
                 when (format) {
-                    "Summary" -> writeStreamingSummaryCsv(writer, dbHelper, cutoffTime)
-                    "Detailed" -> writeStreamingDetailedCsv(writer, dbHelper, cutoffTime)
-                    "Raw Data" -> writeStreamingRawDataCsv(writer, dbHelper, cutoffTime)
-                    "Subjective Ratings" -> writeSubjectiveRatingsCsv(writer, context, cutoffTime)
-                    else -> writeStreamingDetailedCsv(writer, dbHelper, cutoffTime)
+                    "Summary" -> writeStreamingSummaryCsv(writer, dbHelper, cutoffTime, exportContext)
+                    "Detailed" -> writeStreamingDetailedCsv(writer, dbHelper, cutoffTime, exportContext)
+                    "Raw Data" -> writeStreamingRawDataCsv(writer, dbHelper, cutoffTime, exportContext)
+                    "Subjective Ratings" -> writeSubjectiveRatingsCsv(writer, context, cutoffTime, exportContext)
+                    else -> writeStreamingDetailedCsv(writer, dbHelper, cutoffTime, exportContext)
                 }
+            }
+
+            if (recordCount == 0) {
+                exportFile.delete()
+                return@withContext "No data available for export"
             }
 
             // Share file
@@ -470,6 +506,168 @@ private fun optBoolean(metadata: JSONObject?, key: String): Boolean? {
     }
 }
 
+private fun formatOffsetMinutes(offsetMinutes: Int): String {
+    val sign = if (offsetMinutes >= 0) "+" else "-"
+    val absMinutes = kotlin.math.abs(offsetMinutes)
+    val hours = absMinutes / 60
+    val minutes = absMinutes % 60
+    return String.format(Locale.US, "%s%02d:%02d", sign, hours, minutes)
+}
+
+private fun isoUtc(timestamp: Long): String {
+    val format = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US)
+    format.timeZone = TimeZone.getTimeZone("UTC")
+    return format.format(Date(timestamp))
+}
+
+private fun isoLocal(timestamp: Long): String {
+    val format = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSXXX", Locale.US)
+    format.timeZone = TimeZone.getDefault()
+    return format.format(Date(timestamp))
+}
+
+private fun writeCommonExportHeader(
+    writer: FileWriter,
+    exportContext: ExportContext,
+    extraLines: List<String>
+) {
+    writer.write("# TremorWatch Export\n")
+    writer.write("# Format: ${exportContext.formatName}\n")
+    writer.write("# SchemaVersion: $EXPORT_SCHEMA_VERSION\n")
+    writer.write("# ExportId: ${exportContext.exportId}\n")
+    writer.write("# GeneratedAtUTC: ${isoUtc(exportContext.generatedAtMs)}\n")
+    writer.write("# GeneratedAtLocal: ${isoLocal(exportContext.generatedAtMs)}\n")
+    writer.write("# RequestedTimeRange: ${exportContext.requestedTimeRange}\n")
+    writer.write("# CutoffTimestampUnixMsUTC: ${exportContext.cutoffTime}\n")
+    writer.write("# LocalTimezone: ${exportContext.localTimezoneId} (${formatOffsetMinutes(exportContext.localTimezoneOffsetMinutes)})\n")
+    writer.write("# NullToken: $NULL_TOKEN\n")
+    writer.write("# TimestampUnixMsUTC: Unix epoch milliseconds in UTC\n")
+    writer.write("# DateTimeUTC: ISO 8601 UTC timestamp\n")
+    writer.write("# DateTimeLocal: ISO 8601 local timestamp with UTC offset\n")
+    writer.write("# SeverityRaw_0to10: Internal TremorWatch severity index (0-10), not a diagnostic clinical scale\n")
+    writer.write("# ReliabilityScore_0to1: Confidence estimate, higher is more reliable\n")
+    writer.write("# IncludeInAnalysis: true when ExcludeFromAnalysis != true and (IsReliable == true or ReliabilityScore_0to1 >= $RELIABILITY_THRESHOLD)\n")
+    extraLines.forEach { writer.write("# $it\n") }
+    writer.write("#\n")
+}
+
+private fun csvValue(value: Any?): String {
+    val text = when (value) {
+        null -> NULL_TOKEN
+        is Double -> if (value.isNaN() || value.isInfinite()) NULL_TOKEN else value.toString()
+        is Float -> if (value.isNaN() || value.isInfinite()) NULL_TOKEN else value.toString()
+        else -> value.toString()
+    }
+    return if (text.contains(',') || text.contains('"') || text.contains('\n') || text.contains('\r')) {
+        "\"${text.replace("\"", "\"\"")}\""
+    } else {
+        text
+    }
+}
+
+private fun csvRow(vararg values: Any?): String {
+    return values.joinToString(",") { csvValue(it) } + "\n"
+}
+
+private fun String?.nullIfBlank(): String? {
+    if (this == null) return null
+    return if (isBlank()) null else this
+}
+
+private fun formatDouble(value: Double?, decimals: Int): String? {
+    if (value == null || value.isNaN() || value.isInfinite()) {
+        return null
+    }
+    return String.format(Locale.US, "%.${decimals}f", value)
+}
+
+private fun reliabilityScore(
+    sampleConfidence: Double?,
+    adjustedConfidence: Double?
+): Double? {
+    return adjustedConfidence ?: sampleConfidence
+}
+
+private fun includeInAnalysis(
+    isReliable: Boolean?,
+    excludeFromAnalysis: Boolean?,
+    reliabilityScore: Double?
+): Boolean? {
+    if (excludeFromAnalysis == true) {
+        return false
+    }
+    if (isReliable != null) {
+        return isReliable
+    }
+    if (reliabilityScore != null) {
+        return reliabilityScore >= RELIABILITY_THRESHOLD
+    }
+    return null
+}
+
+private fun startOfLocalDayMillis(timestamp: Long): Long {
+    val calendar = Calendar.getInstance()
+    calendar.timeInMillis = timestamp
+    calendar.set(Calendar.HOUR_OF_DAY, 0)
+    calendar.set(Calendar.MINUTE, 0)
+    calendar.set(Calendar.SECOND, 0)
+    calendar.set(Calendar.MILLISECOND, 0)
+    return calendar.timeInMillis
+}
+
+private fun percentile(values: List<Double>, percentile: Double): Double? {
+    if (values.isEmpty()) {
+        return null
+    }
+    val sorted = values.sorted()
+    if (sorted.size == 1) {
+        return sorted.first()
+    }
+    val bounded = percentile.coerceIn(0.0, 1.0)
+    val position = bounded * (sorted.size - 1)
+    val lower = kotlin.math.floor(position).toInt()
+    val upper = kotlin.math.ceil(position).toInt()
+    if (lower == upper) {
+        return sorted[lower]
+    }
+    val weight = position - lower
+    return sorted[lower] + (sorted[upper] - sorted[lower]) * weight
+}
+
+private fun pseudonymizedWatchId(
+    rawWatchId: String?,
+    exportContext: ExportContext
+): String? {
+    val source = rawWatchId?.trim()
+    if (source.isNullOrEmpty()) {
+        return null
+    }
+    return exportContext.watchAliases.getOrPut(source) {
+        val digest = MessageDigest.getInstance("SHA-256")
+            .digest("${exportContext.exportId}:$source".toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
+        "DEV_${digest.take(8)}"
+    }
+}
+
+private fun inferMetricsFromTremorSamples(samples: List<TremorSample>): InferredMetrics? {
+    if (samples.isEmpty()) {
+        return null
+    }
+    val preferred = samples.filter { it.isWorn != false && it.isCharging != true }
+    val source = if (preferred.isNotEmpty()) preferred else samples
+    if (source.isEmpty()) {
+        return null
+    }
+
+    return InferredMetrics(
+        severity = source.map { it.severity }.average(),
+        confidence = source.mapNotNull { it.confidence }.takeIf { it.isNotEmpty() }?.average(),
+        frequencyHz = source.mapNotNull { it.dominantFrequency }.filter { it > 0.0 }
+            .takeIf { it.isNotEmpty() }?.average()
+    )
+}
+
 // ============== STREAMING EXPORT FUNCTIONS (memory-efficient) ==============
 
 private const val CHUNK_SIZE = 5000
@@ -480,53 +678,68 @@ private const val CHUNK_SIZE = 5000
 private suspend fun writeStreamingDetailedCsv(
     writer: FileWriter,
     dbHelper: TremorDatabaseHelper,
-    cutoffTime: Long
+    cutoffTime: Long,
+    exportContext: ExportContext
 ): Int {
-    // Write header with scale documentation
-    writer.write("# EXPERIMENTAL DATA - NOT FOR MEDICAL USE\n")
-    writer.write("# This data is from experimental software and should not be used for diagnosis or treatment\n")
-    writer.write("#\n")
-    writer.write("# Severity Scale: 0-10 clinical score (0-1 minimal, 1-3 mild, 3-5 moderate, 5-7 moderate-severe, 7-10 severe)\n")
-    writer.write("# Severity Normalized: Severity / 10, clamped to 0-1 for analysis tools that expect a 0-1 range\n")
-    writer.write("# This export includes ALL samples (tremor and non-tremor) for unbiased analysis\n")
-    writer.write("#\n")
-    writer.write("Timestamp,DateTime,Severity,Severity Normalized,Tremor Count,")
-    writer.write("Activity Type,Activity Confidence,Activity Age Ms,")
-    writer.write("Adjusted Severity,Adjusted Confidence,Is Reliable,Exclude From Analysis\n")
+    writeCommonExportHeader(
+        writer = writer,
+        exportContext = exportContext.copy(formatName = "Detailed"),
+        extraLines = listOf(
+            "Purpose: Per-sample analysis export",
+            "All missing values are encoded as $NULL_TOKEN"
+        )
+    )
+    writer.write(
+        "TimestampUnixMsUTC,DateTimeUTC,DateTimeLocal,SeverityRaw_0to10,SeverityNorm_0to1," +
+            "TremorCount,ActivityType,ActivityConfidence_0to1,ActivityAgeMs," +
+            "AdjustedSeverity_0to10,AdjustedConfidence_0to1,ReliabilityScore_0to1," +
+            "IsReliable,ExcludeFromAnalysis,IncludeInAnalysis\n"
+    )
 
     var offset = 0
     var totalRecords = 0
-    var outlierCount = 0
-    var unknownActivityCount = 0
-    var reliableCount = 0
 
     while (true) {
         val chunk = dbHelper.getSamplesAfterPaged(cutoffTime, CHUNK_SIZE, offset)
         if (chunk.isEmpty()) break
 
-        // Export ALL samples (unfiltered) for unbiased analysis
         chunk.sortedBy { it.timestamp }.forEach { record ->
-            val dateStr = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
-                .format(Date(record.timestamp))
-
             val metadata = parseMetadata(record.metadataJson)
+            val activityType = metaValue(metadata, "activityType").nullIfBlank()
+            val activityConfidence = optDouble(metadata, "activityConfidence")
+            val activityAgeMs = metaValue(metadata, "activityAgeMs").nullIfBlank()
+            val adjustedSeverity = optDouble(metadata, "activityAdjustedSeverity")
+            val adjustedConfidence = optDouble(metadata, "activityAdjustedConfidence")
+            val isReliable = optBoolean(metadata, "isReliableMeasurement")
+            val excludeFromAnalysis = optBoolean(metadata, "excludeFromAnalysis")
+            val reliability = reliabilityScore(record.confidence, adjustedConfidence)
+            val include = includeInAnalysis(isReliable, excludeFromAnalysis, reliability)
             val severityNorm = (record.severity / 10.0).coerceIn(0.0, 1.0)
-            writer.write("${record.timestamp},$dateStr,${String.format("%.6f", record.severity)},${String.format("%.6f", severityNorm)},${record.tremorCount},")
-            writer.write("${metaValue(metadata, "activityType")},${metaValue(metadata, "activityConfidence")},")
-            writer.write("${metaValue(metadata, "activityAgeMs")},")
-            writer.write("${metaValue(metadata, "activityAdjustedSeverity")},${metaValue(metadata, "activityAdjustedConfidence")},")
-            writer.write("${metaValue(metadata, "isReliableMeasurement")},${metaValue(metadata, "excludeFromAnalysis")}\n")
-            totalRecords++
 
-            // Track quality metrics
-            if (record.severity > 10.0) outlierCount++
-            if (metaValue(metadata, "activityType") == "unknown") unknownActivityCount++
-            if (optBoolean(metadata, "isReliableMeasurement") == true) reliableCount++
+            writer.write(
+                csvRow(
+                    record.timestamp,
+                    isoUtc(record.timestamp),
+                    isoLocal(record.timestamp),
+                    formatDouble(record.severity, 6),
+                    formatDouble(severityNorm, 6),
+                    record.tremorCount,
+                    activityType,
+                    formatDouble(activityConfidence, 4),
+                    activityAgeMs,
+                    formatDouble(adjustedSeverity, 6),
+                    formatDouble(adjustedConfidence, 6),
+                    formatDouble(reliability, 6),
+                    isReliable,
+                    excludeFromAnalysis,
+                    include
+                )
+            )
+            totalRecords++
         }
 
         offset += CHUNK_SIZE
 
-        // Flush periodically to free memory
         if (offset % (CHUNK_SIZE * 5) == 0) {
             writer.flush()
         }
@@ -541,22 +754,24 @@ private suspend fun writeStreamingDetailedCsv(
 private suspend fun writeStreamingRawDataCsv(
     writer: FileWriter,
     dbHelper: TremorDatabaseHelper,
-    cutoffTime: Long
+    cutoffTime: Long,
+    exportContext: ExportContext
 ): Int {
-    // Write header with scale documentation
-    writer.write("# EXPERIMENTAL DATA - NOT FOR MEDICAL USE\n")
-    writer.write("# This data is from experimental software and should not be used for diagnosis or treatment\n")
-    writer.write("#\n")
-    writer.write("# Severity Scale: 0-10 clinical score (0-1 minimal, 1-3 mild, 3-5 moderate, 5-7 moderate-severe, 7-10 severe)\n")
-    writer.write("# Severity Normalized: Severity / 10, clamped to 0-1 for analysis tools that expect a 0-1 range\n")
-    writer.write("# This export includes ALL samples (tremor and non-tremor) for unbiased analysis\n")
-    writer.write("#\n")
-    writer.write("Timestamp,DateTime,Severity,Severity Normalized,Tremor Count,")
-    writer.write("X,Y,Z,Magnitude,Accel Magnitude,Confidence,")
-    writer.write("Is Worn,Is Charging,Dominant Freq,Tremor Band Power,")
-    writer.write("Total Power,Band Ratio,Peak Prominence,Watch ID,")
-    writer.write("Activity Type,Activity Confidence,Activity Age Ms,")
-    writer.write("Adjusted Severity,Adjusted Confidence,Is Reliable,Exclude From Analysis\n")
+    writeCommonExportHeader(
+        writer = writer,
+        exportContext = exportContext.copy(formatName = "Raw Data"),
+        extraLines = listOf(
+            "Purpose: Raw/debug export with sensor + spectral fields",
+            "Watch IDs are pseudonymized to export-local aliases"
+        )
+    )
+    writer.write(
+        "TimestampUnixMsUTC,DateTimeUTC,DateTimeLocal,SeverityRaw_0to10,SeverityNorm_0to1," +
+            "TremorCount,AccelX_g,AccelY_g,AccelZ_g,VectorMagnitude_g,AccelMagnitude_g,Confidence_0to1," +
+            "IsWorn,IsCharging,DominantFreq_Hz,TremorBandPower,TotalPower,BandRatio,PeakProminence,WatchIdAlias," +
+            "ActivityType,ActivityConfidence_0to1,ActivityAgeMs,AdjustedSeverity_0to10,AdjustedConfidence_0to1," +
+            "ReliabilityScore_0to1,IsReliable,ExcludeFromAnalysis,IncludeInAnalysis\n"
+    )
 
     var offset = 0
     var totalRecords = 0
@@ -565,25 +780,53 @@ private suspend fun writeStreamingRawDataCsv(
         val chunk = dbHelper.getSamplesAfterPaged(cutoffTime, CHUNK_SIZE, offset)
         if (chunk.isEmpty()) break
 
-        // Export ALL samples (unfiltered) for unbiased analysis
         chunk.sortedBy { it.timestamp }.forEach { sample ->
-            val dateStr = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US)
-                .format(Date(sample.timestamp))
-
             val metadata = parseMetadata(sample.metadataJson)
+            val activityType = metaValue(metadata, "activityType").nullIfBlank()
+            val activityConfidence = optDouble(metadata, "activityConfidence")
+            val activityAgeMs = metaValue(metadata, "activityAgeMs").nullIfBlank()
+            val adjustedSeverity = optDouble(metadata, "activityAdjustedSeverity")
+            val adjustedConfidence = optDouble(metadata, "activityAdjustedConfidence")
+            val isReliable = optBoolean(metadata, "isReliableMeasurement")
+            val excludeFromAnalysis = optBoolean(metadata, "excludeFromAnalysis")
+            val reliability = reliabilityScore(sample.confidence, adjustedConfidence)
+            val include = includeInAnalysis(isReliable, excludeFromAnalysis, reliability)
             val severityNorm = (sample.severity / 10.0).coerceIn(0.0, 1.0)
+            val watchIdAlias = pseudonymizedWatchId(sample.watchId, exportContext)
 
-            writer.write("${sample.timestamp},$dateStr,")
-            writer.write("${String.format("%.6f", sample.severity)},${String.format("%.6f", severityNorm)},${sample.tremorCount},")
-            writer.write("${sample.x ?: ""},${sample.y ?: ""},${sample.z ?: ""},")
-            writer.write("${sample.magnitude ?: ""},${sample.accelMagnitude ?: ""},${sample.confidence ?: ""},")
-            writer.write("${sample.isWorn ?: ""},${sample.isCharging ?: ""},")
-            writer.write("${sample.dominantFrequency ?: ""},${sample.tremorBandPower ?: ""},")
-            writer.write("${sample.totalPower ?: ""},${sample.bandRatio ?: ""},${sample.peakProminence ?: ""},")
-            writer.write("${sample.watchId ?: ""},")
-            writer.write("${metaValue(metadata, "activityType")},${metaValue(metadata, "activityConfidence")},${metaValue(metadata, "activityAgeMs")},")
-            writer.write("${metaValue(metadata, "activityAdjustedSeverity")},${metaValue(metadata, "activityAdjustedConfidence")},")
-            writer.write("${metaValue(metadata, "isReliableMeasurement")},${metaValue(metadata, "excludeFromAnalysis")}\n")
+            writer.write(
+                csvRow(
+                    sample.timestamp,
+                    isoUtc(sample.timestamp),
+                    isoLocal(sample.timestamp),
+                    formatDouble(sample.severity, 6),
+                    formatDouble(severityNorm, 6),
+                    sample.tremorCount,
+                    formatDouble(sample.x, 6),
+                    formatDouble(sample.y, 6),
+                    formatDouble(sample.z, 6),
+                    formatDouble(sample.magnitude, 6),
+                    formatDouble(sample.accelMagnitude, 6),
+                    formatDouble(sample.confidence, 6),
+                    sample.isWorn,
+                    sample.isCharging,
+                    formatDouble(sample.dominantFrequency, 4),
+                    formatDouble(sample.tremorBandPower, 6),
+                    formatDouble(sample.totalPower, 6),
+                    formatDouble(sample.bandRatio, 6),
+                    formatDouble(sample.peakProminence, 6),
+                    watchIdAlias,
+                    activityType,
+                    formatDouble(activityConfidence, 4),
+                    activityAgeMs,
+                    formatDouble(adjustedSeverity, 6),
+                    formatDouble(adjustedConfidence, 6),
+                    formatDouble(reliability, 6),
+                    isReliable,
+                    excludeFromAnalysis,
+                    include
+                )
+            )
             totalRecords++
         }
 
@@ -605,62 +848,111 @@ private suspend fun writeStreamingRawDataCsv(
 private suspend fun writeStreamingSummaryCsv(
     writer: FileWriter,
     dbHelper: TremorDatabaseHelper,
-    cutoffTime: Long
+    cutoffTime: Long,
+    exportContext: ExportContext
 ): Int {
-    // Write header with scale documentation
-    writer.write("# EXPERIMENTAL DATA - NOT FOR MEDICAL USE\n")
-    writer.write("# This data is from experimental software and should not be used for diagnosis or treatment\n")
-    writer.write("#\n")
-    writer.write("# Severity Scale: 0-10 clinical score (0-1 minimal, 1-3 mild, 3-5 moderate, 5-7 moderate-severe, 7-10 severe)\n")
-    writer.write("#\n")
-    writer.write("Hour,Avg Severity,Max Severity,Tremor Events,Duration Minutes,")
-    writer.write("Activity Type,Avg Activity Confidence,Avg Adjusted Severity,Avg Adjusted Confidence,")
-    writer.write("Reliable %,Exclude %\n")
+    writeCommonExportHeader(
+        writer = writer,
+        exportContext = exportContext.copy(formatName = "Summary"),
+        extraLines = listOf(
+            "Purpose: Daily clinician-facing summary",
+            "Summary rows are grouped by local calendar day"
+        )
+    )
+    writer.write(
+        "DateLocal,DayStartUnixMsUTC,DayStartUTC,DayStartLocal,SampleCount,TremorPositiveSamples," +
+            "SeverityMedian_0to10,SeverityP25_0to10,SeverityP75_0to10,SeverityMax_0to10," +
+            "WearMinutes,ReliableMinutes,ReliabilityFraction_0to1,ExcludedFraction_0to1," +
+            "SubjectiveRatingCount,SubjectiveRatingAvg_0to5\n"
+    )
 
-    // Collect hourly aggregates in memory (much smaller than raw samples)
-    val hourMs = 60 * 60 * 1000L
-    val hourlyData = mutableMapOf<Long, MutableList<TremorSample>>()
-    
+    val dailyData = mutableMapOf<Long, MutableList<TremorSample>>()
     var offset = 0
-    
+
     while (true) {
         val chunk = dbHelper.getSamplesAfterPaged(cutoffTime, CHUNK_SIZE, offset)
         if (chunk.isEmpty()) break
-        
+
         chunk.forEach { sample ->
-            val hourKey = sample.timestamp / hourMs
-            hourlyData.getOrPut(hourKey) { mutableListOf() }.add(sample)
+            val dayStart = startOfLocalDayMillis(sample.timestamp)
+            dailyData.getOrPut(dayStart) { mutableListOf() }.add(sample)
         }
-        
+
         offset += CHUNK_SIZE
     }
 
-    // Write aggregated data
-    hourlyData.entries.sortedBy { it.key }.forEach { (hour, records) ->
-        val avgSeverity = records.map { it.severity }.average()
+    val ratingsByDay = dbHelper.getRatingsAfter(cutoffTime).groupBy { rating ->
+        startOfLocalDayMillis(rating.timestamp)
+    }
+
+    dailyData.entries.sortedBy { it.key }.forEach { (dayStart, records) ->
+        val severityValues = records.map { it.severity }
+        val sampleCount = records.size
+        val tremorPositive = records.count { it.tremorCount > 0 }
+        val median = percentile(severityValues, 0.5)
+        val p25 = percentile(severityValues, 0.25)
+        val p75 = percentile(severityValues, 0.75)
         val maxSeverity = records.maxOfOrNull { it.severity } ?: 0.0
-        val tremorEvents = records.sumOf { it.tremorCount }
-        val durationMinutes = records.map { it.timestamp / 60000L }.distinct().size
-        val activitySummary = summarizeActivity(records)
+        val wearMinutes = records
+            .filter { it.isWorn == true }
+            .map { it.timestamp / 60000L }
+            .distinct()
+            .size
 
-        val dateStr = SimpleDateFormat("yyyy-MM-dd HH:00", Locale.US)
-            .format(Date(hour * hourMs))
+        val reliableSamples = records.mapNotNull {
+            optBoolean(parseMetadata(it.metadataJson), "isReliableMeasurement")
+        }
+        val reliableMinutes = records
+            .filter { optBoolean(parseMetadata(it.metadataJson), "isReliableMeasurement") == true }
+            .map { it.timestamp / 60000L }
+            .distinct()
+            .size
+        val reliableFraction = if (reliableSamples.isNotEmpty()) {
+            reliableSamples.count { it }.toDouble() / reliableSamples.size.toDouble()
+        } else {
+            null
+        }
 
-        val avgActivityConfidence = activitySummary.avgConfidence?.let { String.format("%.3f", it) } ?: ""
-        val avgAdjustedSeverity = activitySummary.avgAdjustedSeverity?.let { String.format("%.4f", it) } ?: ""
-        val avgAdjustedConfidence = activitySummary.avgAdjustedConfidence?.let { String.format("%.4f", it) } ?: ""
-        val reliablePct = activitySummary.reliablePct?.let { String.format("%.1f", it) } ?: ""
-        val excludePct = activitySummary.excludePct?.let { String.format("%.1f", it) } ?: ""
+        val excludedSamples = records.mapNotNull {
+            optBoolean(parseMetadata(it.metadataJson), "excludeFromAnalysis")
+        }
+        val excludedFraction = if (excludedSamples.isNotEmpty()) {
+            excludedSamples.count { it }.toDouble() / excludedSamples.size.toDouble()
+        } else {
+            null
+        }
 
+        val dayRatings = ratingsByDay[dayStart].orEmpty()
+        val ratingAverage = if (dayRatings.isNotEmpty()) {
+            dayRatings.map { it.rating.toDouble() }.average()
+        } else {
+            null
+        }
+
+        val localDate = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date(dayStart))
         writer.write(
-            "$dateStr,${String.format("%.4f", avgSeverity)},${String.format("%.4f", maxSeverity)}," +
-                "$tremorEvents,$durationMinutes," +
-                "${activitySummary.dominantType},$avgActivityConfidence," +
-                "$avgAdjustedSeverity,$avgAdjustedConfidence,$reliablePct,$excludePct\n"
+            csvRow(
+                localDate,
+                dayStart,
+                isoUtc(dayStart),
+                isoLocal(dayStart),
+                sampleCount,
+                tremorPositive,
+                formatDouble(median, 6),
+                formatDouble(p25, 6),
+                formatDouble(p75, 6),
+                formatDouble(maxSeverity, 6),
+                wearMinutes,
+                reliableMinutes,
+                formatDouble(reliableFraction, 6),
+                formatDouble(excludedFraction, 6),
+                dayRatings.size,
+                formatDouble(ratingAverage, 4)
+            )
         )
     }
-    
-    return hourlyData.size
+
+    return dailyData.size
 }
 
 /**
@@ -670,78 +962,100 @@ private suspend fun writeStreamingSummaryCsv(
 private suspend fun writeSubjectiveRatingsCsv(
     writer: FileWriter,
     context: Context,
-    cutoffTime: Long
+    cutoffTime: Long,
+    exportContext: ExportContext
 ): Int {
     val db = TremorRoomDatabase.getDatabase(context)
     val dao = db.tremorDao()
 
-    // Write header
-    writer.write("# SUBJECTIVE TREMOR RATINGS - EXPERIMENTAL DATA\n")
-    writer.write("# User-reported tremor severity ratings with optional calibration sensor data\n")
-    writer.write("# Detected Severity: 0-10 clinical score at rating time (from watch algorithm)\n")
-    writer.write("# Rating: 0-5 user-reported scale (0=no tremor, 5=severe)\n")
-    writer.write("#\n")
-    writer.write("Timestamp,DateTime,Rating,Source,Watch ID,")
-    writer.write("Detected Severity,Detected Confidence,Detected Frequency,")
-    writer.write("Calibration Enabled,Calibration Duration Sec,Notes,")
-    writer.write("Calibration Sample Count\n")
+    writeCommonExportHeader(
+        writer = writer,
+        exportContext = exportContext.copy(formatName = "Subjective Ratings"),
+        extraLines = listOf(
+            "Purpose: Subjective ratings with linked objective context window",
+            "Detected* fields are backfilled from calibration samples or objective window when missing"
+        )
+    )
+    writer.write(
+        "RatingId,TimestampUnixMsUTC,DateTimeUTC,DateTimeLocal,Rating_0to5,Source,WatchIdAlias," +
+            "DetectedSeverity_0to10,DetectedConfidence_0to1,DetectedFrequency_Hz," +
+            "CalibrationEnabled,CalibrationDurationSec,CalibrationSampleCount," +
+            "LinkedWindowStartUnixMsUTC,LinkedWindowEndUnixMsUTC,LinkedWindowStartUTC,LinkedWindowEndUTC," +
+            "CalibrationDataStatus,Notes\n"
+    )
 
-    // Get ratings in time range
-    val ratings = dao.getRatingsAfter(cutoffTime)
-
-    // Pre-compute calibration counts for ALL ratings (not gated on flag)
-    val calibrationCounts = mutableMapOf<String, Int>()
-    for (rating in ratings) {
-        val count = dao.getCalibrationCountForRating(rating.id)
-        if (count > 0) calibrationCounts[rating.id] = count
+    val ratings = dao.getRatingsAfter(cutoffTime).sortedBy { it.timestamp }
+    if (ratings.isEmpty()) {
+        return 0
     }
 
     var totalRecords = 0
     for (rating in ratings) {
-        val dateStr = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
-            .format(Date(rating.timestamp))
-
-        val calibrationCount = calibrationCounts[rating.id] ?: 0
+        val calibrationCount = dao.getCalibrationCountForRating(rating.id)
         val hasCalibration = calibrationCount > 0
+        val durationMs = rating.calibrationDurationSeconds.coerceIn(5, 300) * 1000L
+        val windowEnd = (rating.timestamp - 500L).coerceAtLeast(0L)
+        val windowStart = (windowEnd - durationMs).coerceAtLeast(0L)
 
-        writer.write("${rating.timestamp},$dateStr,${rating.rating},${rating.source},")
-        writer.write("${rating.watchId ?: ""},")
-        writer.write("${rating.detectedSeverity?.let { String.format("%.6f", it) } ?: ""},")
-        writer.write("${rating.detectedConfidence?.let { String.format("%.3f", it) } ?: ""},")
-        writer.write("${rating.detectedFrequency?.let { String.format("%.2f", it) } ?: ""},")
-        writer.write("${rating.calibrationModeEnabled || hasCalibration},${rating.calibrationDurationSeconds},")
-        writer.write("${rating.notes?.replace(",", ";")?.replace("\n", " ") ?: ""},")
-        writer.write("$calibrationCount\n")
-        totalRecords++
-    }
-
-    // Write calibration sensor data section if ANY rating has actual calibration data
-    val ratingsWithCalibration = ratings.filter { (calibrationCounts[it.id] ?: 0) > 0 }
-    if (ratingsWithCalibration.isNotEmpty()) {
-        writer.write("\n# CALIBRATION SENSOR DATA\n")
-        writer.write("# Extended fields (accelMagnitude, tremorType, activityType, etc.) are in the Metadata JSON column\n")
-        writer.write("Rating ID,Rating Timestamp,Sample Timestamp,X,Y,Z,Magnitude,")
-        writer.write("Dominant Freq,Tremor Band Power,Total Power,Band Ratio,Peak Prominence,")
-        writer.write("Confidence,Severity,Is Worn,Is Charging,Metadata JSON\n")
-
-        for (rating in ratingsWithCalibration) {
-            val calibrationData = dao.getCalibrationDataForRating(rating.id)
-            val ratingDateStr = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
-                .format(Date(rating.timestamp))
-
-            for (sample in calibrationData) {
-                writer.write("${rating.id},$ratingDateStr,${sample.timestamp},")
-                writer.write("${String.format("%.6f", sample.x)},${String.format("%.6f", sample.y)},${String.format("%.6f", sample.z)},")
-                writer.write("${String.format("%.6f", sample.magnitude)},${String.format("%.2f", sample.dominantFrequency)},")
-                writer.write("${String.format("%.6f", sample.tremorBandPower)},${String.format("%.6f", sample.totalPower)},")
-                writer.write("${String.format("%.4f", sample.bandRatio)},${String.format("%.4f", sample.peakProminence)},")
-                writer.write("${String.format("%.4f", sample.confidence)},${String.format("%.6f", sample.severity)},")
-                writer.write("${sample.isWorn},${sample.isCharging},")
-                // Metadata JSON - escape any commas within the JSON by quoting the field
-                val meta = sample.metadataJson?.replace("\"", "\"\"") ?: ""
-                writer.write("\"$meta\"\n")
-            }
+        val calibrationData = if (hasCalibration) dao.getCalibrationDataForRating(rating.id) else emptyList()
+        val inferredFromCalibration = if (calibrationData.isNotEmpty()) {
+            InferredMetrics(
+                severity = calibrationData.map { it.severity }.average(),
+                confidence = calibrationData.map { it.confidence.toDouble() }.average(),
+                frequencyHz = calibrationData.map { it.dominantFrequency.toDouble() }
+                    .filter { it > 0.0 }
+                    .takeIf { it.isNotEmpty() }
+                    ?.average()
+            )
+        } else {
+            null
         }
+        val inferredFromWindow = if (inferredFromCalibration == null) {
+            inferMetricsFromTremorSamples(dao.getSamplesInRange(windowStart, windowEnd))
+        } else {
+            null
+        }
+
+        val detectedSeverity = rating.detectedSeverity
+            ?: inferredFromCalibration?.severity
+            ?: inferredFromWindow?.severity
+        val detectedConfidence = rating.detectedConfidence?.toDouble()
+            ?: inferredFromCalibration?.confidence
+            ?: inferredFromWindow?.confidence
+        val detectedFrequency = rating.detectedFrequency?.toDouble()
+            ?: inferredFromCalibration?.frequencyHz
+            ?: inferredFromWindow?.frequencyHz
+
+        val status = when {
+            hasCalibration -> "HAS_CALIBRATION_DATA"
+            inferredFromWindow != null -> "WINDOW_ONLY"
+            else -> "NO_OBJECTIVE_DATA"
+        }
+
+        writer.write(
+            csvRow(
+                rating.id,
+                rating.timestamp,
+                isoUtc(rating.timestamp),
+                isoLocal(rating.timestamp),
+                rating.rating,
+                rating.source,
+                pseudonymizedWatchId(rating.watchId, exportContext),
+                formatDouble(detectedSeverity, 6),
+                formatDouble(detectedConfidence, 6),
+                formatDouble(detectedFrequency, 4),
+                rating.calibrationModeEnabled || hasCalibration,
+                rating.calibrationDurationSeconds,
+                calibrationCount,
+                windowStart,
+                windowEnd,
+                isoUtc(windowStart),
+                isoUtc(windowEnd),
+                status,
+                rating.notes?.replace("\n", " ")
+            )
+        )
+        totalRecords++
     }
 
     return totalRecords
@@ -858,5 +1172,3 @@ private suspend fun importRecoveryData(context: Context): String {
         }
     }
 }
-
-
