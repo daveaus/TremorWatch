@@ -198,15 +198,17 @@ class RatingPromptReceiver : BroadcastReceiver() {
             prefs.getInt(KEY_PROMPTS_TODAY, 0)
         } else {
             // New day, reset counter
-            prefs.edit().putString(KEY_PROMPTS_TODAY_DATE, today).apply()
+            prefs.edit()
+                .putString(KEY_PROMPTS_TODAY_DATE, today)
+                .putInt(KEY_PROMPTS_TODAY, 0)
+                .apply()
             0
         }
         
         val maxDailyPrompts = prefs.getInt(KEY_MAX_DAILY_PROMPTS, DEFAULT_MAX_DAILY_PROMPTS)
         if (promptsToday >= maxDailyPrompts) {
-            // When daily limit is reached, cancel alarms until tomorrow
-            Timber.d("Rating prompt skipped - daily limit reached ($promptsToday/$maxDailyPrompts). Pausing until tomorrow.")
-            cancelPrompt(context)
+            // Keep periodic checks so prompts automatically resume after date rollover.
+            advanceNextPrompt("daily limit reached ($promptsToday/$maxDailyPrompts)")
             return
         }
         

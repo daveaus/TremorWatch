@@ -1490,15 +1490,18 @@ class TremorService : LifecycleService(), SensorEventListener {
         var promptsToday = if (promptsTodayDate == today) {
             prefs.getInt(KEY_PROMPTS_TODAY, 0)
         } else {
-            prefs.edit().putString(KEY_PROMPTS_TODAY_DATE, today).commit()
+            // Day rollover: reset both the date marker and daily prompt counter.
+            prefs.edit()
+                .putString(KEY_PROMPTS_TODAY_DATE, today)
+                .putInt(KEY_PROMPTS_TODAY, 0)
+                .commit()
             0
         }
 
         val maxDailyPrompts = prefs.getInt(KEY_MAX_DAILY_PROMPTS, 6)
         if (promptsToday >= maxDailyPrompts) {
-            // When daily limit is reached, stop scheduling until tomorrow
-            Timber.d("Rating prompt skipped - daily limit reached ($promptsToday/$maxDailyPrompts). Pausing until tomorrow.")
-            ratingPromptHandler.removeCallbacks(ratingPromptRunnable)
+            // Keep periodic checks so prompts automatically resume after date rollover.
+            advanceAndSchedule("daily limit reached ($promptsToday/$maxDailyPrompts)")
             return
         }
 
