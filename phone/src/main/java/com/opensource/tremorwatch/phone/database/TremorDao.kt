@@ -26,6 +26,18 @@ interface TremorDao {
     suspend fun getSamplesInRange(startTime: Long, endTime: Long): List<TremorSample>
 
     /**
+     * Get samples in a specific time range with pagination for memory-efficient export.
+     */
+    @Query("SELECT * FROM tremor_samples WHERE timestamp >= :startTime AND timestamp <= :endTime ORDER BY timestamp ASC LIMIT :limit OFFSET :offset")
+    suspend fun getSamplesInRangePaged(startTime: Long, endTime: Long, limit: Int, offset: Int): List<TremorSample>
+
+    /**
+     * Get count of samples in a specific time range (for progress tracking / empty check).
+     */
+    @Query("SELECT COUNT(*) FROM tremor_samples WHERE timestamp >= :startTime AND timestamp <= :endTime")
+    suspend fun getSamplesCountInRange(startTime: Long, endTime: Long): Int
+
+    /**
      * Get minute-level aggregated objective data in a fixed time range.
      * Uses existing timestamp index to constrain scan range.
      */

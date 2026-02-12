@@ -69,6 +69,16 @@ class TremorFFT(private val sampleRate: Float = 20f) {
         const val RESTING_MIN_BAND_RATIO = 0.05f   // Resting state: lowered from 0.07 to detect subtle tremors
         const val ACTIVE_MIN_BAND_RATIO = 0.10f    // Active state: lowered from 0.30 to allow detection during activity
         const val SEVERITY_FLOOR = 0.005f          // Lowered from 0.03 - was rejecting 70% of valid data
+
+        // Safety cap to avoid accidental large allocations if analyze() is called with huge arrays.
+        private const val MAX_FFT_SIZE = 1024
+    }
+
+    private fun nextPowerOfTwo(n: Int): Int {
+        if (n <= 0) return 1
+        val highest = n.takeHighestOneBit()
+        val next = if (n == highest) highest else (highest shl 1)
+        return if (next > 0) next else highest // Overflow guard
     }
 
     /**
@@ -113,13 +123,9 @@ class TremorFFT(private val sampleRate: Float = 20f) {
             return FFTResult(0f, 0f, 0f, 0f, false, 0f)
         }
 
-        // Use power of 2 for FFT efficiency
-        val n = samples.size.takeHighestOneBit()
-        val paddedSamples = if (samples.size >= n) {
-            samples.copyOf(n)
-        } else {
-            samples.copyOf(n)
-        }
+        // Use power-of-two size for FFT efficiency. If not already a power of 2, zero-pad.
+        val n = nextPowerOfTwo(samples.size).coerceAtMost(MAX_FFT_SIZE)
+        val paddedSamples = samples.copyOf(n)
 
         // Apply Hanning window to reduce spectral leakage
         val windowed = applyHanningWindow(paddedSamples)

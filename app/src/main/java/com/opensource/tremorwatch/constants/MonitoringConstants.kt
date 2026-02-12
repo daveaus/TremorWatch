@@ -141,13 +141,19 @@ object MonitoringConstants {
     const val ACTIVITY_UPDATE_INTERVAL_MS = 30_000L  // 30 seconds - battery optimized
 
     // ====================== SERVICE LIFECYCLE ======================
-    
+     
     /**
      * Interval for periodic status updates (milliseconds).
      * Battery-optimized: Reduced frequency (30 minutes).
      */
     const val STATUS_UPDATE_INTERVAL_MS = 30 * 60 * 1000L // 30 minutes - battery optimized
-    
+
+    /**
+     * Interval for checking battery optimization status (milliseconds).
+     * Used to detect changes and immediately update phone-side diagnostics.
+     */
+    const val BATTERY_OPT_CHECK_INTERVAL_MS = 60_000L // 1 minute
+     
     /**
      * Interval for wake lock monitoring (milliseconds).
      * Battery-optimized: Less frequent checks (10 minutes) - only check if disrupted.

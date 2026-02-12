@@ -11,10 +11,12 @@ import timber.log.Timber
 import androidx.core.app.NotificationCompat
 import com.opensource.tremorwatch.MainActivity
 import com.opensource.tremorwatch.service.TremorService
-import com.opensource.tremorwatch.config.MonitoringState
 import com.opensource.tremorwatch.data.PreferencesRepository
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * Broadcast receiver that acts as a watchdog to keep the TremorService alive.
@@ -26,62 +28,75 @@ class ServiceWatchdogReceiver : BroadcastReceiver() {
     companion object {
         private const val RESTART_WINDOW_MS = 5 * 60 * 1000L // 5 minutes
         private const val MAX_RESTARTS_IN_WINDOW = 3
+        private const val WATCHDOG_WORK_TIMEOUT_MS = 8_000L
     }
 
     override fun onReceive(context: Context, intent: Intent) {
-        // Check if monitoring should be active
-        if (MonitoringState.isMonitoring(context)) {
-            Timber.d("Watchdog triggered - checking service health")
+        // BroadcastReceivers are time-limited; avoid blocking the main thread.
+        val appContext = context.applicationContext
+        val pendingResult = goAsync()
 
-            // Check if we're restarting too frequently (boot loop protection)
-            val prefsRepo = PreferencesRepository(context)
-            val lastRestart = runBlocking { prefsRepo.lastRestartAttempt.first() }
-            val restartCountValue = runBlocking { prefsRepo.restartCount.first() }
-            val now = System.currentTimeMillis()
-
-            // Reset counter if outside the window
-            val actualRestartCount = if ((now - lastRestart) > RESTART_WINDOW_MS) {
-                0
-            } else {
-                restartCountValue
-            }
-
-            // Check if we've restarted too many times
-            if (actualRestartCount >= MAX_RESTARTS_IN_WINDOW) {
-                Timber.e("Too many restart attempts ($actualRestartCount in 5 min) - waiting before retry")
-                showRestartNotification(context, "Service restart limit reached - tap to restart manually")
-                return
-            }
-
-            // Always try to ping/restart the service to keep it alive (triggers onStartCommand)
+        CoroutineScope(Dispatchers.IO).launch {
             try {
-                val serviceIntent = Intent(context, TremorService::class.java)
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    context.startForegroundService(serviceIntent)
-                } else {
-                    context.startService(serviceIntent)
+                val completed = withTimeoutOrNull(WATCHDOG_WORK_TIMEOUT_MS) {
+                    val prefsRepo = PreferencesRepository(appContext)
+
+                    // Check if monitoring should be active (async DataStore read).
+                    if (!prefsRepo.isMonitoring.first()) {
+                        Timber.d("Monitoring is disabled - skipping watchdog")
+                        return@withTimeoutOrNull
+                    }
+
+                    Timber.d("Watchdog triggered - checking service health")
+
+                    // Check if we're restarting too frequently (boot loop protection).
+                    val lastRestart = prefsRepo.lastRestartAttempt.first()
+                    val restartCountValue = prefsRepo.restartCount.first()
+                    val now = System.currentTimeMillis()
+
+                    // Reset counter if outside the window.
+                    val actualRestartCount = if ((now - lastRestart) > RESTART_WINDOW_MS) {
+                        0
+                    } else {
+                        restartCountValue
+                    }
+
+                    // Check if we've restarted too many times.
+                    if (actualRestartCount >= MAX_RESTARTS_IN_WINDOW) {
+                        Timber.e("Too many restart attempts ($actualRestartCount in 5 min) - waiting before retry")
+                        showRestartNotification(appContext, "Service restart limit reached - tap to restart manually")
+                        return@withTimeoutOrNull
+                    }
+
+                    // Always try to ping/restart the service to keep it alive (triggers onStartCommand).
+                    try {
+                        val serviceIntent = Intent(appContext, TremorService::class.java)
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                            appContext.startForegroundService(serviceIntent)
+                        } else {
+                            appContext.startService(serviceIntent)
+                        }
+                        Timber.d("Pinged service successfully")
+                    } catch (e: Exception) {
+                        // On Android 12+, foreground service start from background might fail.
+                        Timber.e(e, "Failed to ping/restart service: ${e.message}")
+                        showRestartNotification(appContext, "Monitoring stopped - tap to restart")
+                    } finally {
+                        // Count the attempt even on failure (boot loop protection).
+                        try {
+                            prefsRepo.updateRestartAttempt(now, actualRestartCount + 1)
+                        } catch (e: Exception) {
+                            Timber.e(e, "Failed to update watchdog restart tracking: ${e.message}")
+                        }
+                    }
                 }
-                Timber.d("Pinged service successfully")
 
-                // Update restart tracking using PreferencesRepository
-                runBlocking {
-                    prefsRepo.updateRestartAttempt(now, actualRestartCount + 1)
+                if (completed == null) {
+                    Timber.w("Watchdog work timed out (> ${WATCHDOG_WORK_TIMEOUT_MS}ms); skipping")
                 }
-
-            } catch (e: Exception) {
-                // On Android 12+, foreground service start from background might fail
-                Timber.e(e, "Failed to ping/restart service: ${e.message}")
-
-                // Increment failure counter using PreferencesRepository
-                runBlocking {
-                    prefsRepo.updateRestartAttempt(now, actualRestartCount + 1)
-                }
-
-                // Show notification to prompt user
-                showRestartNotification(context, "Monitoring stopped - tap to restart")
+            } finally {
+                pendingResult.finish()
             }
-        } else {
-            Timber.d("Monitoring is disabled - skipping watchdog")
         }
     }
 

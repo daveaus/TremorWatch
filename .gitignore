@@ -26,6 +26,8 @@ investigation_report*.md
 subjectiveratingsissue.md
 tremordetection.md
 version020*.md
+todo.md
+improvements.md
 
 
 # Syncthing
@@ -102,6 +104,7 @@ examplecode/
 
 # Files to be deleted
 tobedeleted/
+workingfolder/
 
 # Other generated files
 *.orig
@@ -133,6 +136,8 @@ Thumbs.db
 *~
 .vscode/
 .idea/
+*.code-workspace
+
 
 # The research file used to build the README (not part of the public repo)
 Claude-Compaction-Problem.md

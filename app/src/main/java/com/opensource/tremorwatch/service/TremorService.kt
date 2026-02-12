@@ -44,6 +44,7 @@ import com.opensource.tremorwatch.receivers.ServiceWatchdogReceiver
 import com.opensource.tremorwatch.receivers.UploadAlarmReceiver
 import com.opensource.tremorwatch.receivers.BatchRetryAlarmReceiver
 import com.opensource.tremorwatch.receivers.RatingPromptReceiver
+import com.opensource.tremorwatch.engine.BaselineManager
 import com.opensource.tremorwatch.engine.TremorMonitoringEngine
 import com.opensource.tremorwatch.constants.MonitoringConstants
 import com.opensource.tremorwatch.data.PreferencesRepository
@@ -52,16 +53,22 @@ import com.opensource.tremorwatch.data.CalibrationSample
 import com.opensource.tremorwatch.shared.models.RatingConfig
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.*
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.sqrt
 import com.google.android.gms.location.ActivityRecognition
 import com.google.android.gms.location.ActivityRecognitionClient
 import com.google.android.gms.location.ActivityRecognitionResult
 import com.google.android.gms.location.DetectedActivity
+import kotlin.coroutines.resume
 
 
 /**
@@ -135,24 +142,26 @@ class TremorService : LifecycleService(), SensorEventListener {
     // Battery optimization tracking for immediate notification on change
     private var lastBatteryOptimizationState: Boolean? = null
 
-        // Watch-to-phone communication
-        private lateinit var phoneCommunication: WatchPhoneCommunication
+    // Watch-to-phone communication
+    private lateinit var phoneCommunication: WatchPhoneCommunication
 
-        // Monitoring engine - handles sensor processing and data collection
-        private lateinit var monitoringEngine: TremorMonitoringEngine
+    // Monitoring engine - handles sensor processing and data collection
+    private lateinit var monitoringEngine: TremorMonitoringEngine
+    private lateinit var baselineManager: BaselineManager
 
-        // Config listener - receives detection algorithm config from phone
-        private lateinit var configListener: ConfigDataListener
+    // Config listener - receives detection algorithm config from phone
+    private lateinit var configListener: ConfigDataListener
 
-        // Rating config listener - receives subjective rating settings from phone
-        private lateinit var ratingConfigListener: RatingConfigDataListener
+    // Rating config listener - receives subjective rating settings from phone
+    private lateinit var ratingConfigListener: RatingConfigDataListener
 
-        // Preferences repository for state management
-        private lateinit var preferencesRepository: PreferencesRepository
-        private val serviceScope = CoroutineScope(Dispatchers.IO)
+    // Preferences repository for state management
+    private lateinit var preferencesRepository: PreferencesRepository
+    private val serviceJob = SupervisorJob()
+    private val serviceScope = CoroutineScope(Dispatchers.IO + serviceJob)
 
-        // Calibration capture manager for subjective rating data collection
-        private lateinit var calibrationCaptureManager: CalibrationCaptureManager
+    // Calibration capture manager for subjective rating data collection
+    private lateinit var calibrationCaptureManager: CalibrationCaptureManager
 
     // Periodic status update handler
     private val statusUpdateHandler = Handler(Looper.getMainLooper())
@@ -180,7 +189,7 @@ class TremorService : LifecycleService(), SensorEventListener {
     private val batteryOptMonitorRunnable = object : Runnable {
         override fun run() {
             checkBatteryOptimizationStatus()
-            batteryOptMonitorHandler.postDelayed(this, 60000L) // Check every 60 seconds
+            batteryOptMonitorHandler.postDelayed(this, MonitoringConstants.BATTERY_OPT_CHECK_INTERVAL_MS)
         }
     }
 
@@ -200,8 +209,8 @@ class TremorService : LifecycleService(), SensorEventListener {
     private var batchesSent = 0
     private var batchesFailed = 0
     private var lastSuccessfulUploadTime = 0L
-    private var pendingBatchCount = 0
-    private var isUploadInProgress = false
+    private val pendingBatchCount = AtomicInteger(0)
+    private val uploadLock = AtomicBoolean(false)
 
 
     // ====================== LOCAL PERSISTENCE ======================
@@ -299,13 +308,13 @@ class TremorService : LifecycleService(), SensorEventListener {
     private fun saveBatchLocally(batch: List<TremorMonitoringEngine.TremorData>) {
         try {
             // Check if we've hit the max pending batches limit (use cached count first)
-            if (pendingBatchCount >= MonitoringConstants.MAX_PENDING_BATCHES) {
+            if (pendingBatchCount.get() >= MonitoringConstants.MAX_PENDING_BATCHES) {
                 // Only scan directory when we need to delete old files
                 val pendingFiles = getPendingBatchFiles()
                 Timber.w("Max pending batches reached (${pendingFiles.size}), deleting oldest")
                 if (pendingFiles.isNotEmpty()) {
                     pendingFiles.first().delete()
-                    pendingBatchCount = (pendingFiles.size - 1).coerceAtLeast(0)
+                    pendingBatchCount.set((pendingFiles.size - 1).coerceAtLeast(0))
                 }
             }
 
@@ -324,9 +333,9 @@ class TremorService : LifecycleService(), SensorEventListener {
 
             // Save using shared format
             file.writeText(sharedBatch.toJsonString())
-            pendingBatchCount++ // Increment cached count instead of rescanning directory
-            Timber.i("Saved batch locally: $filename (${batch.size} samples, $pendingBatchCount pending)")
-            Timber.d("TremorWatch: Saved batch locally - $pendingBatchCount pending batches")
+            val newPendingCount = pendingBatchCount.incrementAndGet() // Cached count to avoid rescanning directory
+            Timber.i("Saved batch locally: $filename (${batch.size} samples, $newPendingCount pending)")
+            Timber.d("TremorWatch: Saved batch locally - $newPendingCount pending batches")
 
             // If local storage enabled, also append to consolidated storage file
             if (DataConfig.isLocalStorageEnabled(this)) {
@@ -425,6 +434,25 @@ class TremorService : LifecycleService(), SensorEventListener {
         }?.sortedBy { it.name } ?: emptyList()
     }
 
+    private fun decrementPendingBatchCount() {
+        // pendingBatchCount is a cache; keep it from drifting negative under concurrent updates.
+        while (true) {
+            val current = pendingBatchCount.get()
+            if (current <= 0) return
+            if (pendingBatchCount.compareAndSet(current, current - 1)) return
+        }
+    }
+
+    private suspend fun sendBatchAwait(batch: TremorBatch): Boolean {
+        if (!::phoneCommunication.isInitialized) return false
+
+        return suspendCancellableCoroutine { cont ->
+            phoneCommunication.sendBatch(batch) { success ->
+                if (cont.isActive) cont.resume(success)
+            }
+        }
+    }
+
     private fun retryFailedUploads(forceUpload: Boolean = false) {
         // Check if upload to phone is enabled
         if (!DataConfig.isUploadToPhoneEnabled(this)) {
@@ -432,108 +460,103 @@ class TremorService : LifecycleService(), SensorEventListener {
             return
         }
 
-        // Prevent concurrent upload operations
-        if (isUploadInProgress) {
+        // Prevent concurrent upload operations (atomic compare-and-set avoids races).
+        if (!uploadLock.compareAndSet(false, true)) {
             Timber.d("Upload already in progress - skipping duplicate request")
             return
         }
 
-        // DATA GAP FIX: Use serviceScope (coroutine) instead of raw Thread.
-        // Coroutines are tied to the service lifecycle via CoroutineScope and survive
-        // better than raw threads. If the service is destroyed, the scope is cancelled
-        // cleanly, and pending batch files remain on disk for the next service start.
+        // Use serviceScope (coroutine) instead of raw Thread; cancelled in onDestroy.
         serviceScope.launch {
-            val pendingFiles = getPendingBatchFiles()
-            if (pendingFiles.isEmpty()) {
-                Timber.d("No pending batches to send")
-                return@launch
-            }
-
-            if (forceUpload) {
-                Timber.i("Manual upload: Found ${pendingFiles.size} pending batch(es) to send to phone")
-            } else {
-                Timber.i("Automatic upload: Found ${pendingFiles.size} pending batch(es) to send to phone")
-            }
-
-            // Mark upload as in progress
-            isUploadInProgress = true
-            var completedBatches = 0
-            val totalBatches = pendingFiles.size
-
-            // Process in smaller chunks to avoid blocking and ANRs
-            val filesToProcess = pendingFiles.take(MonitoringConstants.MAX_BATCHES_PER_UPLOAD)
-            val remainingBatches = maxOf(0, pendingFiles.size - MonitoringConstants.MAX_BATCHES_PER_UPLOAD)
-
-            filesToProcess.forEachIndexed { index, file ->
-                try {
-                    // Add small delay between file reads to avoid overwhelming the system
-                    if (index > 0 && index % 5 == 0) {
-                        kotlinx.coroutines.delay(50)
+            try {
+                while (true) {
+                    val pendingFiles = getPendingBatchFiles()
+                    if (pendingFiles.isEmpty()) {
+                        Timber.d("No pending batches to send")
+                        return@launch
                     }
 
-                    // Read and parse the batch from file
-                    val jsonContent = try {
-                        file.bufferedReader().use { it.readText() }
-                    } catch (e: Exception) {
-                        Timber.e("Failed to read file ${file.name}: ${e.message}", e)
-                        completedBatches++
-                        batchesFailed++
-                        if (completedBatches >= filesToProcess.size) {
-                            isUploadInProgress = false
-                        }
-                        return@forEachIndexed
-                    }
-                    val batch = TremorBatch.fromJsonString(jsonContent)
+                    val totalBatches = pendingFiles.size
+                    val filesToProcess = pendingFiles.take(MonitoringConstants.MAX_BATCHES_PER_UPLOAD)
+                    val remainingBatches = (totalBatches - filesToProcess.size).coerceAtLeast(0)
 
-                    phoneCommunication.sendBatch(batch) { success ->
-                        if (success) {
-                            if (file.exists()) {
-                                file.delete()
-                                pendingBatchCount--
-                                batchesSent++
-                                lastSuccessfulUploadTime = System.currentTimeMillis()
-                                BatchRetryAlarmReceiver.resetRetryCount(this@TremorService)
-                                Timber.i("SUCCESS: Sent batch ${file.name} via queue worker, deleted. $pendingBatchCount pending")
+                    if (forceUpload) {
+                        Timber.i("Manual upload: Found $totalBatches pending batch(es) to send to phone")
+                    } else {
+                        Timber.i("Automatic upload: Found $totalBatches pending batch(es) to send to phone")
+                    }
+
+                    var completedThisCycle = 0
+
+                    for ((index, file) in filesToProcess.withIndex()) {
+                        try {
+                            // Add small delay between file reads to avoid overwhelming the system.
+                            if (index > 0 && index % 5 == 0) {
+                                delay(50)
                             }
-                        } else {
-                            batchesFailed++
-                            Timber.w("FAILED: Queue worker failed to send batch ${file.name} - will retry later. $pendingBatchCount pending")
-                        }
 
-                        completedBatches++
-                        if (completedBatches >= filesToProcess.size) {
-                            isUploadInProgress = false
-                            if (remainingBatches > 0) {
-                                Timber.i("BATCH COMPLETE: Processed ${MonitoringConstants.MAX_BATCHES_PER_UPLOAD} of $totalBatches. Scheduling next cycle for remaining $remainingBatches batches...")
-                                Handler(Looper.getMainLooper()).postDelayed({
-                                    retryFailedUploads(forceUpload = forceUpload)
-                                }, 2000)
+                            val jsonContent = try {
+                                file.bufferedReader().use { it.readText() }
+                            } catch (e: Exception) {
+                                Timber.e("Failed to read file ${file.name}: ${e.message}", e)
+                                batchesFailed++
+                                completedThisCycle++
+                                continue
+                            }
+
+                            val batch = try {
+                                TremorBatch.fromJsonString(jsonContent)
+                            } catch (e: Exception) {
+                                Timber.e("ERROR: Failed to parse batch file ${file.name}: ${e.message}", e)
+                                batchesFailed++
+                                completedThisCycle++
+                                continue
+                            }
+
+                            val success = try {
+                                sendBatchAwait(batch)
+                            } catch (e: Exception) {
+                                Timber.e("ERROR: Failed to send batch ${file.name}: ${e.message}", e)
+                                false
+                            }
+
+                            if (success) {
+                                if (file.exists()) {
+                                    val deleted = file.delete()
+                                    if (deleted) {
+                                        decrementPendingBatchCount()
+                                        batchesSent++
+                                        lastSuccessfulUploadTime = System.currentTimeMillis()
+                                        BatchRetryAlarmReceiver.resetRetryCount(this@TremorService)
+                                        Timber.i("SUCCESS: Sent batch ${file.name}, deleted. ${pendingBatchCount.get()} pending")
+                                    } else {
+                                        Timber.w("SUCCESS: Sent batch ${file.name}, but failed to delete local file (will retry)")
+                                    }
+                                }
                             } else {
-                                Timber.i("COMPLETE: Upload batch processing finished: $completedBatches/$totalBatches processed")
+                                batchesFailed++
+                                Timber.w("FAILED: Failed to send batch ${file.name} - will retry later. ${pendingBatchCount.get()} pending")
                             }
+
+                            completedThisCycle++
+                        } catch (e: OutOfMemoryError) {
+                            Timber.e("CRITICAL: OutOfMemoryError during batch upload - stopping immediately. Already processed: $completedThisCycle/${filesToProcess.size}", e)
+                            batchesFailed++
+                            return@launch
                         }
                     }
-                } catch (e: OutOfMemoryError) {
-                    Timber.e("CRITICAL: OutOfMemoryError during batch upload - stopping immediately. Already processed: $completedBatches/${filesToProcess.size}", e)
-                    isUploadInProgress = false
-                    batchesFailed++
+
+                    if (remainingBatches > 0) {
+                        Timber.i("BATCH COMPLETE: Processed ${filesToProcess.size} of $totalBatches. Scheduling next cycle for remaining $remainingBatches batches...")
+                        delay(2_000)
+                        continue
+                    }
+
+                    Timber.i("COMPLETE: Upload batch processing finished: $completedThisCycle/$totalBatches processed")
                     return@launch
-                } catch (e: Exception) {
-                    Timber.e("ERROR: Failed to read/parse batch file ${file.name}: ${e.message}", e)
-                    completedBatches++
-                    batchesFailed++
-                    if (completedBatches >= filesToProcess.size) {
-                        isUploadInProgress = false
-                        if (remainingBatches > 0) {
-                            Timber.i("BATCH COMPLETE: Processed ${MonitoringConstants.MAX_BATCHES_PER_UPLOAD} of $totalBatches. Scheduling next cycle for remaining $remainingBatches batches...")
-                            Handler(Looper.getMainLooper()).postDelayed({
-                                retryFailedUploads(forceUpload = forceUpload)
-                            }, 2000)
-                        } else {
-                            Timber.i("COMPLETE: Upload batch processing finished: $completedBatches/$totalBatches processed")
-                        }
-                    }
                 }
+            } finally {
+                uploadLock.set(false)
             }
         }
     }
@@ -621,7 +644,7 @@ class TremorService : LifecycleService(), SensorEventListener {
          * Checks every 60 seconds for changes and sends immediate heartbeat on change.
          */
         private fun startBatteryOptMonitor() {
-            Timber.i("★★★ Starting battery optimization monitor - checking every 60s")
+            Timber.i("★★★ Starting battery optimization monitor - checking every ${MonitoringConstants.BATTERY_OPT_CHECK_INTERVAL_MS / 1000}s")
             batteryOptMonitorHandler.post(batteryOptMonitorRunnable)
         }
 
@@ -849,7 +872,10 @@ class TremorService : LifecycleService(), SensorEventListener {
             
             // Initialize watch-to-phone communication
             phoneCommunication = WatchDataSenderCommunication(this)
-        
+
+        // Baseline manager (personalized thresholds) - uses app context for persistence safety.
+        baselineManager = BaselineManager(applicationContext)
+         
         // Start the batch send queue worker to serialize sends and prevent Data Layer congestion
         Timber.i("INIT: TremorService v3.3.0 - About to call WatchDataSender.startQueueWorker()")
         WatchDataSender.startQueueWorker()
@@ -857,6 +883,7 @@ class TremorService : LifecycleService(), SensorEventListener {
 
         // Initialize monitoring engine
         monitoringEngine = TremorMonitoringEngine(
+            baselineManager = baselineManager,
             onBatchReady = { batch ->
                 // Called when engine has collected a full batch
                 saveBatchLocally(batch)
@@ -1065,10 +1092,10 @@ class TremorService : LifecycleService(), SensorEventListener {
         // DATA GAP FIX: Use serviceScope instead of raw Thread for lifecycle safety
         serviceScope.launch {
             val fileCount = getPendingBatchFiles().size
-            pendingBatchCount = fileCount
+            pendingBatchCount.set(fileCount)
 
-            if (pendingBatchCount > 0) {
-                Timber.i("Service started with $pendingBatchCount pending batch(es) - SENDING NOW via retryFailedUploads")
+            if (pendingBatchCount.get() > 0) {
+                Timber.i("Service started with ${pendingBatchCount.get()} pending batch(es) - SENDING NOW via retryFailedUploads")
                 retryFailedUploads(forceUpload = false)
             }
         }
@@ -2186,6 +2213,9 @@ class TremorService : LifecycleService(), SensorEventListener {
                 }
             }
 
+            // Cancel any in-flight coroutines (uploads, cleanup jobs, etc).
+            serviceJob.cancel()
+
             // 2. Cancel watchdog alarm immediately
             cancelWatchdogAlarm()
 
@@ -2196,9 +2226,16 @@ class TremorService : LifecycleService(), SensorEventListener {
             cancelBatchRetryAlarm()
 
             // 3. Unregister sensors (fast operation)
-            if (::sensorManager.isInitialized && ::monitoringEngine.isInitialized) {
-                sensorManager.unregisterListener(monitoringEngine)
-                Timber.d("Sensors unregistered")
+            if (::sensorManager.isInitialized) {
+                try {
+                    if (::monitoringEngine.isInitialized) {
+                        sensorManager.unregisterListener(monitoringEngine)
+                    }
+                    sensorManager.unregisterListener(this)
+                    Timber.d("All sensor listeners unregistered")
+                } catch (e: Exception) {
+                    Timber.e("Error unregistering sensors: ${e.message}", e)
+                }
             }
 
             // 3b. Stop activity recognition updates

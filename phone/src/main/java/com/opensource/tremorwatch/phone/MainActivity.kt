@@ -388,9 +388,12 @@ fun MainScreen(
     var retentionHours by remember { mutableStateOf(PhoneDataConfig.getLocalStorageRetentionHours(context)) }
     var localStorageEnabled by remember { mutableStateOf(PhoneDataConfig.isLocalStorageEnabled(context)) }
 
+    val heartbeatPrefs = remember(context) {
+        context.getSharedPreferences("heartbeat_prefs", Context.MODE_PRIVATE)
+    }
+
     // Initial load
     LaunchedEffect(Unit) {
-        val heartbeatPrefs = context.getSharedPreferences("heartbeat_prefs", Context.MODE_PRIVATE)
         lastHeartbeatTime = heartbeatPrefs.getLong("last_heartbeat_time", 0)
         watchServiceUptime = heartbeatPrefs.getLong("watch_service_uptime", 0)
         watchMonitoringState = heartbeatPrefs.getString("watch_monitoring_state", "unknown") ?: "unknown"
@@ -405,14 +408,13 @@ fun MainScreen(
 
     LaunchedEffect(Unit) {
         while (true) {
-            kotlinx.coroutines.delay(2000) // 2 seconds
-            batchesPending = getPendingBatchCount(context)
+            kotlinx.coroutines.delay(10_000) // 10 seconds (avoid excessive recompositions/IO)
+            batchesPending = withContext(Dispatchers.IO) { getPendingBatchCount(context) }
             batchesUploadedToday = PhoneDataConfig.getBatchesUploadedToday(context)
             lastUploadTime = PhoneDataConfig.getLastUploadTime(context)
             retentionHours = PhoneDataConfig.getLocalStorageRetentionHours(context)
             localStorageEnabled = PhoneDataConfig.isLocalStorageEnabled(context)
 
-            val heartbeatPrefs = context.getSharedPreferences("heartbeat_prefs", Context.MODE_PRIVATE)
             lastHeartbeatTime = heartbeatPrefs.getLong("last_heartbeat_time", 0)
             watchServiceUptime = heartbeatPrefs.getLong("watch_service_uptime", 0)
             watchMonitoringState = heartbeatPrefs.getString("watch_monitoring_state", "unknown") ?: "unknown"
@@ -878,8 +880,8 @@ fun MainScreen(
                 isWatchBatteryOptimized = heartbeatPrefs.getBoolean("watch_battery_optimized", false)
                 lastDataReceivedTime = NotificationHelper.getLastReceivedTime(context)
                 
-                // Refresh stats
-                batchesPending = getPendingBatchCount(context)
+                 // Refresh stats
+                batchesPending = withContext(Dispatchers.IO) { getPendingBatchCount(context) }
                 batchesUploadedToday = PhoneDataConfig.getBatchesUploadedToday(context)
                 lastUploadTime = PhoneDataConfig.getLastUploadTime(context)
                 

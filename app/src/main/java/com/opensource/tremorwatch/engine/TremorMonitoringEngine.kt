@@ -26,6 +26,7 @@ import kotlin.math.sqrt
  * batched and persisted by the service layer.
  */
 class TremorMonitoringEngine(
+    private val baselineManager: BaselineManager? = null,
     private val onBatchReady: (List<TremorData>) -> Unit,
     private val onWearStateChanged: (Boolean) -> Unit
 ) : SensorEventListener {
@@ -113,8 +114,7 @@ class TremorMonitoringEngine(
     private var currentEpisodeTremorCount = 0
     
     // Phase 5: Rolling baseline and severity calculation (opus45 review)
-    // Note: BaselineManager requires context - not available without context parameter
-    private val baselineManager: BaselineManager? = null
+    // Provided by the service (constructed with applicationContext) to keep engine testable.
 
     // Activity recognition state (updated by TremorService)
     private data class ActivityState(

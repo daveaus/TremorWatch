@@ -179,6 +179,23 @@ class TremorDatabaseHelper(private val context: Context) {
             emptyList()
         }
     }
+
+    /**
+     * Get samples in specific time range for export with pagination.
+     */
+    suspend fun getSamplesInRangePaged(
+        startTime: Long,
+        endTime: Long,
+        limit: Int,
+        offset: Int
+    ): List<TremorSample> = withContext(Dispatchers.IO) {
+        try {
+            dao.getSamplesInRangePaged(startTime, endTime, limit, offset)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to get paged samples in range: ${e.message}", e)
+            emptyList()
+        }
+    }
     
     /**
      * Get samples after cutoff with pagination for memory-efficient export.
@@ -201,6 +218,18 @@ class TremorDatabaseHelper(private val context: Context) {
             dao.getSamplesCountAfter(cutoffTime)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to get sample count: ${e.message}", e)
+            0
+        }
+    }
+
+    /**
+     * Get count of samples in a specific time range (for export empty check / progress).
+     */
+    suspend fun getSamplesCountInRange(startTime: Long, endTime: Long): Int = withContext(Dispatchers.IO) {
+        try {
+            dao.getSamplesCountInRange(startTime, endTime)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to get sample count in range: ${e.message}", e)
             0
         }
     }
