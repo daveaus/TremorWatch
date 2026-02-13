@@ -23,6 +23,10 @@ data class SubjectiveRatingEntity(
     val detectedSeverity: Double?,
     val detectedConfidence: Float?,
     val detectedFrequency: Float?,
+
+    // Objective lookback context captured at rating time (JSON blob).
+    // This avoids schema churn while we iterate on which windows/features correlate best with subjective ratings.
+    val objectiveContextJson: String?,
     
     // Calibration settings
     val calibrationModeEnabled: Boolean,

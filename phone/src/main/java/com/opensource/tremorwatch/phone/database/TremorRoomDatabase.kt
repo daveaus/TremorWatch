@@ -13,7 +13,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
  */
 @Database(
     entities = [TremorSample::class, SubjectiveRatingEntity::class, CalibrationDataEntity::class],
-    version = 4,
+    version = 5,
     exportSchema = false
 )
 abstract class TremorRoomDatabase : RoomDatabase() {
@@ -107,14 +107,24 @@ abstract class TremorRoomDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * Migration from v4 to v5: adds objectiveContextJson column to subjective_ratings.
+         * Stores windowed objective summaries captured at rating time (10s/60s/5m/15m, etc.).
+         */
+        private val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL("ALTER TABLE subjective_ratings ADD COLUMN objectiveContextJson TEXT DEFAULT NULL")
+            }
+        }
+
         fun getDatabase(context: Context): TremorRoomDatabase {
             return INSTANCE ?: synchronized(this) {
                 val instance = Room.databaseBuilder(
                     context.applicationContext,
-                    TremorRoomDatabase::class.java,
-                    "tremor_data.db"
-                )
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+                TremorRoomDatabase::class.java,
+                "tremor_data.db"
+            )
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
                 .build()
                 INSTANCE = instance
                 instance

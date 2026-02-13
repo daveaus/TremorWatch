@@ -2,6 +2,7 @@ package com.opensource.tremorwatch.phone.typicalday
 
 import com.opensource.tremorwatch.phone.database.MinuteAggregateRow
 import com.opensource.tremorwatch.phone.database.RatingSampleRow
+import com.opensource.tremorwatch.phone.scoring.TremorIndexMapper
 import java.time.Instant
 import kotlin.math.abs
 import kotlin.math.sqrt
@@ -38,7 +39,10 @@ object DailyTremorProfileAggregator {
 
             objectiveBuckets[bucketIndex].add(
                 ObjectivePoint(
-                    severity = row.avgSeverity,
+                    // Store objective as a user-facing 0..10 index for charting.
+                    // Raw avgSeverity is still available elsewhere (exports/debug), but is not comparable
+                    // to subjective ratings on its own due to heavy zero-inflation.
+                    severity = TremorIndexMapper.rawToIndex0to10(row.avgSeverity),
                     sampleCount = row.sampleCount.coerceAtLeast(1),
                     epochDay = localDateTime.toLocalDate().toEpochDay()
                 )
@@ -59,7 +63,8 @@ object DailyTremorProfileAggregator {
 
                 // Positive means user feels worse than objective model indicates.
                 row.detectedSeverity?.let { detected ->
-                    perceptionGaps.add(normalizedRating - detected)
+                    val detectedIndex = TremorIndexMapper.rawToIndex0to10(detected)
+                    perceptionGaps.add(normalizedRating - detectedIndex)
                 }
             }
         }
@@ -88,19 +93,35 @@ object DailyTremorProfileAggregator {
             val statsValues = statsPoints.map { it.severity }
 
             val subjectiveMean = subjectiveBuckets[index].averageOrNull()
-            val objectiveMedian = percentileFromSorted(statsValues, 0.5)
-            val mismatch = objectiveMedian != null &&
-                subjectiveMean != null &&
-                abs(objectiveMedian - subjectiveMean) > config.mismatchThreshold
+
+            // Option 1: objective is the "high tremor intensity when present" (p95 of NON-ZERO minutes).
+            // This avoids the 0-heavy distribution forcing percentiles to 0 most of the time.
+            val nonZeroValues = statsValues.filter { it > 0.0 }
+            val objectiveHighP95 = when {
+                nonZeroValues.isEmpty() -> 0.0
+                else -> percentileFromSorted(nonZeroValues, 0.95) ?: 0.0
+            }
+            val objectiveTypicalP50 = when {
+                nonZeroValues.isEmpty() -> 0.0
+                else -> percentileFromSorted(nonZeroValues, 0.50) ?: 0.0
+            }
+            val objectiveMeanNonZero = when {
+                nonZeroValues.isEmpty() -> 0.0
+                else -> nonZeroValues.average()
+            }
+
+            val mismatch = subjectiveMean != null &&
+                abs(objectiveHighP95 - subjectiveMean) > config.mismatchThreshold
 
             DailyTremorProfileBucket(
                 bucketIndex = index,
                 startMinuteOfDay = startMinute,
                 endMinuteOfDayInclusive = endMinute,
-                objectiveMedian = objectiveMedian,
-                objectiveQ1 = percentileFromSorted(statsValues, 0.25),
-                objectiveQ3 = percentileFromSorted(statsValues, 0.75),
-                objectiveMean = statsValues.averageOrNull(),
+                objectiveMedian = if (statsValues.isEmpty()) null else objectiveHighP95,
+                // Band represents typical-to-high intensity when present (p50..p95 of non-zero minutes).
+                objectiveQ1 = if (statsValues.isEmpty()) null else objectiveTypicalP50,
+                objectiveQ3 = if (statsValues.isEmpty()) null else objectiveHighP95,
+                objectiveMean = if (statsValues.isEmpty()) null else objectiveMeanNonZero,
                 objectiveRawPointCount = rawPoints.size,
                 objectiveTrimmedPointCount = trimmedPoints.size,
                 objectiveOutlierPointCount = (sortedPoints.size - trimmedPoints.size).coerceAtLeast(0),
@@ -139,15 +160,10 @@ object DailyTremorProfileAggregator {
             pairedSubjective = paired.map { it.second }
         )
 
+        // Subjective is always displayed on its native 0-10 scale (rating * 2).
+        // We no longer scale subjective down to match objective, since that destroys axis meaning.
         val subjectiveDisplayByBucket = if (!config.includeSubjective) {
             List(bucketCount) { null }
-        } else if (
-            calibrationInfo.appliedMode == SubjectiveOverlayMode.CALIBRATED_SCALED &&
-            calibrationInfo.scale != null
-        ) {
-            buckets.map { bucket ->
-                bucket.subjectiveMean?.times(calibrationInfo.scale)
-            }
         } else {
             buckets.map { it.subjectiveMean }
         }
@@ -239,18 +255,7 @@ object DailyTremorProfileAggregator {
             if (minuteRows.isNotEmpty()) {
                 add("Assumes user stayed in one time zone during selected window.")
             }
-            if (
-                config.includeSubjective &&
-                calibrationInfo.requestedMode == SubjectiveOverlayMode.CALIBRATED_SCALED &&
-                !calibrationInfo.applied
-            ) {
-                calibrationInfo.fallbackReason?.let {
-                    add("Subjective calibration unavailable: $it")
-                }
-            }
-            if (calibrationInfo.wasClamped) {
-                add("Subjective calibration scale was clamped for stability.")
-            }
+            // Subjective scaling warnings removed: subjective overlay is always RAW_X2.
         }
 
         val bestBucketLabel = bestBucketIndex?.let { formatBucketLabel(it, config.bucketMinutes) }
@@ -306,12 +311,22 @@ object DailyTremorProfileAggregator {
     fun trimOutliersIqr(values: List<Double>, multiplier: Double): List<Double> {
         if (values.size < 4) return values
         val sortedValues = values.sorted()
-        val q1 = percentileFromSorted(sortedValues, 0.25) ?: return values
-        val q3 = percentileFromSorted(sortedValues, 0.75) ?: return values
+
+        // Zero-inflated distributions are common here; trimming on the full distribution can
+        // incorrectly drop all non-zero points when q1==q3==0. We trim only the non-zero tail.
+        val zeros = sortedValues.filter { it <= 0.0 }
+        val nonZeros = sortedValues.filter { it > 0.0 }
+        if (nonZeros.size < 4) return sortedValues
+
+        val q1 = percentileFromSorted(nonZeros, 0.25) ?: return sortedValues
+        val q3 = percentileFromSorted(nonZeros, 0.75) ?: return sortedValues
         val iqr = q3 - q1
+        if (iqr <= 1e-9) return sortedValues
+
         val lower = q1 - multiplier * iqr
         val upper = q3 + multiplier * iqr
-        return sortedValues.filter { it in lower..upper }
+        val trimmedNonZeros = nonZeros.filter { it in lower..upper }
+        return zeros + trimmedNonZeros
     }
 
     private fun trimOutlierPointsIqr(
@@ -319,13 +334,23 @@ object DailyTremorProfileAggregator {
         multiplier: Double
     ): List<ObjectivePoint> {
         if (pointsSortedBySeverity.size < 4) return pointsSortedBySeverity
-        val sortedValues = pointsSortedBySeverity.map { it.severity }
-        val q1 = percentileFromSorted(sortedValues, 0.25) ?: return pointsSortedBySeverity
-        val q3 = percentileFromSorted(sortedValues, 0.75) ?: return pointsSortedBySeverity
+
+        // Zero-aware trimming: keep all zeros, apply IQR trimming only to non-zero points.
+        val zeros = pointsSortedBySeverity.filter { it.severity <= 0.0 }
+        val nonZeros = pointsSortedBySeverity.filter { it.severity > 0.0 }
+        if (nonZeros.size < 4) return pointsSortedBySeverity
+
+        // nonZeros remain sorted because pointsSortedBySeverity is sorted and filter preserves order.
+        val nonZeroValues = nonZeros.map { it.severity }
+        val q1 = percentileFromSorted(nonZeroValues, 0.25) ?: return pointsSortedBySeverity
+        val q3 = percentileFromSorted(nonZeroValues, 0.75) ?: return pointsSortedBySeverity
         val iqr = q3 - q1
+        if (iqr <= 1e-9) return pointsSortedBySeverity
+
         val lower = q1 - multiplier * iqr
         val upper = q3 + multiplier * iqr
-        return pointsSortedBySeverity.filter { it.severity in lower..upper }
+        val trimmedNonZeros = nonZeros.filter { it.severity in lower..upper }
+        return zeros + trimmedNonZeros
     }
 
     fun pearsonCorrelationOrNull(x: List<Double>, y: List<Double>): Double? {
@@ -387,142 +412,26 @@ object DailyTremorProfileAggregator {
         pairedObjective: List<Double>,
         pairedSubjective: List<Double>
     ): SubjectiveCalibrationInfo {
-        val requestedMode = if (config.includeSubjective) {
-            config.subjectiveOverlayMode
-        } else {
-            SubjectiveOverlayMode.RAW_X2
-        }
-
-        if (!config.includeSubjective) {
-            return SubjectiveCalibrationInfo(
-                requestedMode = requestedMode,
-                appliedMode = SubjectiveOverlayMode.RAW_X2,
-                applied = false,
-                scale = null,
-                pairedBucketCount = 0,
-                trimmedBucketCount = 0,
-                wasClamped = false,
-                fallbackReason = "Subjective overlay disabled."
-            )
-        }
-
-        if (requestedMode == SubjectiveOverlayMode.RAW_X2) {
-            return SubjectiveCalibrationInfo(
-                requestedMode = requestedMode,
-                appliedMode = SubjectiveOverlayMode.RAW_X2,
-                applied = false,
-                scale = null,
-                pairedBucketCount = pairedObjective.size.coerceAtMost(pairedSubjective.size),
-                trimmedBucketCount = pairedObjective.size.coerceAtMost(pairedSubjective.size),
-                wasClamped = false,
-                fallbackReason = null
-            )
-        }
-
+        val requestedMode = if (config.includeSubjective) config.subjectiveOverlayMode else SubjectiveOverlayMode.RAW_X2
         val pairCount = pairedObjective.size.coerceAtMost(pairedSubjective.size)
-        if (pairCount < config.calibrationMinPairedBuckets) {
-            return SubjectiveCalibrationInfo(
-                requestedMode = requestedMode,
-                appliedMode = SubjectiveOverlayMode.RAW_X2,
-                applied = false,
-                scale = null,
-                pairedBucketCount = pairCount,
-                trimmedBucketCount = 0,
-                wasClamped = false,
-                fallbackReason = "Need at least ${config.calibrationMinPairedBuckets} paired buckets."
-            )
+
+        // Subjective scaling is intentionally disabled: we keep subjective on its native 0-10 display scale (rating*2).
+        // The objective side is mapped into a comparable 0-10 Tremor Index instead.
+        val fallback = if (requestedMode == SubjectiveOverlayMode.CALIBRATED_SCALED) {
+            "Scaled subjective overlay disabled."
+        } else {
+            if (!config.includeSubjective) "Subjective overlay disabled." else null
         }
-
-        val finitePairs = pairedObjective.zip(pairedSubjective)
-            .filter { (objective, subjective) ->
-                objective.isFinite() && subjective.isFinite() && subjective > 0.0
-            }
-
-        if (finitePairs.size < config.calibrationMinPairedBuckets) {
-            return SubjectiveCalibrationInfo(
-                requestedMode = requestedMode,
-                appliedMode = SubjectiveOverlayMode.RAW_X2,
-                applied = false,
-                scale = null,
-                pairedBucketCount = finitePairs.size,
-                trimmedBucketCount = 0,
-                wasClamped = false,
-                fallbackReason = "Insufficient valid paired buckets after filtering."
-            )
-        }
-
-        val trimmedPairs = trimPairedByQuantiles(
-            pairs = finitePairs,
-            trimFraction = config.calibrationTrimFraction
-        )
-
-        if (trimmedPairs.size < config.calibrationMinPairedBuckets) {
-            return SubjectiveCalibrationInfo(
-                requestedMode = requestedMode,
-                appliedMode = SubjectiveOverlayMode.RAW_X2,
-                applied = false,
-                scale = null,
-                pairedBucketCount = finitePairs.size,
-                trimmedBucketCount = trimmedPairs.size,
-                wasClamped = false,
-                fallbackReason = "Calibration became unstable after outlier trimming."
-            )
-        }
-
-        val meanObjective = trimmedPairs.map { it.first }.average()
-        val meanSubjective = trimmedPairs.map { it.second }.average()
-
-        if (!meanObjective.isFinite() || !meanSubjective.isFinite() || meanSubjective <= 0.0) {
-            return SubjectiveCalibrationInfo(
-                requestedMode = requestedMode,
-                appliedMode = SubjectiveOverlayMode.RAW_X2,
-                applied = false,
-                scale = null,
-                pairedBucketCount = finitePairs.size,
-                trimmedBucketCount = trimmedPairs.size,
-                wasClamped = false,
-                fallbackReason = "Cannot compute a stable calibration scale."
-            )
-        }
-
-        if (meanSubjective < config.calibrationMinSubjectiveMean) {
-            return SubjectiveCalibrationInfo(
-                requestedMode = requestedMode,
-                appliedMode = SubjectiveOverlayMode.RAW_X2,
-                applied = false,
-                scale = null,
-                pairedBucketCount = finitePairs.size,
-                trimmedBucketCount = trimmedPairs.size,
-                wasClamped = false,
-                fallbackReason = "Average subjective score too low for reliable calibration."
-            )
-        }
-
-        val rawScale = meanObjective / meanSubjective
-        if (!rawScale.isFinite() || rawScale <= 0.0) {
-            return SubjectiveCalibrationInfo(
-                requestedMode = requestedMode,
-                appliedMode = SubjectiveOverlayMode.RAW_X2,
-                applied = false,
-                scale = null,
-                pairedBucketCount = finitePairs.size,
-                trimmedBucketCount = trimmedPairs.size,
-                wasClamped = false,
-                fallbackReason = "Calibration scale is not valid."
-            )
-        }
-
-        val clampedScale = rawScale.coerceIn(config.calibrationScaleMin, config.calibrationScaleMax)
 
         return SubjectiveCalibrationInfo(
             requestedMode = requestedMode,
-            appliedMode = SubjectiveOverlayMode.CALIBRATED_SCALED,
-            applied = true,
-            scale = clampedScale,
-            pairedBucketCount = finitePairs.size,
-            trimmedBucketCount = trimmedPairs.size,
-            wasClamped = clampedScale != rawScale,
-            fallbackReason = null
+            appliedMode = SubjectiveOverlayMode.RAW_X2,
+            applied = false,
+            scale = null,
+            pairedBucketCount = pairCount,
+            trimmedBucketCount = pairCount,
+            wasClamped = false,
+            fallbackReason = fallback
         )
     }
 

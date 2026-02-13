@@ -8,7 +8,10 @@ enum class SubjectiveOverlayMode {
 
     companion object {
         fun fromStorage(value: String?): SubjectiveOverlayMode {
-            return values().firstOrNull { it.name == value } ?: CALIBRATED_SCALED
+            // Default to RAW_X2 for interpretability. CALIBRATED_SCALED remains for backwards
+            // compatibility but is no longer used for the main UI.
+            val parsed = values().firstOrNull { it.name == value } ?: RAW_X2
+            return if (parsed == CALIBRATED_SCALED) RAW_X2 else parsed
         }
     }
 }
@@ -40,7 +43,7 @@ data class DailyTremorProfileConfig(
     val days: Int = 14,
     val bucketMinutes: Int = 60,
     val includeSubjective: Boolean = true,
-    val subjectiveOverlayMode: SubjectiveOverlayMode = SubjectiveOverlayMode.CALIBRATED_SCALED,
+    val subjectiveOverlayMode: SubjectiveOverlayMode = SubjectiveOverlayMode.RAW_X2,
     val excludeCharging: Boolean = true,
     val excludeOffWrist: Boolean = true,
     val minConfidence: Double? = null,

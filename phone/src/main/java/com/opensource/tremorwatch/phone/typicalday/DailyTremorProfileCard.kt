@@ -217,24 +217,10 @@ fun DailyTremorProfileCard(
             Spacer(modifier = Modifier.height(6.dp))
 
             Text(
-                text = "Self-ratings are scaled in calibrated mode for visual comparison only.",
+                text = "Sensor uses a Tremor Index (0-10) derived from raw data. Self-ratings are 0-5 shown as 0-10 (×2).",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
-
-            val calibration = profile.subjectiveCalibration
-            if (
-                profile.config.includeSubjective &&
-                selectedOverlayMode == SubjectiveOverlayMode.CALIBRATED_SCALED &&
-                !calibration.applied
-            ) {
-                Spacer(modifier = Modifier.height(6.dp))
-                Text(
-                    text = "Calibration unavailable: ${calibration.fallbackReason ?: "insufficient overlap"}. Showing Raw x2.",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.error
-                )
-            }
 
             Spacer(modifier = Modifier.height(4.dp))
 
@@ -243,31 +229,6 @@ fun DailyTremorProfileCard(
             }
 
             if (showAdvanced) {
-                if (profile.config.includeSubjective) {
-                    Text(
-                        text = "Subjective Overlay",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        listOf(
-                            SubjectiveOverlayMode.CALIBRATED_SCALED to "Scaled",
-                            SubjectiveOverlayMode.RAW_X2 to "Raw x2"
-                        ).forEach { (mode, label) ->
-                            FilterChip(
-                                selected = selectedOverlayMode == mode,
-                                onClick = { onOverlayModeSelected(mode) },
-                                label = { Text(label) }
-                            )
-                        }
-                    }
-
-                    Spacer(modifier = Modifier.height(6.dp))
-                }
-
                 Text(
                     text = "Raw correlation: ${profile.metrics.correlation?.let { formatValue(it, 2) } ?: "n/a"} (${profile.metrics.correlationLabel})",
                     style = MaterialTheme.typography.labelSmall,
@@ -283,24 +244,6 @@ fun DailyTremorProfileCard(
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-
-                if (profile.config.includeSubjective) {
-                    val calibrationText = when {
-                        calibration.appliedMode == SubjectiveOverlayMode.CALIBRATED_SCALED &&
-                            calibration.scale != null -> {
-                            "Calibration factor: x${formatValue(calibration.scale, 4)} (${calibration.trimmedBucketCount}/${calibration.pairedBucketCount} buckets)"
-                        }
-
-                        else -> {
-                            "Calibration fallback: Raw x2"
-                        }
-                    }
-                    Text(
-                        text = calibrationText,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
 
                 if (profile.metrics.warnings.isNotEmpty()) {
                     Spacer(modifier = Modifier.height(6.dp))
@@ -342,8 +285,8 @@ private fun DailyProfileLegend(
         verticalAlignment = Alignment.CenterVertically
     ) {
         if (showObjective) {
-            LegendDot(label = "Sensor", color = objectiveColor)
-            LegendDot(label = "IQR", color = bandColor)
+            LegendDot(label = "Sensor (Index)", color = objectiveColor)
+            LegendDot(label = "P50-P95", color = bandColor)
         }
         if (showSubjective) {
             LegendDot(label = "Self", color = subjectiveColor)
@@ -512,15 +455,7 @@ private fun BucketDetailsDialog(
     onDismiss: () -> Unit
 ) {
     val bucket = profile.buckets[bucketIndex]
-    val calibrationScale = profile.subjectiveCalibration.scale
-    val displaySubjective = when {
-        bucket.subjectiveMean == null -> null
-        profile.subjectiveCalibration.appliedMode == SubjectiveOverlayMode.CALIBRATED_SCALED && calibrationScale != null -> {
-            bucket.subjectiveMean * calibrationScale
-        }
-
-        else -> bucket.subjectiveMean
-    }
+    val displaySubjective = bucket.subjectiveMean
 
     val perceptionGap = if (bucket.objectiveMedian != null && displaySubjective != null) {
         displaySubjective - bucket.objectiveMedian
@@ -548,19 +483,15 @@ private fun BucketDetailsDialog(
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text(
-                    text = "Sensor median: ${formatValue(bucket.objectiveMedian, 3)}",
+                    text = "Sensor high (p95 when present): ${formatValue(bucket.objectiveMedian, 2)} / 10",
                     style = MaterialTheme.typography.bodySmall
                 )
                 Text(
-                    text = "Sensor IQR: ${formatValue(bucket.objectiveQ1, 3)} - ${formatValue(bucket.objectiveQ3, 3)}",
+                    text = "Sensor typical-to-high (p50-p95): ${formatValue(bucket.objectiveQ1, 2)} - ${formatValue(bucket.objectiveQ3, 2)} / 10",
                     style = MaterialTheme.typography.bodySmall
                 )
                 Text(
                     text = "Self rating: ${formatValue(bucket.subjectiveMean?.div(2.0), 2)} / 5 (${formatValue(bucket.subjectiveMean, 2)} / 10)",
-                    style = MaterialTheme.typography.bodySmall
-                )
-                Text(
-                    text = "Display value: ${formatValue(displaySubjective, 3)}",
                     style = MaterialTheme.typography.bodySmall
                 )
                 Text(
@@ -661,40 +592,13 @@ private fun resolveChartAxis(
     showObjective: Boolean,
     showSubjective: Boolean
 ): ChartAxis {
-    if (!showObjective && !showSubjective) {
-        return ChartAxis(
-            max = 10.0,
-            ticks = listOf(0.0, 5.0, 10.0),
-            autoScaled = false
-        )
-    }
-
-    val calibratedApplied =
-        profile.subjectiveCalibration.appliedMode == SubjectiveOverlayMode.CALIBRATED_SCALED
-
-    if (showSubjective && !calibratedApplied) {
-        return ChartAxis(
-            max = 10.0,
-            ticks = listOf(0.0, 5.0, 10.0),
-            autoScaled = false
-        )
-    }
-
-    val candidates = buildList {
-        if (showObjective) {
-            addAll(profile.objectiveMedianSmoothed.filterNotNull())
-            addAll(profile.objectiveQ3Smoothed.filterNotNull())
-        }
-        if (showSubjective) {
-            addAll(profile.subjectiveSmoothed.filterNotNull())
-        }
-    }.filter { it.isFinite() && it >= 0.0 }
-
-    val snappedMax = computeRobustAxisMax(candidates)
+    // Both series are shown on a consistent 0-10 scale:
+    // - Objective is a derived Tremor Index in 0-10.
+    // - Subjective is rating 0-5 displayed as 0-10 (x2).
     return ChartAxis(
-        max = snappedMax,
-        ticks = listOf(0.0, snappedMax / 2.0, snappedMax),
-        autoScaled = true
+        max = 10.0,
+        ticks = listOf(0.0, 5.0, 10.0),
+        autoScaled = false
     )
 }
 

@@ -469,7 +469,7 @@ fun MainScreen(
     var dailyProfileOverlayMode by remember {
         mutableStateOf(
             SubjectiveOverlayMode.fromStorage(
-                dailyProfilePrefs.getString("overlay_mode", SubjectiveOverlayMode.CALIBRATED_SCALED.name)
+                dailyProfilePrefs.getString("overlay_mode", SubjectiveOverlayMode.RAW_X2.name)
             )
         )
     }

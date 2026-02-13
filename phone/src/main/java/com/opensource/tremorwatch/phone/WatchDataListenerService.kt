@@ -17,10 +17,12 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import org.json.JSONObject
+import org.json.JSONArray
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.util.zip.GZIPInputStream
+import kotlin.math.abs
 
 /**
  * Service that listens for data from the watch via MessageClient API.
@@ -960,6 +962,71 @@ class WatchDataListenerService : WearableListenerService() {
         )
     }
 
+    private fun percentileFromSorted(sortedValues: List<Double>, p: Double): Double? {
+        if (sortedValues.isEmpty()) return null
+        val index = p.coerceIn(0.0, 1.0) * sortedValues.lastIndex
+        val lo = index.toInt()
+        val hi = (lo + 1).coerceAtMost(sortedValues.lastIndex)
+        val weight = index - lo
+        return sortedValues[lo] * (1.0 - weight) + sortedValues[hi] * weight
+    }
+
+    private suspend fun computeObjectiveLookbackContextJson(
+        dao: TremorDao,
+        ratingTimestamp: Long
+    ): String? {
+        // Capture objective context in multiple lookback windows so we can later analyze
+        // which window best matches subjective rating behavior.
+        val windowsSeconds = listOf(10, 60, 300, 900)
+        val windowEnd = (ratingTimestamp - 500L).coerceAtLeast(0L)
+
+        val root = JSONObject()
+        root.put("schemaVersion", 1)
+        root.put("ratingTimestamp", ratingTimestamp)
+        root.put("generatedAtMs", System.currentTimeMillis())
+
+        val windows = JSONArray()
+        for (seconds in windowsSeconds) {
+            val windowStart = (windowEnd - seconds * 1000L).coerceAtLeast(0L)
+            val allSamples = dao.getSamplesInRange(windowStart, windowEnd)
+
+            val anyCharging = allSamples.any { it.isCharging == true }
+            val anyOffWrist = allSamples.any { it.isWorn == false }
+
+            // Prefer on-wrist + not-charging samples when available.
+            val preferred = allSamples.filter { it.isWorn != false && it.isCharging != true }
+            val samples = if (preferred.isNotEmpty()) preferred else allSamples
+
+            val severities = samples.map { it.severity }.filter { it.isFinite() }
+            val confidences = samples.mapNotNull { it.confidence }.filter { it.isFinite() }
+
+            val windowObj = JSONObject()
+            windowObj.put("seconds", seconds)
+            windowObj.put("startMs", windowStart)
+            windowObj.put("endMs", windowEnd)
+            windowObj.put("anyCharging", anyCharging)
+            windowObj.put("anyOffWrist", anyOffWrist)
+            windowObj.put("sampleCount", severities.size)
+
+            confidences.averageOrNull()?.let { windowObj.put("avgConfidence", it) }
+
+            if (severities.isNotEmpty()) {
+                val sorted = severities.sorted()
+                windowObj.put("mean", severities.average())
+                percentileFromSorted(sorted, 0.50)?.let { windowObj.put("p50", it) }
+                percentileFromSorted(sorted, 0.90)?.let { windowObj.put("p90", it) }
+                windowObj.put("max", sorted.last())
+                val nonZeroFraction = severities.count { it > 0.0 }.toDouble() / severities.size.toDouble()
+                windowObj.put("nonZeroFraction", nonZeroFraction)
+            }
+
+            windows.put(windowObj)
+        }
+
+        root.put("objectiveLookbackWindows", windows)
+        return root.toString()
+    }
+
     private fun List<Double>.averageOrNull(): Double? {
         if (isEmpty()) return null
         return average()
@@ -1011,6 +1078,16 @@ class WatchDataListenerService : WearableListenerService() {
                     null
                 }
 
+                val objectiveContextJson = try {
+                    computeObjectiveLookbackContextJson(
+                        dao = dao,
+                        ratingTimestamp = ratingTimestamp
+                    )
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to compute objective lookback context: ${e.message}")
+                    null
+                }
+
                 // Parse rating from JSON
                 val ratingEntity = SubjectiveRatingEntity(
                     id = json.getString("id"),
@@ -1021,6 +1098,7 @@ class WatchDataListenerService : WearableListenerService() {
                     detectedSeverity = payloadMetrics.severity ?: inferredMetrics?.severity,
                     detectedConfidence = payloadMetrics.confidence ?: inferredMetrics?.confidence,
                     detectedFrequency = payloadMetrics.frequencyHz ?: inferredMetrics?.frequencyHz,
+                    objectiveContextJson = objectiveContextJson,
                     calibrationModeEnabled = json.optBoolean("calibrationModeEnabled", false),
                     calibrationDurationSeconds = calibrationDurationSeconds,
                     notes = json.optNullableString("notes"),
