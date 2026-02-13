@@ -286,7 +286,7 @@ private fun DailyProfileLegend(
     ) {
         if (showObjective) {
             LegendDot(label = "Sensor (Index)", color = objectiveColor)
-            LegendDot(label = "P50-P95", color = bandColor)
+            LegendDot(label = "P25-P75", color = bandColor)
         }
         if (showSubjective) {
             LegendDot(label = "Self", color = subjectiveColor)
@@ -483,11 +483,11 @@ private fun BucketDetailsDialog(
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text(
-                    text = "Sensor high (p95 when present): ${formatValue(bucket.objectiveMedian, 2)} / 10",
+                    text = "Sensor typical (p50 when present): ${formatValue(bucket.objectiveMedian, 2)} / 10",
                     style = MaterialTheme.typography.bodySmall
                 )
                 Text(
-                    text = "Sensor typical-to-high (p50-p95): ${formatValue(bucket.objectiveQ1, 2)} - ${formatValue(bucket.objectiveQ3, 2)} / 10",
+                    text = "Sensor typical range (p25-p75): ${formatValue(bucket.objectiveQ1, 2)} - ${formatValue(bucket.objectiveQ3, 2)} / 10",
                     style = MaterialTheme.typography.bodySmall
                 )
                 Text(

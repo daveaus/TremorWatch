@@ -735,7 +735,8 @@ fun MainScreen(
                         excludeOffWrist = true,
                         minConfidence = null,
                         iqrMultiplier = 1.5,
-                        smoothingRadius = 1,
+                        // Keep smoothing off by default so time-of-day variation is not flattened.
+                        smoothingRadius = 0,
                         mismatchThreshold = 3.0,
                         minDistinctDaysPerBucket = 3,
                         minCoveragePercentForConfidence = 10,

@@ -94,16 +94,21 @@ object DailyTremorProfileAggregator {
 
             val subjectiveMean = subjectiveBuckets[index].averageOrNull()
 
-            // Option 1: objective is the "high tremor intensity when present" (p95 of NON-ZERO minutes).
-            // This avoids the 0-heavy distribution forcing percentiles to 0 most of the time.
+            // Objective summary is computed on NON-ZERO minutes so zeros don't poison quantiles.
+            // For the main line we prefer a "typical when present" estimate (p50), which tracks
+            // time-of-day variation better than near-worst quantiles in sparse / bursty data.
             val nonZeroValues = statsValues.filter { it > 0.0 }
-            val objectiveHighP95 = when {
+            val objectiveP25 = when {
                 nonZeroValues.isEmpty() -> 0.0
-                else -> percentileFromSorted(nonZeroValues, 0.95) ?: 0.0
+                else -> percentileFromSorted(nonZeroValues, 0.25) ?: 0.0
             }
-            val objectiveTypicalP50 = when {
+            val objectiveP50 = when {
                 nonZeroValues.isEmpty() -> 0.0
                 else -> percentileFromSorted(nonZeroValues, 0.50) ?: 0.0
+            }
+            val objectiveP75 = when {
+                nonZeroValues.isEmpty() -> 0.0
+                else -> percentileFromSorted(nonZeroValues, 0.75) ?: 0.0
             }
             val objectiveMeanNonZero = when {
                 nonZeroValues.isEmpty() -> 0.0
@@ -111,16 +116,17 @@ object DailyTremorProfileAggregator {
             }
 
             val mismatch = subjectiveMean != null &&
-                abs(objectiveHighP95 - subjectiveMean) > config.mismatchThreshold
+                abs(objectiveP50 - subjectiveMean) > config.mismatchThreshold
 
             DailyTremorProfileBucket(
                 bucketIndex = index,
                 startMinuteOfDay = startMinute,
                 endMinuteOfDayInclusive = endMinute,
-                objectiveMedian = if (statsValues.isEmpty()) null else objectiveHighP95,
-                // Band represents typical-to-high intensity when present (p50..p95 of non-zero minutes).
-                objectiveQ1 = if (statsValues.isEmpty()) null else objectiveTypicalP50,
-                objectiveQ3 = if (statsValues.isEmpty()) null else objectiveHighP95,
+                // Main line: typical tremor intensity when present (p50 of non-zero minutes).
+                objectiveMedian = if (statsValues.isEmpty()) null else objectiveP50,
+                // Band: typical range when present (p25..p75 of non-zero minutes).
+                objectiveQ1 = if (statsValues.isEmpty()) null else objectiveP25,
+                objectiveQ3 = if (statsValues.isEmpty()) null else objectiveP75,
                 objectiveMean = if (statsValues.isEmpty()) null else objectiveMeanNonZero,
                 objectiveRawPointCount = rawPoints.size,
                 objectiveTrimmedPointCount = trimmedPoints.size,
