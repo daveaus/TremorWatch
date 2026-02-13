@@ -89,7 +89,9 @@ object DailyTremorProfileAggregator {
 
             val distinctDays = rawPoints.map { it.epochDay }.toSet().size
             val lowDayCoverage = rawPoints.isNotEmpty() && distinctDays < config.minDistinctDaysPerBucket
-            val statsPoints = if (lowDayCoverage) emptyList() else trimmedPoints
+            // We keep the values (so the chart is continuous), but mark the bucket as low coverage so
+            // UI can render it faint and metrics can warn about it.
+            val statsPoints = trimmedPoints
             val statsValues = statsPoints.map { it.severity }
 
             val subjectiveMean = subjectiveBuckets[index].averageOrNull()
@@ -157,7 +159,7 @@ object DailyTremorProfileAggregator {
         val paired = buckets.mapNotNull { bucket ->
             val objective = bucket.objectiveMedian
             val subjective = bucket.subjectiveMean
-            if (objective != null && subjective != null) objective to subjective else null
+            if (objective != null && subjective != null && !bucket.lowDayCoverageFlag) objective to subjective else null
         }
 
         val calibrationInfo = computeSubjectiveCalibration(
@@ -256,7 +258,7 @@ object DailyTremorProfileAggregator {
                 add("High outlier rate; signal quality may be inconsistent.")
             }
             if (buckets.any { it.lowDayCoverageFlag }) {
-                add("Some hours are suppressed due to limited distinct-day coverage.")
+                add("Some hours are shown faint due to limited distinct-day coverage.")
             }
             if (minuteRows.isNotEmpty()) {
                 add("Assumes user stayed in one time zone during selected window.")

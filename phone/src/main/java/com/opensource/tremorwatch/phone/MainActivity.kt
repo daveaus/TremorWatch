@@ -101,6 +101,7 @@ import com.opensource.tremorwatch.phone.typicalday.DailyTremorProfile
 import com.opensource.tremorwatch.phone.typicalday.DailyTremorProfileAggregator
 import com.opensource.tremorwatch.phone.typicalday.DailyTremorProfileCard
 import com.opensource.tremorwatch.phone.typicalday.DailyTremorProfileConfig
+import com.opensource.tremorwatch.phone.typicalday.DailyTremorProfileSettingsDialog
 import com.opensource.tremorwatch.phone.typicalday.DailyProfileSeriesMode
 import com.opensource.tremorwatch.phone.typicalday.SubjectiveOverlayMode
 import kotlinx.coroutines.Dispatchers
@@ -450,7 +451,7 @@ fun MainScreen(
         context.getSharedPreferences("daily_tremor_profile", Context.MODE_PRIVATE)
     }
     val allowedDayWindows = remember { listOf(7, 14, 30, 60) }
-    val allowedBucketSizes = remember { listOf(30, 60) }
+    val allowedBucketSizes = remember { listOf(15, 30, 60) }
 
     var dailyProfileDays by remember {
         mutableStateOf(
@@ -480,6 +481,16 @@ fun MainScreen(
             )
         )
     }
+    var dailyProfileObjectiveGain by remember {
+        mutableStateOf(
+            dailyProfilePrefs.getFloat("objective_gain", 1.0f)
+                .toDouble()
+                .takeIf { it.isFinite() && it > 0.0 }
+                ?.coerceIn(0.5, 3.0)
+                ?: 1.0
+        )
+    }
+    var showDailyProfileSettings by remember { mutableStateOf(false) }
     var dailyProfileState by remember { mutableStateOf<DailyTremorProfile?>(null) }
     var isDailyProfileLoading by remember { mutableStateOf(false) }
     var dailyProfileError by remember { mutableStateOf<String?>(null) }
@@ -502,12 +513,13 @@ fun MainScreen(
         }
     }
 
-    LaunchedEffect(dailyProfileDays, dailyProfileBucketMinutes, dailyProfileOverlayMode, dailyProfileSeriesMode) {
+    LaunchedEffect(dailyProfileDays, dailyProfileBucketMinutes, dailyProfileOverlayMode, dailyProfileSeriesMode, dailyProfileObjectiveGain) {
         dailyProfilePrefs.edit()
             .putInt("days", dailyProfileDays)
             .putInt("bucket_minutes", dailyProfileBucketMinutes)
             .putString("overlay_mode", dailyProfileOverlayMode.name)
             .putString("series_mode", dailyProfileSeriesMode.name)
+            .putFloat("objective_gain", dailyProfileObjectiveGain.toFloat())
             .apply()
     }
 
@@ -1249,25 +1261,41 @@ fun MainScreen(
             dailyProfileState != null -> {
                 DailyTremorProfileCard(
                     profile = dailyProfileState!!,
-                    selectedDays = dailyProfileDays,
-                    selectedBucketMinutes = dailyProfileBucketMinutes,
-                    selectedOverlayMode = dailyProfileOverlayMode,
                     selectedSeriesMode = dailyProfileSeriesMode,
-                    onDaysSelected = { selected ->
-                        dailyProfileDays = selected.coerceIn(7, 60)
-                    },
-                    onBucketMinutesSelected = { selected ->
-                        if (selected == 30 || selected == 60) {
-                            dailyProfileBucketMinutes = selected
-                        }
-                    },
-                    onOverlayModeSelected = { selected ->
-                        dailyProfileOverlayMode = selected
-                    },
-                    onSeriesModeSelected = { selected ->
-                        dailyProfileSeriesMode = selected
-                    }
+                    objectiveGain = dailyProfileObjectiveGain,
+                    onOpenSettings = { showDailyProfileSettings = true }
                 )
+
+                if (showDailyProfileSettings) {
+                    DailyTremorProfileSettingsDialog(
+                        profile = dailyProfileState,
+                        isLoading = isDailyProfileLoading,
+                        selectedDays = dailyProfileDays,
+                        selectedBucketMinutes = dailyProfileBucketMinutes,
+                        selectedSeriesMode = dailyProfileSeriesMode,
+                        objectiveGain = dailyProfileObjectiveGain,
+                        allowedDayWindows = allowedDayWindows,
+                        allowedBucketSizes = allowedBucketSizes,
+                        onDaysSelected = { selected ->
+                            dailyProfileDays = selected.coerceIn(allowedDayWindows.first(), allowedDayWindows.last())
+                        },
+                        onBucketMinutesSelected = { selected ->
+                            if (selected in allowedBucketSizes) {
+                                dailyProfileBucketMinutes = selected
+                            }
+                        },
+                        onSeriesModeSelected = { selected ->
+                            dailyProfileSeriesMode = selected
+                        },
+                        onObjectiveGainChanged = { gain ->
+                            dailyProfileObjectiveGain = gain
+                                .takeIf { it.isFinite() && it > 0.0 }
+                                ?.coerceIn(0.5, 3.0)
+                                ?: 1.0
+                        },
+                        onDismiss = { showDailyProfileSettings = false }
+                    )
+                }
             }
 
             else -> {

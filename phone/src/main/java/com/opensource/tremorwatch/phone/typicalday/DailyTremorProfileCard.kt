@@ -7,16 +7,25 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -36,6 +45,8 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.max
@@ -44,18 +55,11 @@ import kotlin.math.roundToInt
 @Composable
 fun DailyTremorProfileCard(
     profile: DailyTremorProfile,
-    selectedDays: Int,
-    selectedBucketMinutes: Int,
-    selectedOverlayMode: SubjectiveOverlayMode,
     selectedSeriesMode: DailyProfileSeriesMode,
-    onDaysSelected: (Int) -> Unit,
-    onBucketMinutesSelected: (Int) -> Unit,
-    onOverlayModeSelected: (SubjectiveOverlayMode) -> Unit,
-    onSeriesModeSelected: (DailyProfileSeriesMode) -> Unit,
+    objectiveGain: Double,
+    onOpenSettings: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val dayOptions = listOf(7, 14, 30, 60)
-    val bucketOptions = listOf(30, 60)
     val showObjective = selectedSeriesMode != DailyProfileSeriesMode.SUBJECTIVE_ONLY
     val showSubjective = profile.config.includeSubjective && selectedSeriesMode != DailyProfileSeriesMode.OBJECTIVE_ONLY
     val chartAxis = resolveChartAxis(profile, showObjective = showObjective, showSubjective = showSubjective)
@@ -68,85 +72,33 @@ fun DailyTremorProfileCard(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
-            Text(
-                text = "Daily Tremor Profile",
-                style = MaterialTheme.typography.titleMedium
-            )
-            Text(
-                text = "Sensor vs self-rating trend comparison",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-
-            Spacer(modifier = Modifier.height(10.dp))
-
-            Text(
-                text = "Window",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                dayOptions.forEach { days ->
-                    FilterChip(
-                        selected = selectedDays == days,
-                        onClick = { onDaysSelected(days) },
-                        label = { Text("${days}d") }
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Daily Tremor Profile",
+                        style = MaterialTheme.typography.titleMedium
+                    )
+                    Text(
+                        text = "Sensor vs self-rating trend comparison",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text(
+                        text = "${profile.config.days}d \u00b7 ${profile.config.bucketMinutes}m",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
-            }
 
-            Spacer(modifier = Modifier.height(8.dp))
-
-            Text(
-                text = "Bucket",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                bucketOptions.forEach { minutes ->
-                    FilterChip(
-                        selected = selectedBucketMinutes == minutes,
-                        onClick = { onBucketMinutesSelected(minutes) },
-                        label = { Text("${minutes}m") }
-                    )
-                }
-            }
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            Text(
-                text = "Show",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                listOf(
-                    DailyProfileSeriesMode.BOTH to "Both",
-                    DailyProfileSeriesMode.OBJECTIVE_ONLY to "Sensor",
-                    DailyProfileSeriesMode.SUBJECTIVE_ONLY to "Self"
-                ).forEach { (mode, label) ->
-                    val enabled = when (mode) {
-                        DailyProfileSeriesMode.SUBJECTIVE_ONLY -> profile.config.includeSubjective
-                        else -> true
-                    }
-                    FilterChip(
-                        selected = selectedSeriesMode == mode,
-                        onClick = {
-                            if (enabled) {
-                                onSeriesModeSelected(mode)
-                            }
-                        },
-                        enabled = enabled,
-                        label = { Text(label) }
+                IconButton(onClick = onOpenSettings) {
+                    Icon(
+                        imageVector = Icons.Filled.Settings,
+                        contentDescription = "Daily Tremor Profile settings",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
             }
@@ -158,6 +110,7 @@ fun DailyTremorProfileCard(
                 axis = chartAxis,
                 showObjective = showObjective,
                 showSubjective = showSubjective,
+                objectiveGain = objectiveGain,
                 onBucketTapped = { tappedIndex ->
                     selectedBucketIndex = tappedIndex
                 }
@@ -264,8 +217,219 @@ fun DailyTremorProfileCard(
             BucketDetailsDialog(
                 profile = profile,
                 bucketIndex = index,
+                objectiveGain = objectiveGain,
                 onDismiss = { selectedBucketIndex = null }
             )
+        }
+    }
+}
+
+@Composable
+fun DailyTremorProfileSettingsDialog(
+    profile: DailyTremorProfile?,
+    isLoading: Boolean,
+    selectedDays: Int,
+    selectedBucketMinutes: Int,
+    selectedSeriesMode: DailyProfileSeriesMode,
+    objectiveGain: Double,
+    allowedDayWindows: List<Int>,
+    allowedBucketSizes: List<Int>,
+    onDaysSelected: (Int) -> Unit,
+    onBucketMinutesSelected: (Int) -> Unit,
+    onSeriesModeSelected: (DailyProfileSeriesMode) -> Unit,
+    onObjectiveGainChanged: (Double) -> Unit,
+    onDismiss: () -> Unit
+) {
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Card(
+            modifier = Modifier.fillMaxSize(),
+            shape = RoundedCornerShape(0.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.background)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(16.dp)
+                    .verticalScroll(rememberScrollState())
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Daily Tremor Profile Settings",
+                        style = MaterialTheme.typography.titleLarge
+                    )
+                    IconButton(onClick = onDismiss) {
+                        Icon(
+                            imageVector = Icons.Filled.Close,
+                            contentDescription = "Close"
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                Text(
+                    text = "Preview",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+
+                if (profile != null) {
+                    val showObjective = selectedSeriesMode != DailyProfileSeriesMode.SUBJECTIVE_ONLY
+                    val showSubjective =
+                        profile.config.includeSubjective && selectedSeriesMode != DailyProfileSeriesMode.OBJECTIVE_ONLY
+                    val axis = resolveChartAxis(profile, showObjective = showObjective, showSubjective = showSubjective)
+
+                    DailyTremorProfileChart(
+                        profile = profile,
+                        axis = axis,
+                        showObjective = showObjective,
+                        showSubjective = showSubjective,
+                        objectiveGain = objectiveGain,
+                        onBucketTapped = {},
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                } else {
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                    ) {
+                        Column(modifier = Modifier.padding(16.dp)) {
+                            Text(
+                                text = if (isLoading) "Loading preview..." else "Preview unavailable",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                Text(
+                    text = "Window",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    allowedDayWindows.forEach { days ->
+                        FilterChip(
+                            selected = selectedDays == days,
+                            onClick = { onDaysSelected(days) },
+                            label = { Text("${days}d") }
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                Text(
+                    text = "Bucket",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    allowedBucketSizes.forEach { minutes ->
+                        FilterChip(
+                            selected = selectedBucketMinutes == minutes,
+                            onClick = { onBucketMinutesSelected(minutes) },
+                            label = { Text("${minutes}m") }
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                Text(
+                    text = "Show",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    listOf(
+                        DailyProfileSeriesMode.BOTH to "Both",
+                        DailyProfileSeriesMode.OBJECTIVE_ONLY to "Sensor",
+                        DailyProfileSeriesMode.SUBJECTIVE_ONLY to "Self"
+                    ).forEach { (mode, label) ->
+                        val enabled = when (mode) {
+                            DailyProfileSeriesMode.SUBJECTIVE_ONLY -> profile?.config?.includeSubjective == true
+                            else -> true
+                        }
+                        FilterChip(
+                            selected = selectedSeriesMode == mode,
+                            onClick = {
+                                if (enabled) {
+                                    onSeriesModeSelected(mode)
+                                }
+                            },
+                            enabled = enabled,
+                            label = { Text(label) }
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Sensor weighting",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Text(
+                            text = "Scales the sensor Tremor Index for display only. Raw exports are unchanged.",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    TextButton(onClick = { onObjectiveGainChanged(1.0) }) {
+                        Text("Reset")
+                    }
+                }
+
+                val gainValue = objectiveGain
+                    .takeIf { it.isFinite() && it > 0.0 }
+                    ?.toFloat()
+                    ?: 1.0f
+
+                Slider(
+                    value = gainValue.coerceIn(0.5f, 3.0f),
+                    onValueChange = { onObjectiveGainChanged(it.toDouble()) },
+                    valueRange = 0.5f..3.0f
+                )
+
+                Text(
+                    text = "Current: x${String.format(Locale.US, "%.2f", gainValue)}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                Spacer(modifier = Modifier.height(16.dp))
+            }
         }
     }
 }
@@ -338,6 +502,7 @@ private fun DailyTremorProfileChart(
     axis: ChartAxis,
     showObjective: Boolean,
     showSubjective: Boolean,
+    objectiveGain: Double,
     onBucketTapped: (Int) -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -346,6 +511,18 @@ private fun DailyTremorProfileChart(
     val objectiveBand = objectiveColor.copy(alpha = 0.14f)
     val gridColor = Color(0xFF4A5A6A)
     val chartBackground = Color(0xFF1E2836)
+
+    val safeGain = objectiveGain.takeIf { it.isFinite() && it > 0.0 } ?: 1.0
+    fun applyGain(value: Double?): Double? {
+        if (value == null) return null
+        return (value * safeGain).coerceIn(0.0, 10.0)
+    }
+
+    val lowCoverageMask = profile.buckets.map { it.lowDayCoverageFlag }
+
+    val objMed = profile.objectiveMedianSmoothed.map(::applyGain)
+    val objQ1 = profile.objectiveQ1Smoothed.map(::applyGain)
+    val objQ3 = profile.objectiveQ3Smoothed.map(::applyGain)
 
     Canvas(
         modifier = modifier
@@ -392,29 +569,46 @@ private fun DailyTremorProfileChart(
         }
 
         if (showObjective) {
-            contiguousBandSegments(profile.objectiveQ1Smoothed, profile.objectiveQ3Smoothed).forEach { segment ->
-                val path = Path()
-                val start = segment.first
-                path.moveTo(xFor(start), yFor(profile.objectiveQ3Smoothed[start]!!))
+            val highQ1 = objQ1.mapIndexed { index, value -> if (!lowCoverageMask[index]) value else null }
+            val highQ3 = objQ3.mapIndexed { index, value -> if (!lowCoverageMask[index]) value else null }
+            val lowQ1 = objQ1.mapIndexed { index, value -> if (lowCoverageMask[index]) value else null }
+            val lowQ3 = objQ3.mapIndexed { index, value -> if (lowCoverageMask[index]) value else null }
 
-                for (i in (start + 1)..segment.last) {
-                    path.lineTo(xFor(i), yFor(profile.objectiveQ3Smoothed[i]!!))
-                }
-                for (i in segment.last downTo segment.first) {
-                    path.lineTo(xFor(i), yFor(profile.objectiveQ1Smoothed[i]!!))
-                }
-                path.close()
+            drawObjectiveBand(
+                q1 = highQ1,
+                q3 = highQ3,
+                xFor = ::xFor,
+                yFor = ::yFor,
+                color = objectiveBand
+            )
+            drawObjectiveBand(
+                q1 = lowQ1,
+                q3 = lowQ3,
+                xFor = ::xFor,
+                yFor = ::yFor,
+                color = objectiveBand.copy(alpha = 0.06f)
+            )
 
-                drawPath(path = path, color = objectiveBand)
-            }
+            val highMed = objMed.mapIndexed { index, value -> if (!lowCoverageMask[index]) value else null }
+            val lowMed = objMed.mapIndexed { index, value -> if (lowCoverageMask[index]) value else null }
 
             drawSegmentedLine(
-                values = profile.objectiveMedianSmoothed,
+                values = highMed,
                 xFor = ::xFor,
                 yFor = ::yFor,
                 color = objectiveColor,
                 dashed = false,
-                strokeWidth = 3f
+                strokeWidth = 3f,
+                gapBridgeAlpha = 0.22f
+            )
+            drawSegmentedLine(
+                values = lowMed,
+                xFor = ::xFor,
+                yFor = ::yFor,
+                color = objectiveColor.copy(alpha = 0.32f),
+                dashed = false,
+                strokeWidth = 2.5f,
+                gapBridgeAlpha = 0.18f
             )
         }
 
@@ -425,7 +619,8 @@ private fun DailyTremorProfileChart(
                 yFor = ::yFor,
                 color = subjectiveColor,
                 dashed = true,
-                strokeWidth = 3.5f
+                strokeWidth = 3.5f,
+                gapBridgeAlpha = 0.22f
             )
 
             profile.subjectiveSmoothed.forEachIndexed { index, value ->
@@ -452,13 +647,25 @@ private fun DailyTremorProfileChart(
 private fun BucketDetailsDialog(
     profile: DailyTremorProfile,
     bucketIndex: Int,
+    objectiveGain: Double,
     onDismiss: () -> Unit
 ) {
     val bucket = profile.buckets[bucketIndex]
+
+    val safeGain = objectiveGain.takeIf { it.isFinite() && it > 0.0 } ?: 1.0
+    fun applyGain(value: Double?): Double? {
+        if (value == null) return null
+        return (value * safeGain).coerceIn(0.0, 10.0)
+    }
+
+    val objectiveMedian = applyGain(bucket.objectiveMedian)
+    val objectiveQ1 = applyGain(bucket.objectiveQ1)
+    val objectiveQ3 = applyGain(bucket.objectiveQ3)
+
     val displaySubjective = bucket.subjectiveMean
 
-    val perceptionGap = if (bucket.objectiveMedian != null && displaySubjective != null) {
-        displaySubjective - bucket.objectiveMedian
+    val perceptionGap = if (objectiveMedian != null && displaySubjective != null) {
+        displaySubjective - objectiveMedian
     } else {
         null
     }
@@ -483,11 +690,11 @@ private fun BucketDetailsDialog(
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text(
-                    text = "Sensor typical (p50 when present): ${formatValue(bucket.objectiveMedian, 2)} / 10",
+                    text = "Sensor typical (p50 when present): ${formatValue(objectiveMedian, 2)} / 10",
                     style = MaterialTheme.typography.bodySmall
                 )
                 Text(
-                    text = "Sensor typical range (p25-p75): ${formatValue(bucket.objectiveQ1, 2)} - ${formatValue(bucket.objectiveQ3, 2)} / 10",
+                    text = "Sensor typical range (p25-p75): ${formatValue(objectiveQ1, 2)} - ${formatValue(objectiveQ3, 2)} / 10",
                     style = MaterialTheme.typography.bodySmall
                 )
                 Text(
@@ -547,7 +754,8 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawSegmentedLine(
     yFor: (Double) -> Float,
     color: Color,
     dashed: Boolean,
-    strokeWidth: Float
+    strokeWidth: Float,
+    gapBridgeAlpha: Float? = null
 ) {
     var segmentStart = -1
 
@@ -578,6 +786,76 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawSegmentedLine(
             drawSegment(segmentStart, segmentEnd)
             segmentStart = -1
         }
+    }
+
+    val bridgeAlpha = gapBridgeAlpha
+    if (bridgeAlpha != null && bridgeAlpha > 0f) {
+        drawGapBridges(
+            values = values,
+            xFor = xFor,
+            yFor = yFor,
+            color = color.copy(alpha = (color.alpha * bridgeAlpha).coerceIn(0f, 1f)),
+            dashed = dashed,
+            strokeWidth = (strokeWidth * 0.9f).coerceAtLeast(1.6f)
+        )
+    }
+}
+
+private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawGapBridges(
+    values: List<Double?>,
+    xFor: (Int) -> Float,
+    yFor: (Double) -> Float,
+    color: Color,
+    dashed: Boolean,
+    strokeWidth: Float
+) {
+    var prevIndex: Int? = null
+    var prevValue: Double? = null
+
+    values.forEachIndexed { index, value ->
+        if (value == null) return@forEachIndexed
+
+        val pi = prevIndex
+        val pv = prevValue
+        if (pi != null && pv != null && index - pi > 1) {
+            val path = Path()
+            path.moveTo(xFor(pi), yFor(pv))
+            path.lineTo(xFor(index), yFor(value))
+            drawPath(
+                path = path,
+                color = color,
+                style = Stroke(
+                    width = strokeWidth,
+                    pathEffect = if (dashed) PathEffect.dashPathEffect(floatArrayOf(8f, 10f), 0f) else null
+                )
+            )
+        }
+        prevIndex = index
+        prevValue = value
+    }
+}
+
+private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawObjectiveBand(
+    q1: List<Double?>,
+    q3: List<Double?>,
+    xFor: (Int) -> Float,
+    yFor: (Double) -> Float,
+    color: Color
+) {
+    contiguousBandSegments(q1, q3).forEach { segment ->
+        val path = Path()
+        val start = segment.first
+        path.moveTo(xFor(start), yFor(q3[start]!!))
+
+        for (i in (start + 1)..segment.last) {
+            path.lineTo(xFor(i), yFor(q3[i]!!))
+        }
+        for (i in segment.last downTo segment.first) {
+            path.lineTo(xFor(i), yFor(q1[i]!!))
+        }
+        path.close()
+
+        drawPath(path = path, color = color)
     }
 }
 
