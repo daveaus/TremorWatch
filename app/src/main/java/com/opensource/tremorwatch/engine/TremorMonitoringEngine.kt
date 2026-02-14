@@ -28,7 +28,8 @@ import kotlin.math.sqrt
 class TremorMonitoringEngine(
     private val baselineManager: BaselineManager? = null,
     private val onBatchReady: (List<TremorData>) -> Unit,
-    private val onWearStateChanged: (Boolean) -> Unit
+    private val onWearStateChanged: (Boolean) -> Unit,
+    private val onSampleReady: ((TremorData) -> Unit)? = null
 ) : SensorEventListener {
 
     /**
@@ -778,7 +779,15 @@ class TremorMonitoringEngine(
             isReliableMeasurement = activityAdjustment.isReliable,
             excludeFromAnalysis = activityAdjustment.excludeFromAnalysis
         )
-        
+
+        // Provide the persisted 1 Hz sample to the service layer (e.g., calibration capture).
+        // This must not affect core monitoring behavior if the callback misbehaves.
+        try {
+            onSampleReady?.invoke(tremorData)
+        } catch (e: Exception) {
+            Timber.w(e, "onSampleReady callback failed")
+        }
+         
         // Synchronized access to buffer for thread safety
         synchronized(dataBuffer) {
             dataBuffer.add(tremorData)

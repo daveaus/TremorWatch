@@ -199,10 +199,10 @@ class WatchDataSender(private val context: Context) {
      */
     private suspend fun sendBatchToNode(batch: TremorBatch, node: Node): Boolean {
         return withContext(Dispatchers.IO) {
-            var attemptNumber = 0
-            var lastError: Exception? = null
+            val channelSender = WatchChannelSender(context)
+            var lastError: Throwable? = null
 
-            while (attemptNumber <= Constants.MAX_SEND_RETRIES) {
+            for (attemptNumber in 0..Constants.MAX_SEND_RETRIES) {
                 try {
                     if (attemptNumber > 0) {
                         val delayMs = calculateBackoffDelay(attemptNumber)
@@ -212,23 +212,26 @@ class WatchDataSender(private val context: Context) {
 
                     // Use ChannelClient for all batch sizes
                     // Eliminates manual chunking and provides better flow control
-                    val channelSender = WatchChannelSender(context)
                     val success = channelSender.sendBatch(batch, node)
 
                     if (success) {
                         return@withContext true
                     }
 
-                } catch (e: Exception) {
-                    lastError = e
+                } catch (t: Throwable) {
+                    if (t is CancellationException) throw t
+                    lastError = t
                     if (attemptNumber < Constants.MAX_SEND_RETRIES) {
-                        Log.w(TAG, "Attempt ${attemptNumber + 1} failed for batch ${batch.batchId}: ${e.message}")
+                        Log.w(TAG, "Attempt ${attemptNumber + 1} threw for batch ${batch.batchId}: ${t.message}")
                     }
-                    attemptNumber++
                 }
             }
 
-            Log.e(TAG, "Failed to send batch ${batch.batchId} after ${Constants.MAX_SEND_RETRIES + 1} attempts", lastError)
+            Log.e(
+                TAG,
+                "Failed to send batch ${batch.batchId} after ${Constants.MAX_SEND_RETRIES + 1} attempts",
+                lastError
+            )
             false
         }
     }

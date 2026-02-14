@@ -891,41 +891,6 @@ class TremorService : LifecycleService(), SensorEventListener {
                 // Immediately attempt to send pending batches to phone
                 // This avoids waiting for the next upload alarm (which could be 60 min away)
                 retryFailedUploads(forceUpload = false)
-
-                // If calibration is active, record samples for subjective rating calibration
-                if (::calibrationCaptureManager.isInitialized && calibrationCaptureManager.isCapturing()) {
-                    for (data in batch) {
-                        val sample = CalibrationSample(
-                            timestamp = data.timestamp,
-                            x = data.x,
-                            y = data.y,
-                            z = data.z,
-                            magnitude = data.magnitude,
-                            accelMagnitude = data.accelMagnitude,
-                            dominantFrequency = data.dominantFrequency,
-                            tremorBandPower = data.tremorBandPower,
-                            totalPower = data.totalPower,
-                            bandRatio = data.bandRatio,
-                            peakProminence = data.peakProminence,
-                            confidence = data.confidence,
-                            severity = data.severity.toDouble(),
-                            baselineMultiplier = data.baselineMultiplier,
-                            tremorType = data.tremorType,
-                            tremorTypeConfidence = data.tremorTypeConfidence,
-                            isRestingState = data.isRestingState,
-                            activityType = data.activityType,
-                            activityConfidence = data.activityConfidence,
-                            activityAgeMs = data.activityAgeMs,
-                            activityAdjustedConfidence = data.activityAdjustedConfidence,
-                            activityAdjustedSeverity = data.activityAdjustedSeverity,
-                            isReliableMeasurement = data.isReliableMeasurement,
-                            excludeFromAnalysis = data.excludeFromAnalysis,
-                            isWorn = data.isWorn,
-                            isCharging = data.isCharging
-                        )
-                        calibrationCaptureManager.recordSample(sample)
-                    }
-                }
             },
             onWearStateChanged = { isWorn ->
                 // Called when wear state changes
@@ -947,6 +912,41 @@ class TremorService : LifecycleService(), SensorEventListener {
                             Timber.d("Diagnostic event sent: ${if (isWorn) "watch_worn" else "watch_offbody"}")
                         }
                     }
+                }
+            }
+            ,
+            onSampleReady = { data ->
+                // Calibration capture is time-bounded and must not depend on batch boundaries (10 min).
+                if (::calibrationCaptureManager.isInitialized && calibrationCaptureManager.isCapturing()) {
+                    val sample = CalibrationSample(
+                        timestamp = data.timestamp,
+                        x = data.x,
+                        y = data.y,
+                        z = data.z,
+                        magnitude = data.magnitude,
+                        accelMagnitude = data.accelMagnitude,
+                        dominantFrequency = data.dominantFrequency,
+                        tremorBandPower = data.tremorBandPower,
+                        totalPower = data.totalPower,
+                        bandRatio = data.bandRatio,
+                        peakProminence = data.peakProminence,
+                        confidence = data.confidence,
+                        severity = data.severity.toDouble(),
+                        baselineMultiplier = data.baselineMultiplier,
+                        tremorType = data.tremorType,
+                        tremorTypeConfidence = data.tremorTypeConfidence,
+                        isRestingState = data.isRestingState,
+                        activityType = data.activityType,
+                        activityConfidence = data.activityConfidence,
+                        activityAgeMs = data.activityAgeMs,
+                        activityAdjustedConfidence = data.activityAdjustedConfidence,
+                        activityAdjustedSeverity = data.activityAdjustedSeverity,
+                        isReliableMeasurement = data.isReliableMeasurement,
+                        excludeFromAnalysis = data.excludeFromAnalysis,
+                        isWorn = data.isWorn,
+                        isCharging = data.isCharging
+                    )
+                    calibrationCaptureManager.recordSample(sample)
                 }
             }
         )

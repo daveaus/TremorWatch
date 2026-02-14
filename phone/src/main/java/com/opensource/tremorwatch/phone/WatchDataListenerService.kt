@@ -16,11 +16,14 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeout
 import org.json.JSONObject
 import org.json.JSONArray
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
+import java.io.EOFException
 import java.io.File
+import java.io.InputStream
 import java.util.zip.GZIPInputStream
 import kotlin.math.abs
 
@@ -39,7 +42,22 @@ class WatchDataListenerService : WearableListenerService() {
     companion object {
         private const val TAG = "WatchDataListener"
         private const val CHUNK_TIMEOUT_MS = 300000L  // 5 minutes (was 1min) - watch retries with exponential backoff up to 30s
+        private const val CHANNEL_PATH_TREMOR_BATCH = "/tremor_batch_channel"
         private const val CHANNEL_PATH_CALIBRATION = "/calibration_file_channel"
+
+        private const val CHANNEL_READ_TIMEOUT_MS = 30_000L
+
+        // Compressed payload guardrails (defense in depth against corrupted framing / OOM).
+        private const val MAX_TREMOR_BATCH_COMPRESSED_BYTES = 1 * 1024 * 1024 // 1MB
+        private const val MAX_CALIBRATION_COMPRESSED_BYTES = 10 * 1024 * 1024 // 10MB
+
+        // Decompression output guardrails (protect against "zip bombs" / corrupt payloads).
+        private const val MAX_TREMOR_BATCH_DECOMPRESSED_BYTES = 5 * 1024 * 1024 // 5MB
+        private const val MAX_CALIBRATION_DECOMPRESSED_BYTES = 25 * 1024 * 1024 // 25MB
+
+        // Phone-side diagnostic event retention (events are best-effort telemetry, not user data).
+        private const val DIAG_MAX_EVENTS = 100
+        private const val DIAG_MAX_AGE_MS = 7L * 24 * 60 * 60 * 1000 // 7 days
     }
 
     // Coroutine scope for async operations
@@ -50,27 +68,6 @@ class WatchDataListenerService : WearableListenerService() {
 
     // Channel client for receiving batches via ChannelClient API
     private lateinit var channelClient: ChannelClient
-
-    // Explicit channel callback (WearableListenerService callbacks don't always work for channels)
-    private val channelCallback = object : ChannelClient.ChannelCallback() {
-        override fun onChannelOpened(channel: ChannelClient.Channel) {
-            Log.i(TAG, "★★★ ChannelCallback.onChannelOpened: ${channel.path}")
-
-            if (channel.path == "/tremor_batch_channel") {
-                serviceScope.launch(Dispatchers.IO) {
-                    handleChannelBatch(channel)
-                }
-            } else if (channel.path == CHANNEL_PATH_CALIBRATION) {
-                serviceScope.launch(Dispatchers.IO) {
-                    handleCalibrationChannel(channel)
-                }
-            }
-        }
-
-        override fun onChannelClosed(channel: ChannelClient.Channel, closeReason: Int, appSpecificErrorCode: Int) {
-            Log.i(TAG, "Channel closed: ${channel.path}, reason: $closeReason")
-        }
-    }
 
     // In-memory storage for partial chunks being assembled
     // Key: batchId, Value: ChunkAssembly
@@ -137,11 +134,6 @@ class WatchDataListenerService : WearableListenerService() {
         // Initialize channel client
         channelClient = Wearable.getChannelClient(this)
 
-        // CRITICAL: Register explicit channel callback
-        // WearableListenerService automatic callbacks don't reliably work for ChannelClient
-        channelClient.registerChannelCallback(channelCallback)
-        Log.i(TAG, "✓ Registered explicit ChannelCallback")
-
         // Load persisted chunk assemblies from disk
         loadChunkAssemblies()
 
@@ -152,14 +144,6 @@ class WatchDataListenerService : WearableListenerService() {
     override fun onDestroy() {
         super.onDestroy()
         Log.i(TAG, "WatchDataListenerService destroyed")
-
-        // Unregister channel callback
-        try {
-            channelClient.unregisterChannelCallback(channelCallback)
-            Log.d(TAG, "Unregistered ChannelCallback")
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed to unregister channel callback: ${e.message}")
-        }
 
         // Persist chunk assemblies to disk before service dies
         saveChunkAssemblies()
@@ -238,16 +222,64 @@ class WatchDataListenerService : WearableListenerService() {
      * This is the modern approach that eliminates manual chunking.
      */
     override fun onChannelOpened(channel: ChannelClient.Channel) {
-        Log.i(TAG, "★★★ Channel opened from watch: ${channel.path}")
+        Log.i(TAG, "onChannelOpened: ${channel.path}")
 
-        if (channel.path == "/tremor_batch_channel") {
-            serviceScope.launch(Dispatchers.IO) {
-                handleChannelBatch(channel)
+        when (channel.path) {
+            CHANNEL_PATH_TREMOR_BATCH -> {
+                serviceScope.launch(Dispatchers.IO) {
+                    handleChannelBatch(channel)
+                }
             }
-        } else if (channel.path == CHANNEL_PATH_CALIBRATION) {
-            serviceScope.launch(Dispatchers.IO) {
-                handleCalibrationChannel(channel)
+            CHANNEL_PATH_CALIBRATION -> {
+                serviceScope.launch(Dispatchers.IO) {
+                    handleCalibrationChannel(channel)
+                }
             }
+            else -> {
+                Log.w(TAG, "Unknown channel path: ${channel.path} (closing)")
+                serviceScope.launch(Dispatchers.IO) {
+                    try {
+                        channelClient.close(channel).await()
+                    } catch (_: Exception) {}
+                }
+            }
+        }
+    }
+
+    private fun InputStream.readFully(buffer: ByteArray) {
+        var offset = 0
+        while (offset < buffer.size) {
+            val read = read(buffer, offset, buffer.size - offset)
+            if (read == -1) {
+                throw EOFException("Unexpected EOF (needed ${buffer.size} bytes, got $offset)")
+            }
+            offset += read
+        }
+    }
+
+    private fun decompressDataWithLimit(data: ByteArray, maxOutputBytes: Int): ByteArray {
+        return try {
+            ByteArrayInputStream(data).use { bis ->
+                GZIPInputStream(bis).use { gzip ->
+                    ByteArrayOutputStream().use { bos ->
+                        val buffer = ByteArray(8 * 1024)
+                        while (true) {
+                            val len = gzip.read(buffer)
+                            if (len == -1) break
+                            if (bos.size() + len > maxOutputBytes) {
+                                throw IllegalStateException(
+                                    "Decompressed payload exceeded limit: ${bos.size() + len} > $maxOutputBytes"
+                                )
+                            }
+                            bos.write(buffer, 0, len)
+                        }
+                        bos.toByteArray()
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to decompress data: ${e.message}")
+            data // Return original if decompression fails
         }
     }
 
@@ -256,70 +288,45 @@ class WatchDataListenerService : WearableListenerService() {
      * Reads compressed batch data, decompresses, and processes it.
      */
     private suspend fun handleChannelBatch(channel: ChannelClient.Channel) {
+        var compressedData: ByteArray? = null
         try {
             Log.i(TAG, "Reading batch data from channel: ${channel.path}")
 
-            // Get input stream from channel
-            val inputStream = channelClient.getInputStream(channel).await()
+            compressedData = withTimeout(CHANNEL_READ_TIMEOUT_MS) {
+                channelClient.getInputStream(channel).await().use { input ->
+                    // Read length prefix (4 bytes, big-endian)
+                    val lengthBytes = ByteArray(4)
+                    input.readFully(lengthBytes)
+                    val dataLength = readInt(lengthBytes)
 
-            // Read length prefix (4 bytes, big-endian)
-            val lengthBytes = ByteArray(4)
-            val lengthRead = inputStream.read(lengthBytes)
-            if (lengthRead != 4) {
-                Log.e(TAG, "Failed to read length prefix from channel")
-                inputStream.close()
-                return
-            }
+                    if (dataLength <= 0 || dataLength > MAX_TREMOR_BATCH_COMPRESSED_BYTES) {
+                        Log.e(TAG, "Invalid tremor batch length prefix: $dataLength bytes")
+                        return@use null
+                    }
 
-            val dataLength = ((lengthBytes[0].toInt() and 0xFF) shl 24) or
-                    ((lengthBytes[1].toInt() and 0xFF) shl 16) or
-                    ((lengthBytes[2].toInt() and 0xFF) shl 8) or
-                    (lengthBytes[3].toInt() and 0xFF)
-
-            Log.d(TAG, "Reading $dataLength bytes of compressed data from channel")
-
-            // Read compressed data
-            val compressedData = ByteArray(dataLength)
-            var totalRead = 0
-            while (totalRead < dataLength) {
-                val bytesRead = inputStream.read(compressedData, totalRead, dataLength - totalRead)
-                if (bytesRead == -1) {
-                    Log.e(TAG, "Unexpected end of stream while reading channel data")
-                    inputStream.close()
-                    return
+                    val payload = ByteArray(dataLength)
+                    input.readFully(payload)
+                    payload
                 }
-                totalRead += bytesRead
-            }
-
-            // Close input stream
-            inputStream.close()
-
-            Log.d(TAG, "Read $totalRead bytes from channel, decompressing...")
-
-            // Decompress data
-            val jsonBytes = decompressData(compressedData)
-            val jsonString = String(jsonBytes, Charsets.UTF_8)
-
-            Log.d(TAG, "Decompressed to ${jsonBytes.size} bytes, parsing batch...")
-
-            // Parse and process batch
-            val batch = TremorBatch.fromJsonString(jsonString)
-            processBatch(batch)
-
-            Log.i(TAG, "✓ Successfully processed batch ${batch.batchId} from channel (${batch.samples.size} samples)")
-
-            // Close channel
-            channelClient.close(channel).await()
-            Log.d(TAG, "Channel closed")
-
+            } ?: return
         } catch (e: Exception) {
-            Log.e(TAG, "Error handling channel batch: ${e.message}", e)
-            // Try to close channel on error
+            Log.e(TAG, "Error reading channel batch: ${e.message}", e)
+            return
+        } finally {
+            // Close channel even on failure (double-close is fine; ignore errors).
             try {
                 channelClient.close(channel).await()
-            } catch (closeError: Exception) {
-                Log.w(TAG, "Failed to close channel after error: ${closeError.message}")
-            }
+            } catch (_: Exception) {}
+        }
+
+        try {
+            val jsonBytes = decompressDataWithLimit(compressedData, MAX_TREMOR_BATCH_DECOMPRESSED_BYTES)
+            val jsonString = String(jsonBytes, Charsets.UTF_8)
+            val batch = TremorBatch.fromJsonString(jsonString)
+            processBatch(batch)
+            Log.i(TAG, "✓ Successfully processed batch ${batch.batchId} from channel (${batch.samples.size} samples)")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error processing channel batch payload: ${e.message}", e)
         }
     }
 
@@ -333,83 +340,74 @@ class WatchDataListenerService : WearableListenerService() {
      * 4. GZIP compressed file data
      */
     private suspend fun handleCalibrationChannel(channel: ChannelClient.Channel) {
+        data class CalibrationPayload(
+            val filename: String,
+            val compressedData: ByteArray
+        )
+
+        var payload: CalibrationPayload? = null
         try {
             Log.i(TAG, "★ Receiving calibration file via channel: ${channel.path}")
 
-            val inputStream = channelClient.getInputStream(channel).await()
+            payload = withTimeout(CHANNEL_READ_TIMEOUT_MS) {
+                channelClient.getInputStream(channel).await().use { input ->
+                    // Read filename length (4 bytes, big-endian)
+                    val filenameLenBytes = ByteArray(4)
+                    input.readFully(filenameLenBytes)
+                    val filenameLen = readInt(filenameLenBytes)
+                    if (filenameLen <= 0 || filenameLen > 512) {
+                        Log.e(TAG, "Invalid calibration filename length: $filenameLen")
+                        return@use null
+                    }
 
-            // Read filename length (4 bytes, big-endian)
-            val filenameLenBytes = ByteArray(4)
-            if (inputStream.read(filenameLenBytes) != 4) {
-                Log.e(TAG, "Failed to read filename length from calibration channel")
-                inputStream.close()
-                return
-            }
-            val filenameLen = readInt(filenameLenBytes)
+                    // Read filename
+                    val filenameBytes = ByteArray(filenameLen)
+                    input.readFully(filenameBytes)
+                    val filename = String(filenameBytes, Charsets.UTF_8)
+                    Log.d(TAG, "Calibration filename: $filename")
 
-            // Read filename
-            val filenameBytes = ByteArray(filenameLen)
-            var totalRead = 0
-            while (totalRead < filenameLen) {
-                val bytesRead = inputStream.read(filenameBytes, totalRead, filenameLen - totalRead)
-                if (bytesRead == -1) break
-                totalRead += bytesRead
-            }
-            val filename = String(filenameBytes, Charsets.UTF_8)
-            Log.d(TAG, "Calibration filename: $filename")
+                    // Read compressed data length (4 bytes, big-endian)
+                    val dataLenBytes = ByteArray(4)
+                    input.readFully(dataLenBytes)
+                    val compressedLen = readInt(dataLenBytes)
+                    if (compressedLen <= 0 || compressedLen > MAX_CALIBRATION_COMPRESSED_BYTES) {
+                        Log.e(TAG, "Invalid calibration payload length: $compressedLen bytes")
+                        return@use null
+                    }
 
-            // Read compressed data length (4 bytes, big-endian)
-            val dataLenBytes = ByteArray(4)
-            if (inputStream.read(dataLenBytes) != 4) {
-                Log.e(TAG, "Failed to read data length from calibration channel")
-                inputStream.close()
-                return
-            }
-            val compressedLen = readInt(dataLenBytes)
+                    val compressedData = ByteArray(compressedLen)
+                    input.readFully(compressedData)
 
-            // Read compressed data
-            val compressedData = ByteArray(compressedLen)
-            totalRead = 0
-            while (totalRead < compressedLen) {
-                val bytesRead = inputStream.read(compressedData, totalRead, compressedLen - totalRead)
-                if (bytesRead == -1) break
-                totalRead += bytesRead
-            }
+                    CalibrationPayload(filename, compressedData)
+                }
+            } ?: return
+        } catch (e: Exception) {
+            Log.e(TAG, "Error reading calibration channel: ${e.message}", e)
+            return
+        } finally {
+            try {
+                channelClient.close(channel).await()
+            } catch (_: Exception) {}
+        }
 
-            inputStream.close()
-
-            Log.d(TAG, "Read $totalRead bytes of compressed calibration data")
-
-            // Decompress data
-            val calibrationData = decompressData(compressedData)
-            val calibrationJson = String(calibrationData, Charsets.UTF_8)
-
-            Log.i(TAG, "✓ Received calibration file: $filename (${calibrationData.size} bytes decompressed)")
+        try {
+            val decompressed = decompressDataWithLimit(payload.compressedData, MAX_CALIBRATION_DECOMPRESSED_BYTES)
+            val calibrationJson = String(decompressed, Charsets.UTF_8)
+            Log.i(TAG, "✓ Received calibration file: ${payload.filename} (${decompressed.size} bytes decompressed)")
 
             // Save to local calibration directory
             val calibrationDir = java.io.File(applicationContext.filesDir, "calibration")
             if (!calibrationDir.exists()) {
                 calibrationDir.mkdirs()
             }
-            val calibrationFile = java.io.File(calibrationDir, filename)
+            val calibrationFile = java.io.File(calibrationDir, payload.filename)
             calibrationFile.writeText(calibrationJson)
-
             Log.i(TAG, "✓ Saved calibration file to: ${calibrationFile.absolutePath}")
 
             // Parse JSONL file and insert calibration data into database
             parseCalibrationFileIntoDB(calibrationJson)
-
-            // Close channel
-            channelClient.close(channel).await()
-            Log.d(TAG, "Calibration channel closed")
-
         } catch (e: Exception) {
-            Log.e(TAG, "Error handling calibration channel: ${e.message}", e)
-            try {
-                channelClient.close(channel).await()
-            } catch (closeError: Exception) {
-                Log.w(TAG, "Failed to close channel after error: ${closeError.message}")
-            }
+            Log.e(TAG, "Error processing calibration payload: ${e.message}", e)
         }
     }
 
@@ -849,10 +847,45 @@ class WatchDataListenerService : WearableListenerService() {
             eventData.put("event_type", eventType)
             eventData.put("timestamp", timestamp)
             eventFile.writeText(eventData.toString())
-            
+
             Log.d(TAG, "Queued diagnostic event: $eventType")
+
+            // Always enforce retention so the queue can't grow unbounded when InfluxDB is
+            // unconfigured or the device is away from home network for long periods.
+            trimDiagnosticEventQueue(queueDir, maxEvents = DIAG_MAX_EVENTS, maxAgeMs = DIAG_MAX_AGE_MS)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to save diagnostic event to queue: ${e.message}", e)
+        }
+    }
+
+    private fun trimDiagnosticEventQueue(dir: File, maxEvents: Int, maxAgeMs: Long) {
+        try {
+            val now = System.currentTimeMillis()
+            val files = dir.listFiles { f ->
+                f.name.startsWith("event_") && f.name.endsWith(".json")
+            }?.toList() ?: return
+
+            // Delete by age first.
+            val remaining = ArrayList<File>(files.size)
+            for (f in files) {
+                val ageMs = now - f.lastModified()
+                if (ageMs > maxAgeMs) {
+                    f.delete()
+                } else {
+                    remaining.add(f)
+                }
+            }
+
+            // Enforce count by filename sort (timestamp prefix provides chronological order).
+            val excess = remaining.size - maxEvents
+            if (excess > 0) {
+                remaining
+                    .sortedBy { it.name }
+                    .take(excess)
+                    .forEach { it.delete() }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to trim diagnostic event queue: ${e.message}")
         }
     }
 

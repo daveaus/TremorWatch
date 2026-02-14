@@ -8,7 +8,9 @@ import com.google.android.gms.wearable.ChannelClient
 import com.google.android.gms.wearable.Node
 import com.google.android.gms.wearable.Wearable
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.tasks.await
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -33,9 +35,32 @@ class WatchChannelSender(private val context: Context) {
         private const val TAG = "WatchChannelSender"
         private const val CHANNEL_PATH_TREMOR_BATCH = "/tremor_batch_channel"
         private const val CHANNEL_PATH_CALIBRATION = "/calibration_file_channel"
+
+        private const val CHANNEL_OPEN_TIMEOUT_MS = 10_000L
+        private const val CHANNEL_STREAM_TIMEOUT_MS = 10_000L
+        private const val CHANNEL_CLOSE_TIMEOUT_MS = 5_000L
+        private const val NODE_CONNECTIVITY_CHECK_TIMEOUT_MS = 2_000L
     }
 
     private val channelClient: ChannelClient = Wearable.getChannelClient(context)
+
+    /**
+     * Best-effort check. Returns:
+     * - true: node is currently connected
+     * - false: node is not connected
+     * - null: unknown (API error/timeout); caller may still proceed and rely on openChannel timeout.
+     */
+    private suspend fun isNodeConnected(nodeId: String): Boolean? {
+        return try {
+            withTimeout(NODE_CONNECTIVITY_CHECK_TIMEOUT_MS) {
+                val nodes = Wearable.getNodeClient(context).connectedNodes.await()
+                nodes.any { it.id == nodeId }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Node connectivity check failed (continuing): ${e.message}")
+            null
+        }
+    }
 
     /**
      * Send a tremor batch to the phone via ChannelClient.
@@ -58,10 +83,19 @@ class WatchChannelSender(private val context: Context) {
             try {
                 Log.i(TAG, "Opening channel to send batch ${batch.batchId} (${batch.samples.size} samples)")
 
+                when (isNodeConnected(phoneNode.id)) {
+                    false -> {
+                        Log.w(TAG, "Phone node ${phoneNode.id} is not connected; aborting send")
+                        return@withContext false
+                    }
+                    true -> Unit
+                    null -> Unit
+                }
+
                 // Open channel to phone
-                channelToken = channelClient
-                    .openChannel(phoneNode.id, CHANNEL_PATH_TREMOR_BATCH)
-                    .await()
+                channelToken = withTimeout(CHANNEL_OPEN_TIMEOUT_MS) {
+                    channelClient.openChannel(phoneNode.id, CHANNEL_PATH_TREMOR_BATCH).await()
+                }
 
                 Log.d(TAG, "Channel opened: ${channelToken.path}")
 
@@ -73,53 +107,43 @@ class WatchChannelSender(private val context: Context) {
                 Log.d(TAG, "Batch ${batch.batchId}: ${jsonBytes.size} bytes -> ${compressedData.size} bytes compressed (${(compressedData.size * 100 / jsonBytes.size)}%)")
 
                 // Get output stream and write data
-                val outputStream = channelClient.getOutputStream(channelToken!!).await()
-                outputStream.use { stream ->
-                    // Write length prefix (4 bytes, big-endian)
-                    val lengthBytes = ByteArray(4)
-                    lengthBytes[0] = (compressedData.size shr 24).toByte()
-                    lengthBytes[1] = (compressedData.size shr 16).toByte()
-                    lengthBytes[2] = (compressedData.size shr 8).toByte()
-                    lengthBytes[3] = compressedData.size.toByte()
-                    stream.write(lengthBytes)
+                withTimeout(CHANNEL_STREAM_TIMEOUT_MS) {
+                    val outputStream = channelClient.getOutputStream(channelToken).await()
+                    outputStream.use { stream ->
+                        // Write length prefix (4 bytes, big-endian)
+                        writeInt(stream, compressedData.size)
 
-                    // Write compressed data
-                    stream.write(compressedData)
-                    stream.flush()
+                        // Write compressed data
+                        stream.write(compressedData)
+                        stream.flush()
+                    }
                 }
 
                 Log.i(TAG, "✓ Successfully sent batch ${batch.batchId} via channel")
-
-                // Close channel
-                if (channelToken != null) {
-                    channelClient.close(channelToken).await()
-                }
-
                 true
 
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
             } catch (e: IOException) {
                 Log.e(TAG, "✗ IO error sending batch ${batch.batchId}: ${e.message}", e)
-                // Close channel on error
-                try {
-                    if (channelToken != null) {
-                        channelClient.close(channelToken).await()
-                    }
-                } catch (closeError: Exception) {
-                    Log.w(TAG, "Failed to close channel after error: ${closeError.message}")
-                }
                 false
 
             } catch (e: Exception) {
                 Log.e(TAG, "✗ Error sending batch ${batch.batchId}: ${e.message}", e)
-                // Close channel on error
-                try {
-                    if (channelToken != null) {
-                        channelClient.close(channelToken).await()
-                    }
-                } catch (closeError: Exception) {
-                    Log.w(TAG, "Failed to close channel after error: ${closeError.message}")
-                }
                 false
+            } finally {
+                // Always attempt to close the channel token to release resources.
+                channelToken?.let { token ->
+                    withContext(NonCancellable) {
+                        try {
+                            withTimeout(CHANNEL_CLOSE_TIMEOUT_MS) {
+                                channelClient.close(token).await()
+                            }
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Channel close failed: ${e.message}")
+                        }
+                    }
+                }
             }
         }
     }
@@ -144,10 +168,19 @@ class WatchChannelSender(private val context: Context) {
             try {
                 Log.i(TAG, "Opening calibration channel to send file: ${file.name} (${file.length()} bytes)")
 
+                when (isNodeConnected(phoneNode.id)) {
+                    false -> {
+                        Log.w(TAG, "Phone node ${phoneNode.id} is not connected; aborting calibration file send")
+                        return@withContext false
+                    }
+                    true -> Unit
+                    null -> Unit
+                }
+
                 // Open channel to phone
-                channelToken = channelClient
-                    .openChannel(phoneNode.id, CHANNEL_PATH_CALIBRATION)
-                    .await()
+                channelToken = withTimeout(CHANNEL_OPEN_TIMEOUT_MS) {
+                    channelClient.openChannel(phoneNode.id, CHANNEL_PATH_CALIBRATION).await()
+                }
 
                 Log.d(TAG, "Calibration channel opened: ${channelToken.path}")
 
@@ -158,46 +191,49 @@ class WatchChannelSender(private val context: Context) {
                 Log.d(TAG, "Calibration file ${file.name}: ${fileBytes.size} bytes -> ${compressedData.size} bytes compressed")
 
                 // Get output stream and write data with protocol header
-                val outputStream = channelClient.getOutputStream(channelToken!!).await()
-                outputStream.use { stream ->
-                    // Write filename length (4 bytes, big-endian)
-                    val filenameBytes = file.name.toByteArray(Charsets.UTF_8)
-                    writeInt(stream, filenameBytes.size)
+                withTimeout(CHANNEL_STREAM_TIMEOUT_MS) {
+                    val outputStream = channelClient.getOutputStream(channelToken).await()
+                    outputStream.use { stream ->
+                        // Write filename length (4 bytes, big-endian)
+                        val filenameBytes = file.name.toByteArray(Charsets.UTF_8)
+                        writeInt(stream, filenameBytes.size)
 
-                    // Write filename
-                    stream.write(filenameBytes)
+                        // Write filename
+                        stream.write(filenameBytes)
 
-                    // Write compressed data length (4 bytes, big-endian)
-                    writeInt(stream, compressedData.size)
+                        // Write compressed data length (4 bytes, big-endian)
+                        writeInt(stream, compressedData.size)
 
-                    // Write compressed data
-                    stream.write(compressedData)
-                    stream.flush()
+                        // Write compressed data
+                        stream.write(compressedData)
+                        stream.flush()
+                    }
                 }
 
                 Log.i(TAG, "✓ Successfully sent calibration file ${file.name} via channel")
-
-                // Close channel
-                channelClient.close(channelToken).await()
                 true
 
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
             } catch (e: IOException) {
                 Log.e(TAG, "✗ IO error sending calibration file ${file.name}: ${e.message}", e)
-                try {
-                    channelToken?.let { channelClient.close(it).await() }
-                } catch (closeError: Exception) {
-                    Log.w(TAG, "Failed to close channel after error: ${closeError.message}")
-                }
                 false
 
             } catch (e: Exception) {
                 Log.e(TAG, "✗ Error sending calibration file ${file.name}: ${e.message}", e)
-                try {
-                    channelToken?.let { channelClient.close(it).await() }
-                } catch (closeError: Exception) {
-                    Log.w(TAG, "Failed to close channel after error: ${closeError.message}")
-                }
                 false
+            } finally {
+                channelToken?.let { token ->
+                    withContext(NonCancellable) {
+                        try {
+                            withTimeout(CHANNEL_CLOSE_TIMEOUT_MS) {
+                                channelClient.close(token).await()
+                            }
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Channel close failed: ${e.message}")
+                        }
+                    }
+                }
             }
         }
     }

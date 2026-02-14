@@ -40,6 +40,7 @@ class CalibrationCaptureManager(private val context: Context) {
     private var currentWriter: BufferedWriter? = null
     private var currentFile: File? = null
     private val sampleCount = AtomicInteger(0)
+    private val writerLock = Any()
     
     // Callbacks for UI updates
     var onCaptureProgress: ((Int, Int, Float) -> Unit)? = null  // (samplesCollected, secondsRemaining, progress)
@@ -103,6 +104,13 @@ class CalibrationCaptureManager(private val context: Context) {
             onCaptureError?.invoke("Daily calibration limit reached")
             return false
         }
+
+        // Best-effort cleanup to prevent unbounded storage growth.
+        try {
+            cleanupOldFiles(maxAgeDays = 7)
+        } catch (e: Exception) {
+            Timber.w(e, "Failed to cleanup old calibration files (continuing)")
+        }
         
         currentRatingId = ratingId
         captureEndTime = System.currentTimeMillis() + (durationSeconds * 1000L)
@@ -163,7 +171,7 @@ class CalibrationCaptureManager(private val context: Context) {
         
         try {
             val line = json.encodeToString(sample)
-            synchronized(this) {
+            synchronized(writerLock) {
                 currentWriter?.write(line)
                 currentWriter?.newLine()
                 currentWriter?.flush()  // Flush after each sample for reliability
@@ -205,13 +213,15 @@ class CalibrationCaptureManager(private val context: Context) {
                 endTime = System.currentTimeMillis(),
                 totalSamples = count
             )
-            currentWriter?.write(json.encodeToString(footer))
-            currentWriter?.newLine()
-            currentWriter?.flush()
-            currentWriter?.close()
-            
+            synchronized(writerLock) {
+                currentWriter?.write(json.encodeToString(footer))
+                currentWriter?.newLine()
+                currentWriter?.flush()
+                currentWriter?.close()
+            }
+             
             Timber.i("Calibration capture complete: $count samples saved to ${file?.absolutePath}")
-            
+             
             if (file != null && file.exists()) {
                 onCaptureComplete?.invoke(file, count)
             }
@@ -228,7 +238,9 @@ class CalibrationCaptureManager(private val context: Context) {
         captureJob?.cancel()
         captureJob = null
         try {
-            currentWriter?.close()
+            synchronized(writerLock) {
+                currentWriter?.close()
+            }
         } catch (e: Exception) {
             // Ignore close errors
         }
@@ -265,6 +277,8 @@ class CalibrationCaptureManager(private val context: Context) {
                 onCaptureProgress?.invoke(sampleCount.get(), remaining, progress)
                 
                 if (remaining <= 0) {
+                    // Finalize capture even if no samples were recorded (recordSample() may never be called).
+                    stopCapture()
                     break
                 }
                 

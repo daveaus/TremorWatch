@@ -29,6 +29,12 @@ version020*.md
 todo.md
 improvements.md
 
+# Local notes/artifacts (not part of the repo)
+/currentissues.md
+/investigation_summary2.md
+/examples/
+/logs/
+
 
 # Syncthing
 .stfolder/
