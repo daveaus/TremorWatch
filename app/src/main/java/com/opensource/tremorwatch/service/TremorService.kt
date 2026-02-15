@@ -692,10 +692,12 @@ class TremorService : LifecycleService(), SensorEventListener {
             Timber.e("★★★ CRITICAL: WakeLock is NULL - this should never happen!")
             try {
                 val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+                // CF-3: Removed ON_AFTER_RELEASE flag, added setReferenceCounted(false)
                 wakeLock = powerManager.newWakeLock(
-                    PowerManager.PARTIAL_WAKE_LOCK or PowerManager.ON_AFTER_RELEASE,
+                    PowerManager.PARTIAL_WAKE_LOCK,
                     "TremorWatch::SensorWakeLock"
                 ).apply {
+                    setReferenceCounted(false)
                     acquire(WAKELOCK_TIMEOUT_MS)
                     Timber.w("WakeLock recreated with ${WAKELOCK_TIMEOUT_MS / 60000}min timeout")
                 }
@@ -834,13 +836,14 @@ class TremorService : LifecycleService(), SensorEventListener {
         createNotificationChannel()
 
         // Start foreground IMMEDIATELY - no delays, no complex logic
+        // CF-2: Changed from DATA_SYNC to HEALTH (continuous health monitoring with no timeout)
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 // Android 10+ requires service type
                 startForeground(
                     1,
                     buildNotification(),
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_HEALTH
                 )
             } else {
                 startForeground(1, buildNotification())
@@ -974,11 +977,15 @@ class TremorService : LifecycleService(), SensorEventListener {
         // Create wake lock for sensor monitoring (CRITICAL for Samsung devices)
         // BATTERY FIX: Create but don't acquire yet - will be acquired only if not paused.
         // updateMonitoringState() (called below via updateChargingState) will decide.
+        // CF-3: Removed ON_AFTER_RELEASE flag (causes 7+ min post-release CPU hold)
+        // CF-3: Added setReferenceCounted(false) to prevent double-release crashes
         val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
         wakeLock = powerManager.newWakeLock(
-            PowerManager.PARTIAL_WAKE_LOCK or PowerManager.ON_AFTER_RELEASE,
+            PowerManager.PARTIAL_WAKE_LOCK,
             "TremorWatch::SensorWakeLock"
-        )
+        ).apply {
+            setReferenceCounted(false)
+        }
 
         // Start periodic wakelock verification to fight Samsung FreecessController
         startWakeLockMonitor()

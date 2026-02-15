@@ -835,10 +835,20 @@ class UploadService : Service() {
         super.onDestroy()
         Log.i(TAG, "Upload service onDestroy called")
 
-        // Stop all handlers immediately to prevent timeout
-        handler.removeCallbacksAndMessages(null)
+        // OPT-1: Stop foreground FIRST to prevent FGS timeout during cleanup
+        // System FGS timeout ticks while 2-second executor shutdown runs
+        if (isRunningAsForeground) {
+            try {
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                isRunningAsForeground = false
+                Log.i(TAG, "Foreground service stopped")
+            } catch (e: Exception) {
+                Log.e(TAG, "Error stopping foreground service: ${e.message}")
+            }
+        }
 
-        // Cancel all coroutines
+        // THEN clean up resources
+        handler.removeCallbacksAndMessages(null)
         serviceScope.cancel()
 
         // Shutdown executor gracefully
@@ -849,17 +859,6 @@ class UploadService : Service() {
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error shutting down executor: ${e.message}")
-        }
-
-        // Stop foreground service immediately to prevent timeout exception
-        if (isRunningAsForeground) {
-            try {
-                stopForeground(STOP_FOREGROUND_REMOVE)
-                isRunningAsForeground = false
-                Log.i(TAG, "Foreground service stopped")
-            } catch (e: Exception) {
-                Log.e(TAG, "Error stopping foreground service: ${e.message}")
-            }
         }
 
         Log.i(TAG, "Upload service destroyed - service will restart automatically via START_STICKY")

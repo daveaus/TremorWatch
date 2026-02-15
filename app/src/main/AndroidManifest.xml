@@ -9,7 +9,8 @@
     <uses-permission android:name="com.google.android.gms.permission.ACTIVITY_RECOGNITION" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- CF-2: Changed from FOREGROUND_SERVICE_DATA_SYNC to HEALTH (continuous health monitoring) -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_HEALTH" />
 
     <!-- Haptic feedback for rating selection -->
     <uses-permission android:name="android.permission.VIBRATE" />
@@ -74,10 +75,11 @@
         </activity>
 
         <!-- ===== Foreground Tremor Service ===== -->
+        <!-- CF-2: Changed from dataSync to health (continuous sensor monitoring for tremor detection) -->
         <service
             android:name="com.opensource.tremorwatch.service.TremorService"
             android:exported="false"
-            android:foregroundServiceType="dataSync" />
+            android:foregroundServiceType="health" />
 
         <!-- ===== Watch Message Listener Service ===== -->
         <service

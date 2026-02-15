@@ -187,7 +187,8 @@ class MainActivity : AppCompatActivity() {
         windowInsetsController?.isAppearanceLightStatusBars = false
 
         requestBatteryOptimizationExclusion()
-        startPersistentUploadService()
+        // CF-1: Replaced persistent foreground UploadService with WorkManager
+        scheduleUploadWorker()
 
         setContent {
             TremorWatchPhoneTheme {
@@ -234,6 +235,41 @@ class MainActivity : AppCompatActivity() {
             }
         } catch (e: Exception) {
             android.util.Log.e("MainActivity", "Failed to start upload service: ${e.message}", e)
+        }
+    }
+
+    /**
+     * CF-1: Schedule periodic WorkManager upload worker to replace persistent UploadService.
+     * This eliminates ForegroundServiceDidNotStopInTimeException crashes while maintaining
+     * reliable background upload functionality.
+     */
+    private fun scheduleUploadWorker() {
+        try {
+            val constraints = androidx.work.Constraints.Builder()
+                .setRequiredNetworkType(androidx.work.NetworkType.CONNECTED)
+                .build()
+
+            val uploadWork = androidx.work.PeriodicWorkRequestBuilder<TremorUploadWorker>(
+                15, java.util.concurrent.TimeUnit.MINUTES,  // minimum periodic interval
+                5, java.util.concurrent.TimeUnit.MINUTES    // flex window
+            )
+                .setConstraints(constraints)
+                .setBackoffCriteria(
+                    androidx.work.BackoffPolicy.EXPONENTIAL,
+                    androidx.work.WorkRequest.MIN_BACKOFF_MILLIS,
+                    java.util.concurrent.TimeUnit.MILLISECONDS
+                )
+                .build()
+
+            androidx.work.WorkManager.getInstance(this).enqueueUniquePeriodicWork(
+                "tremor_upload_periodic",
+                androidx.work.ExistingPeriodicWorkPolicy.KEEP,
+                uploadWork
+            )
+
+            android.util.Log.i("MainActivity", "WorkManager upload worker scheduled (15min periodic)")
+        } catch (e: Exception) {
+            android.util.Log.e("MainActivity", "Failed to schedule upload worker: ${e.message}", e)
         }
     }
 
