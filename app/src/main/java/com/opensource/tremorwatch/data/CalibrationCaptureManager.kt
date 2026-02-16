@@ -31,7 +31,10 @@ class CalibrationCaptureManager(private val context: Context) {
         private const val KEY_DAILY_DATE = "daily_date"
     }
     
-    private val json = Json { prettyPrint = false }
+    private val json = Json {
+        prettyPrint = false
+        encodeDefaults = true
+    }
     
     private var isCapturing = AtomicBoolean(false)
     private var currentRatingId: String? = null

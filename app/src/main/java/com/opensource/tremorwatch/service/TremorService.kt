@@ -106,6 +106,19 @@ class TremorService : LifecycleService(), SensorEventListener {
 
         /** WakeLock auto-release timeout. Monitor renews every 10 min, so 15 min gives safety margin. */
         private const val WAKELOCK_TIMEOUT_MS = 15 * 60 * 1000L // 15 minutes
+
+        // Instance tracking for watch-side objective context computation (opus46 Issue 3d)
+        @Volatile
+        private var instance: TremorService? = null
+
+        /**
+         * Get watch-side objective context from the service's in-memory buffer.
+         * Returns null if service is not running or no recent data available.
+         * (opus46 Issue 3d)
+         */
+        fun getWatchObjectiveContext(): org.json.JSONObject? {
+            return instance?.computeWatchSideObjectiveContext()
+        }
     }
 
     private lateinit var sensorManager: SensorManager
@@ -291,6 +304,7 @@ class TremorService : LifecycleService(), SensorEventListener {
             "activityType" to data.activityType,
             "activityConfidence" to data.activityConfidence,
             "activityAgeMs" to data.activityAgeMs,
+            "activitySource" to if (data.activityAgeMs in 0..30_000L) "ar_api" else "sensor_infer",
             "activityAdjustedConfidence" to data.activityAdjustedConfidence,
             "activityAdjustedSeverity" to data.activityAdjustedSeverity,
             "isReliableMeasurement" to data.isReliableMeasurement,
@@ -826,6 +840,9 @@ class TremorService : LifecycleService(), SensorEventListener {
 
     override fun onCreate() {
         super.onCreate()  // LifecycleService.onCreate() transitions to CREATED state
+
+        // Set instance for watch-side objective context access (opus46 Issue 3d)
+        instance = this
 
         Timber.i("STARTUP: TremorService v3.3.0 onCreate() - Service starting up!")
         Timber.d("Lifecycle state: ${lifecycle.currentState}")
@@ -1421,6 +1438,47 @@ class TremorService : LifecycleService(), SensorEventListener {
         }
     }
 
+    /**
+     * Compute objective context from the watch's in-memory sample buffer.
+     * Provides a guaranteed-fresh context at rating time without depending on
+     * phone-side DB having received the latest batch upload.
+     * (opus46 Issue 3c)
+     */
+    private fun computeWatchSideObjectiveContext(): org.json.JSONObject? {
+        if (!::monitoringEngine.isInitialized) return null
+
+        val recentSamples = monitoringEngine.getRecentTremorData(windowSeconds = 300) // 5 minutes
+        if (recentSamples.isEmpty()) return null
+
+        val windows = listOf(10, 60, 300)
+        val now = System.currentTimeMillis()
+        val context = org.json.JSONObject()
+        context.put("source", "watch_buffer")
+        context.put("computedAt", now)
+
+        for (windowSec in windows) {
+            val cutoff = now - (windowSec * 1000L)
+            val windowSamples = recentSamples.filter { it.timestamp >= cutoff }
+            if (windowSamples.isEmpty()) continue
+
+            val severities = windowSamples.map { it.severity }
+            val sorted = severities.sorted()
+
+            val windowJson = org.json.JSONObject()
+            windowJson.put("sampleCount", windowSamples.size)
+            windowJson.put("meanSeverity", severities.average())
+            windowJson.put("maxSeverity", severities.maxOrNull() ?: 0.0)
+            windowJson.put("p50Severity", sorted[sorted.size / 2])
+            windowJson.put("p90Severity", sorted[(sorted.size * 0.9).toInt().coerceAtMost(sorted.lastIndex)])
+            windowJson.put("nonZeroFraction", severities.count { it > 0.0 }.toDouble() / severities.size)
+            windowJson.put("avgConfidence", windowSamples.map { it.confidence }.average())
+
+            context.put("window_${windowSec}s", windowJson)
+        }
+
+        return if (context.length() > 2) context else null  // >2 because source + computedAt always present
+    }
+
     private fun scheduleNextRatingPromptTick() {
         ratingPromptHandler.removeCallbacks(ratingPromptRunnable)
         val prefs = getSharedPreferences(RATING_PREFS_NAME, Context.MODE_PRIVATE)
@@ -1510,6 +1568,11 @@ class TremorService : LifecycleService(), SensorEventListener {
         }
         if (hasOffBodySensor && !isWatchWorn) {
             advanceAndSchedule("watch not worn")
+            return
+        }
+        // opus46 Issue 3a: Suppress prompts when monitoring is paused (no sensor data)
+        if (isPausedDueToWearState) {
+            advanceAndSchedule("monitoring paused (no sensor data available)")
             return
         }
 
@@ -2204,7 +2267,10 @@ class TremorService : LifecycleService(), SensorEventListener {
     override fun onDestroy() {
         Timber.d("onDestroy() called - cleaning up service")
         Timber.d("Lifecycle state before destroy: ${lifecycle.currentState}")
-        
+
+        // Clear instance for watch-side objective context (opus46 Issue 3d)
+        instance = null
+
         super.onDestroy()  // LifecycleService.onDestroy() transitions to DESTROYED state
 
         val uptime = System.currentTimeMillis() - startTime

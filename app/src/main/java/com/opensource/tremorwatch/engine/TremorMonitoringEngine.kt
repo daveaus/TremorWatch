@@ -90,6 +90,10 @@ class TremorMonitoringEngine(
     
     // Thread-safe buffer for sensor data
     private val dataBuffer = Collections.synchronizedList(mutableListOf<TremorData>())
+
+    // Ring buffer for recent samples (opus46 Issue 3c)
+    // Holds 600 entries = 10 minutes at 1Hz for watch-side objective context computation
+    private val recentSamplesBuffer = ArrayDeque<TremorData>(600)
     
     // Wear detection state
     private var isWatchWorn = true // Assume worn initially
@@ -207,6 +211,9 @@ class TremorMonitoringEngine(
         synchronized(dataBuffer) {
             dataBuffer.clear()
         }
+        synchronized(recentSamplesBuffer) {
+            recentSamplesBuffer.clear()
+        }
         gyroMagnitudeWindow.clear()
         accelWindow.clear()
         accelMagnitudeWindow.clear()
@@ -255,17 +262,32 @@ class TremorMonitoringEngine(
 
     /**
      * Sensor-based activity fallback when Activity Recognition API data is stale.
-     * Uses accelerometer variance to infer STILL vs moving.
+     * Graduated classification: STILL (high/med), WALKING, ON_FOOT, TILTING.
+     * (opus46 Issue 2: expanded from binary STILL/UNKNOWN to reduce 87.7% unknown rate)
      */
     private fun inferActivityFromSensors(): Pair<Int, Int> {
         if (accelWindow.size < 10) return Pair(DetectedActivity.UNKNOWN, 0)
-        val mean = accelWindow.average().toFloat()
-        val variance = accelWindow.map { (it - mean) * (it - mean) }.average().toFloat()
-        // Low variance + low gyro magnitude = likely still
-        return if (variance < FALLBACK_STILL_VARIANCE_THRESHOLD && lastAccelMagnitude < 0.5f) {
-            Pair(DetectedActivity.STILL, FALLBACK_CONFIDENCE)
-        } else {
-            Pair(DetectedActivity.UNKNOWN, 0)
+
+        val magnitudes = accelWindow.toList()
+        val mean = magnitudes.average().toFloat()
+        val variance = magnitudes.map { (it - mean) * (it - mean) }.average().toFloat()
+        val meanMag = mean
+
+        return when {
+            // High-confidence still: very low variance + very low gyro
+            variance < 0.5f && lastAccelMagnitude < 0.3f ->
+                Pair(DetectedActivity.STILL, 70)
+            // Medium-confidence still: moderate variance + low gyro (e.g., typing, minor fidgeting)
+            variance < FALLBACK_STILL_VARIANCE_THRESHOLD && lastAccelMagnitude < 0.5f ->
+                Pair(DetectedActivity.STILL, 50)
+            // Walking-like: rhythmic moderate variance, gravity-ish mean magnitude
+            variance in 2.0f..15.0f && meanMag in 9.0f..14.0f ->
+                Pair(DetectedActivity.WALKING, 40)
+            // High-motion: running, vehicle, or vigorous arm movement
+            variance > 15.0f || meanMag > 18.0f ->
+                Pair(DetectedActivity.ON_FOOT, 30)
+            // Default: some motion but doesn't match walking/running pattern
+            else -> Pair(DetectedActivity.TILTING, 25)
         }
     }
 
@@ -358,6 +380,18 @@ class TremorMonitoringEngine(
             System.currentTimeMillis() - currentEpisodeStartTime
         } else {
             0L
+        }
+    }
+
+    /**
+     * Returns recent TremorData samples from the in-memory ring buffer.
+     * Used by rating prompts to attach objective context without waiting for batch upload.
+     * (opus46 Issue 3d)
+     */
+    fun getRecentTremorData(windowSeconds: Int): List<TremorData> {
+        val cutoff = System.currentTimeMillis() - (windowSeconds * 1000L)
+        return synchronized(recentSamplesBuffer) {
+            recentSamplesBuffer.filter { it.timestamp >= cutoff }.toList()
         }
     }
     
@@ -787,7 +821,16 @@ class TremorMonitoringEngine(
         } catch (e: Exception) {
             Timber.w(e, "onSampleReady callback failed")
         }
-         
+
+        // Add to ring buffer for watch-side objective context (opus46 Issue 3c)
+        synchronized(recentSamplesBuffer) {
+            recentSamplesBuffer.add(tremorData)
+            // Keep buffer size at 600 entries (10 minutes at 1Hz)
+            while (recentSamplesBuffer.size > 600) {
+                recentSamplesBuffer.removeFirst()
+            }
+        }
+
         // Synchronized access to buffer for thread safety
         synchronized(dataBuffer) {
             dataBuffer.add(tremorData)

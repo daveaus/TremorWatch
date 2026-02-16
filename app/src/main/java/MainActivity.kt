@@ -288,13 +288,17 @@ fun TremorMonitorApp(
                         onRatingSubmit = { rating, dontAskToday ->
                             val ratingId = java.util.UUID.randomUUID().toString()
 
+                            // Get watch-side objective context from service buffer (opus46 Issue 3d)
+                            val watchContext = com.opensource.tremorwatch.service.TremorService.getWatchObjectiveContext()
+
                             WatchDataSender(context).sendSubjectiveRating(
                                 ratingId = ratingId,
                                 rating = rating,
                                 source = "MANUAL",
                                 watchId = watchId,
                                 calibrationModeEnabled = calibrationEnabled,
-                                calibrationDurationSeconds = calibrationDuration
+                                calibrationDurationSeconds = calibrationDuration,
+                                watchObjectiveContext = watchContext
                             ) { success ->
                                 android.util.Log.i("MainActivity", "Rating sent: $success")
                             }

@@ -715,6 +715,7 @@ class WatchDataSender(private val context: Context) {
      * Send a subjective rating to the phone for logging.
      * Includes detection state at rating time for disagreement analysis
      * and calibration flags for linking with calibration sensor data.
+     * (opus46 Issue 3d: added watchObjectiveContext)
      */
     fun sendSubjectiveRating(
         ratingId: String = java.util.UUID.randomUUID().toString(),
@@ -726,6 +727,7 @@ class WatchDataSender(private val context: Context) {
         detectedFrequency: Float? = null,
         calibrationModeEnabled: Boolean = false,
         calibrationDurationSeconds: Int = 60,
+        watchObjectiveContext: JSONObject? = null,
         onComplete: (Boolean) -> Unit
     ) {
         scope.launch {
@@ -748,6 +750,7 @@ class WatchDataSender(private val context: Context) {
                     detectedFrequency?.let { put("detectedFrequency", it.toDouble()) }
                     put("calibrationModeEnabled", calibrationModeEnabled)
                     put("calibrationDurationSeconds", calibrationDurationSeconds)
+                    watchObjectiveContext?.let { put("watchObjectiveContext", it) }
                 }.toString().toByteArray()
 
                 // Fire-and-forget: send without blocking

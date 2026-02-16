@@ -62,6 +62,9 @@ class RatingActivity : ComponentActivity() {
 
                         val ratingId = java.util.UUID.randomUUID().toString()
 
+                        // Get watch-side objective context from service buffer (opus46 Issue 3d)
+                        val watchContext = com.opensource.tremorwatch.service.TremorService.getWatchObjectiveContext()
+
                         // Send rating to phone with detection state and calibration flags
                         WatchDataSender(this@RatingActivity).sendSubjectiveRating(
                             ratingId = ratingId,
@@ -69,7 +72,8 @@ class RatingActivity : ComponentActivity() {
                             source = source.name,
                             watchId = watchId,
                             calibrationModeEnabled = calibrationEnabled,
-                            calibrationDurationSeconds = calibrationDuration
+                            calibrationDurationSeconds = calibrationDuration,
+                            watchObjectiveContext = watchContext
                         ) { success ->
                             Timber.i("Rating sent to phone: $success")
                         }

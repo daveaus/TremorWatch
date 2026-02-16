@@ -7,6 +7,7 @@ import com.opensource.tremorwatch.phone.database.CalibrationDataEntity
 import com.opensource.tremorwatch.phone.database.SubjectiveRatingEntity
 import com.opensource.tremorwatch.phone.database.TremorDao
 import com.opensource.tremorwatch.phone.database.TremorRoomDatabase
+import androidx.room.withTransaction
 import com.opensource.tremorwatch.shared.Constants
 import com.opensource.tremorwatch.shared.models.TremorBatch
 import com.google.android.gms.wearable.*
@@ -133,6 +134,11 @@ class WatchDataListenerService : WearableListenerService() {
 
         // Initialize channel client
         channelClient = Wearable.getChannelClient(this)
+
+        // One-time migration: reparse orphaned calibration files (opus46 Issue 1)
+        serviceScope.launch {
+            reparseOrphanedCalibrationFiles()
+        }
 
         // Load persisted chunk assemblies from disk
         loadChunkAssemblies()
@@ -430,7 +436,18 @@ class WatchDataListenerService : WearableListenerService() {
             for (line in lines) {
                 try {
                     val obj = JSONObject(line)
-                    when (obj.optString("type")) {
+                    // Schema v2 files may lack "type" field due to encodeDefaults=false bug
+                    // Infer type from field presence if "type" is missing
+                    val lineType = obj.optString("type", "").ifEmpty {
+                        when {
+                            obj.has("ratingId") && obj.has("schemaVersion") -> "header"
+                            obj.has("timestamp") && obj.has("x") -> "sample"
+                            obj.has("totalSamples") && obj.has("endTime") -> "footer"
+                            else -> "unknown"
+                        }
+                    }
+
+                    when (lineType) {
                         "header" -> {
                             ratingId = obj.getString("ratingId")
                             Log.d(TAG, "Calibration header: ratingId=$ratingId")
@@ -477,6 +494,9 @@ class WatchDataListenerService : WearableListenerService() {
                         "footer" -> {
                             Log.d(TAG, "Calibration footer: totalSamples=${obj.optInt("totalSamples")}")
                         }
+                        else -> {
+                            Log.w(TAG, "Unrecognized calibration line type, skipping: ${line.take(80)}")
+                        }
                     }
                 } catch (lineError: Exception) {
                     Log.w(TAG, "Skipping malformed calibration line: ${lineError.message}")
@@ -487,8 +507,14 @@ class WatchDataListenerService : WearableListenerService() {
                 val db = TremorRoomDatabase.getDatabase(this@WatchDataListenerService)
                 val dao = db.tremorDao()
                 val targetRatingId = ratingId
-                dao.insertCalibrationData(calibrationEntities)
-                dao.markRatingCalibrated(targetRatingId)
+
+                // Wrap in transaction to prevent partial insertion on crash
+                db.withTransaction {
+                    dao.insertCalibrationData(calibrationEntities)
+                    dao.markRatingCalibrated(targetRatingId)
+                }
+
+                // Update metrics outside transaction (non-critical)
                 updateDetectedMetricsFromCalibration(dao, targetRatingId, calibrationEntities)
 
                 Log.i(TAG, "✓ Inserted ${calibrationEntities.size} calibration samples for rating $ratingId into DB")
@@ -506,6 +532,60 @@ class WatchDataListenerService : WearableListenerService() {
         } catch (e: Exception) {
             Log.e(TAG, "Failed to parse calibration file into DB: ${e.message}", e)
         }
+    }
+
+    /**
+     * Idempotent migration: reparse calibration JSONL files that were saved to disk
+     * but never ingested due to the encodeDefaults bug.
+     *
+     * Keyed by ratingId -- skips files whose ratingId already has calibration rows in DB.
+     * Safe to run multiple times even if DB is partially populated.
+     */
+    private suspend fun reparseOrphanedCalibrationFiles() {
+        val calibDir = File(filesDir, "calibration")
+        if (!calibDir.exists()) return
+
+        val db = TremorRoomDatabase.getDatabase(this)
+        val dao = db.tremorDao()
+
+        val files = calibDir.listFiles { f -> f.extension == "jsonl" } ?: return
+        if (files.isEmpty()) return
+
+        var reparsed = 0
+        var skipped = 0
+
+        for (file in files) {
+            try {
+                // Extract ratingId from first line to check if already ingested
+                val firstLine = file.bufferedReader().use { it.readLine() } ?: continue
+                val headerObj = JSONObject(firstLine)
+                val ratingId = headerObj.optString("ratingId", "").ifEmpty {
+                    // Try to find ratingId in any line (header without "type" field)
+                    if (headerObj.has("schemaVersion")) headerObj.optString("ratingId", "") else ""
+                }
+
+                if (ratingId.isBlank()) {
+                    Log.w(TAG, "Skipping ${file.name}: no ratingId found in header")
+                    continue
+                }
+
+                // Check if this ratingId already has calibration data
+                val existingCount = dao.getCalibrationCountForRating(ratingId)
+                if (existingCount > 0) {
+                    skipped++
+                    continue
+                }
+
+                // Parse and ingest
+                val content = file.readText()
+                parseCalibrationFileIntoDB(content)
+                reparsed++
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to reparse ${file.name}: ${e.message}")
+            }
+        }
+
+        Log.i(TAG, "Calibration reparse complete: $reparsed ingested, $skipped already in DB, ${files.size} total files")
     }
 
     /**
@@ -1111,14 +1191,40 @@ class WatchDataListenerService : WearableListenerService() {
                     null
                 }
 
-                val objectiveContextJson = try {
+                // opus46 Issue 3b: Improved exception handling with diagnostic JSON
+                val phoneContext = try {
                     computeObjectiveLookbackContextJson(
                         dao = dao,
                         ratingTimestamp = ratingTimestamp
                     )
                 } catch (e: Exception) {
-                    Log.w(TAG, "Failed to compute objective lookback context: ${e.message}")
-                    null
+                    Log.e(TAG, "Failed to compute objective lookback context for rating " +
+                        "at ${ratingTimestamp}: ${e.message}", e)
+                    // Store diagnostic marker to distinguish "no data" from "computation failed"
+                    JSONObject().apply {
+                        put("error", e.message ?: "unknown")
+                        put("errorType", e.javaClass.simpleName)
+                        put("ratingTimestamp", ratingTimestamp)
+                    }.toString()
+                }
+
+                // opus46 Issue 3e: Merge watch-side context with phone-side context
+                val watchContext = json.optJSONObject("watchObjectiveContext")
+                val mergedContext = when {
+                    watchContext != null && phoneContext != null -> {
+                        // Include both -- phone has historical depth, watch has freshness
+                        val merged = JSONObject()
+                        merged.put("watchContext", watchContext)
+                        merged.put("phoneContext", JSONObject(phoneContext))
+                        merged.toString()
+                    }
+                    watchContext != null -> {
+                        val wrapper = JSONObject()
+                        wrapper.put("watchContext", watchContext)
+                        wrapper.toString()
+                    }
+                    phoneContext != null -> phoneContext
+                    else -> null
                 }
 
                 // Parse rating from JSON
@@ -1131,7 +1237,7 @@ class WatchDataListenerService : WearableListenerService() {
                     detectedSeverity = payloadMetrics.severity ?: inferredMetrics?.severity,
                     detectedConfidence = payloadMetrics.confidence ?: inferredMetrics?.confidence,
                     detectedFrequency = payloadMetrics.frequencyHz ?: inferredMetrics?.frequencyHz,
-                    objectiveContextJson = objectiveContextJson,
+                    objectiveContextJson = mergedContext,
                     calibrationModeEnabled = json.optBoolean("calibrationModeEnabled", false),
                     calibrationDurationSeconds = calibrationDurationSeconds,
                     notes = json.optNullableString("notes"),
