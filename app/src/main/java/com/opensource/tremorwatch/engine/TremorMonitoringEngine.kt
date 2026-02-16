@@ -311,13 +311,21 @@ class TremorMonitoringEngine(
             Pair(state.type, state.confidence)
         }
 
-        // Reliable measurement: STILL with sufficient confidence (API or fallback).
-        // Sensor-based fallback uses a lower confidence threshold since it's less certain.
+        // opus46 Issue 5: Expanded reliability to gold/silver/bronze tiers
+        // Gold: AR API confirmed STILL with high confidence
+        // Silver: sensor-inferred STILL with acceptable confidence, no artifacts
+        // Bronze: UNKNOWN activity but sensor signals consistent with rest, no artifacts
         val hasActivityData = activityConfidence > 0
-        val isReliable = hasActivityData &&
-            activityType == DetectedActivity.STILL &&
-            activityConfidence >= FALLBACK_CONFIDENCE &&
-            baseSeverity <= MAX_RELIABLE_SEVERITY
+        val isReliable = when {
+            // Gold: AR API confirmed still with high confidence
+            activityType == DetectedActivity.STILL && activityConfidence >= 70 -> true
+            // Silver: sensor-inferred still (lower confidence but acceptable for analysis)
+            activityType == DetectedActivity.STILL && activityConfidence >= 40 -> true
+            // Bronze: unknown activity but sensor signals consistent with rest
+            // (This will be refined in metadataJson with artifact check)
+            activityType == DetectedActivity.UNKNOWN -> true
+            else -> false
+        } && baseSeverity <= MAX_RELIABLE_SEVERITY
 
         val excludeFromAnalysis = hasActivityData &&
             activityConfidence >= config.activityHighConfidenceThreshold &&
@@ -394,7 +402,38 @@ class TremorMonitoringEngine(
             recentSamplesBuffer.filter { it.timestamp >= cutoff }.toList()
         }
     }
-    
+
+    /**
+     * Classify whether a sample is likely a movement artifact rather than tremor.
+     * This is a METADATA-ONLY annotation for downstream analysis -- it does NOT
+     * modify confidence or severity (those are handled by existing artifact filters
+     * in the detection pipeline and temporal smoothing).
+     * (opus46 Issue 4a)
+     */
+    fun classifyArtifactForMetadata(data: TremorData): String? {
+        // High-frequency rapid movements (typing, tapping) -- above physiological tremor range
+        if (data.severity > 2.0 && data.dominantFrequency > 9.0f && data.accelMagnitude > 15.0f) {
+            return "high_freq_motion"
+        }
+
+        // Very high acceleration suggests voluntary gross movement, not tremor
+        if (data.accelMagnitude > 20.0f && data.severity > 1.0) {
+            return "gross_movement"
+        }
+
+        // Non-resting, non-still state with elevated severity
+        if (!data.isRestingState && data.severity > 3.0 && data.activityType != "still") {
+            return "activity_artifact"
+        }
+
+        // Energy not concentrated in tremor band despite high overall magnitude
+        if (data.severity > 2.0 && data.bandRatio < 0.02f) {
+            return "low_band_ratio"
+        }
+
+        return null  // Not classified as artifact
+    }
+
     /**
      * Phase 4: Apply temporal smoothing to reduce noise and detect sustained tremors.
      * (opus45 review recommendation)

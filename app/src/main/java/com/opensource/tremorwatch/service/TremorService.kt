@@ -311,6 +311,30 @@ class TremorService : LifecycleService(), SensorEventListener {
             "excludeFromAnalysis" to data.excludeFromAnalysis
         )
 
+        // opus46 Issue 4: Add artifact classification and episode state metadata
+        val artifactType = monitoringEngine?.classifyArtifactForMetadata(data)
+        if (artifactType != null) {
+            metadata["isLikelyArtifact"] = true
+            metadata["artifactType"] = artifactType
+        } else {
+            metadata["isLikelyArtifact"] = false
+        }
+
+        metadata["inTremorEpisode"] = monitoringEngine?.isInTremorEpisode() ?: false
+        metadata["episodeDurationMs"] = monitoringEngine?.getCurrentEpisodeDuration() ?: 0L
+
+        // opus46 Issue 5: Add reliability tier based on activity type, confidence, and artifact status
+        val reliabilityTier = when {
+            // Gold: AR API confirmed still with high confidence
+            data.activityType == "still" && data.activityConfidence >= 0.7f -> "gold"
+            // Silver: sensor-inferred still with acceptable confidence, no artifacts
+            data.activityType == "still" && data.activityConfidence >= 0.4f && artifactType == null -> "silver"
+            // Bronze: unknown activity but sensor signals consistent with rest, no artifacts
+            data.activityType == "unknown" && data.accelMagnitude < 12.0f && data.bandRatio > 0.02f && artifactType == null -> "bronze"
+            else -> "unrated"
+        }
+        metadata["reliabilityTier"] = reliabilityTier
+
         return com.opensource.tremorwatch.shared.models.TremorData(
             timestamp = data.timestamp,
             severity = severity.toDouble(),
