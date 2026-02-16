@@ -470,6 +470,42 @@ private fun summarizeActivity(records: List<TremorSample>): ActivitySummary {
     )
 }
 
+/**
+ * Compute confidence-weighted severity for post-hoc analysis (opus46 Issue 7).
+ * Downweights low-confidence and high-frequency artifact-prone samples.
+ * Applied at export time to ALL samples (including historical ones without new metadata).
+ */
+private fun confidenceWeightedSeverity(
+    severity: Double,
+    confidence: Float,
+    dominantFrequency: Float,
+    accelMagnitude: Float
+): Double {
+    var weight = 1.0
+
+    // Penalize low confidence
+    if (confidence < 0.3f) {
+        weight *= (confidence / 0.3).toDouble()  // Linear ramp from 0 to 1
+    }
+
+    // Penalize frequencies outside physiological tremor range
+    if (dominantFrequency > 9.0f) {
+        weight *= 0.7
+    }
+
+    // Penalize high acceleration (likely voluntary movement)
+    if (accelMagnitude > 15.0f) {
+        weight *= 0.5
+    }
+
+    // Bonus for classic resting tremor frequency range (4-7 Hz)
+    if (dominantFrequency in 4.0f..7.0f) {
+        weight *= 1.1
+    }
+
+    return (severity * weight).coerceAtMost(10.0)
+}
+
 private fun parseMetadata(metadataJson: String?): JSONObject? {
     return metadataJson?.let { runCatching { JSONObject(it) }.getOrNull() }
 }
@@ -693,7 +729,8 @@ private suspend fun writeStreamingDetailedCsv(
         "TimestampUnixMsUTC,DateTimeUTC,DateTimeLocal,SeverityRaw_0to10,SeverityNorm_0to1," +
             "TremorCount,ActivityType,ActivityConfidence_0to1,ActivityAgeMs," +
             "AdjustedSeverity_0to10,AdjustedConfidence_0to1,ReliabilityScore_0to1," +
-            "IsReliable,ExcludeFromAnalysis,IncludeInAnalysis\n"
+            "IsReliable,ExcludeFromAnalysis,IncludeInAnalysis," +
+            "IsLikelyArtifact,ArtifactType,ReliabilityTier,InTremorEpisode,EpisodeDurationMs,ActivitySource,ConfidenceWeightedSeverity_0to10\n"
     )
 
     var offset = 0
@@ -716,6 +753,22 @@ private suspend fun writeStreamingDetailedCsv(
             val include = includeInAnalysis(isReliable, excludeFromAnalysis, reliability)
             val severityNorm = (record.severity / 10.0).coerceIn(0.0, 1.0)
 
+            // opus46 Phase 3 (P2): Extract artifact and reliability metadata
+            val isLikelyArtifact = optBoolean(metadata, "isLikelyArtifact")
+            val artifactType = metaValue(metadata, "artifactType").nullIfBlank()
+            val reliabilityTier = metaValue(metadata, "reliabilityTier").nullIfBlank()
+            val inTremorEpisode = optBoolean(metadata, "inTremorEpisode")
+            val episodeDurationMs = metaValue(metadata, "episodeDurationMs").nullIfBlank()
+            val activitySource = metaValue(metadata, "activitySource").nullIfBlank()
+
+            // opus46 Issue 7: Confidence-weighted severity (requires full sample fields)
+            val cwSeverity = confidenceWeightedSeverity(
+                record.severity,
+                record.confidence?.toFloat() ?: 0f,
+                record.dominantFrequency?.toFloat() ?: 0f,
+                record.accelMagnitude?.toFloat() ?: 0f
+            )
+
             writer.write(
                 csvRow(
                     record.timestamp,
@@ -732,7 +785,14 @@ private suspend fun writeStreamingDetailedCsv(
                     formatDouble(reliability, 6),
                     isReliable,
                     excludeFromAnalysis,
-                    include
+                    include,
+                    isLikelyArtifact,
+                    artifactType,
+                    reliabilityTier,
+                    inTremorEpisode,
+                    episodeDurationMs,
+                    activitySource,
+                    formatDouble(cwSeverity, 6)
                 )
             )
             totalRecords++
@@ -770,7 +830,8 @@ private suspend fun writeStreamingRawDataCsv(
             "TremorCount,AccelX_g,AccelY_g,AccelZ_g,VectorMagnitude_g,AccelMagnitude_g,Confidence_0to1," +
             "IsWorn,IsCharging,DominantFreq_Hz,TremorBandPower,TotalPower,BandRatio,PeakProminence,WatchIdAlias," +
             "ActivityType,ActivityConfidence_0to1,ActivityAgeMs,AdjustedSeverity_0to10,AdjustedConfidence_0to1," +
-            "ReliabilityScore_0to1,IsReliable,ExcludeFromAnalysis,IncludeInAnalysis\n"
+            "ReliabilityScore_0to1,IsReliable,ExcludeFromAnalysis,IncludeInAnalysis," +
+            "IsLikelyArtifact,ArtifactType,ReliabilityTier,InTremorEpisode,EpisodeDurationMs,ActivitySource,ConfidenceWeightedSeverity_0to10\n"
     )
 
     var offset = 0
@@ -793,6 +854,22 @@ private suspend fun writeStreamingRawDataCsv(
             val include = includeInAnalysis(isReliable, excludeFromAnalysis, reliability)
             val severityNorm = (sample.severity / 10.0).coerceIn(0.0, 1.0)
             val watchIdAlias = pseudonymizedWatchId(sample.watchId, exportContext)
+
+            // opus46 Phase 3 (P2): Extract artifact and reliability metadata
+            val isLikelyArtifact = optBoolean(metadata, "isLikelyArtifact")
+            val artifactType = metaValue(metadata, "artifactType").nullIfBlank()
+            val reliabilityTier = metaValue(metadata, "reliabilityTier").nullIfBlank()
+            val inTremorEpisode = optBoolean(metadata, "inTremorEpisode")
+            val episodeDurationMs = metaValue(metadata, "episodeDurationMs").nullIfBlank()
+            val activitySource = metaValue(metadata, "activitySource").nullIfBlank()
+
+            // opus46 Issue 7: Confidence-weighted severity for post-hoc analysis
+            val cwSeverity = confidenceWeightedSeverity(
+                sample.severity,
+                sample.confidence?.toFloat() ?: 0f,
+                sample.dominantFrequency?.toFloat() ?: 0f,
+                sample.accelMagnitude?.toFloat() ?: 0f
+            )
 
             writer.write(
                 csvRow(
@@ -824,7 +901,14 @@ private suspend fun writeStreamingRawDataCsv(
                     formatDouble(reliability, 6),
                     isReliable,
                     excludeFromAnalysis,
-                    include
+                    include,
+                    isLikelyArtifact,
+                    artifactType,
+                    reliabilityTier,
+                    inTremorEpisode,
+                    episodeDurationMs,
+                    activitySource,
+                    formatDouble(cwSeverity, 6)
                 )
             )
             totalRecords++
@@ -981,7 +1065,7 @@ private suspend fun writeSubjectiveRatingsCsv(
             "DetectedSeverity_0to10,DetectedConfidence_0to1,DetectedFrequency_Hz," +
             "CalibrationEnabled,CalibrationDurationSec,CalibrationSampleCount," +
             "LinkedWindowStartUnixMsUTC,LinkedWindowEndUnixMsUTC,LinkedWindowStartUTC,LinkedWindowEndUTC," +
-            "CalibrationDataStatus,Notes\n"
+            "CalibrationDataStatus,ReconciliationStatus,Notes\n"
     )
 
     val ratings = dao.getRatingsAfter(cutoffTime).sortedBy { it.timestamp }
@@ -1032,6 +1116,25 @@ private suspend fun writeSubjectiveRatingsCsv(
             else -> "NO_OBJECTIVE_DATA"
         }
 
+        // opus46 Issue 6b: Reconciliation status comparing subjective rating vs detected severity
+        val reconciliation = try {
+            val objectiveContext = rating.objectiveContextJson?.let { JSONObject(it) }
+            val watchCtx = objectiveContext?.optJSONObject("watchContext")
+            val phoneCtx = objectiveContext?.optJSONObject("phoneContext")
+            val window10s = watchCtx?.optJSONObject("window_10s")
+                ?: phoneCtx?.let { JSONObject(it.toString()).optJSONObject("window_10s") }
+            val avgSeverity = window10s?.optDouble("meanSeverity", -1.0) ?: -1.0
+
+            when {
+                avgSeverity < 0 -> "NO_CONTEXT"
+                rating.rating >= 3 && avgSeverity < 0.5 -> "USER_HIGH_SENSOR_LOW"
+                rating.rating <= 1 && avgSeverity > 1.5 -> "USER_LOW_SENSOR_HIGH"
+                else -> "CONCORDANT"
+            }
+        } catch (e: Exception) {
+            "PARSE_ERROR"
+        }
+
         writer.write(
             csvRow(
                 rating.id,
@@ -1052,6 +1155,7 @@ private suspend fun writeSubjectiveRatingsCsv(
                 isoUtc(windowStart),
                 isoUtc(windowEnd),
                 status,
+                reconciliation,
                 rating.notes?.replace("\n", " ")
             )
         )
