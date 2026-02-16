@@ -11,6 +11,16 @@ import androidx.room.Query
  */
 @Dao
 interface TremorDao {
+
+    data class StatsSampleRow(
+        val timestamp: Long,
+        val severity: Double,
+        val tremorCount: Int,
+        val isWorn: Boolean?,
+        val isCharging: Boolean?,
+        val confidence: Double?,
+        val metadataJson: String?
+    )
     
     /**
      * Get all samples after a cutoff timestamp.
@@ -24,6 +34,28 @@ interface TremorDao {
      */
     @Query("SELECT * FROM tremor_samples WHERE timestamp >= :startTime AND timestamp <= :endTime ORDER BY timestamp ASC")
     suspend fun getSamplesInRange(startTime: Long, endTime: Long): List<TremorSample>
+
+    /**
+     * Keyset-paginated, minimal-column query for Stats Engine computations.
+     * Avoids OOM by not materializing large day/week ranges in memory at once.
+     */
+    @Query(
+        """
+        SELECT timestamp, severity, tremorCount, isWorn, isCharging, confidence, metadataJson
+        FROM tremor_samples
+        WHERE timestamp >= :startTime
+          AND timestamp <= :endTime
+          AND timestamp > :afterTimestamp
+        ORDER BY timestamp ASC
+        LIMIT :limit
+        """
+    )
+    suspend fun getStatsRowsInRangeAfter(
+        startTime: Long,
+        endTime: Long,
+        afterTimestamp: Long,
+        limit: Int
+    ): List<StatsSampleRow>
 
     /**
      * Get samples in a specific time range with pagination for memory-efficient export.

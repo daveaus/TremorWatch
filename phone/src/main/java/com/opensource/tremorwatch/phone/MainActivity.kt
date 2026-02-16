@@ -104,6 +104,10 @@ import com.opensource.tremorwatch.phone.typicalday.DailyTremorProfileConfig
 import com.opensource.tremorwatch.phone.typicalday.DailyTremorProfileSettingsDialog
 import com.opensource.tremorwatch.phone.typicalday.DailyProfileSeriesMode
 import com.opensource.tremorwatch.phone.typicalday.SubjectiveOverlayMode
+import com.opensource.tremorwatch.phone.stats.DailyStatsResult
+import com.opensource.tremorwatch.phone.stats.QuickStatsCard
+import com.opensource.tremorwatch.phone.stats.StatsRepository
+import com.opensource.tremorwatch.phone.stats.StatsScreen
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
@@ -321,6 +325,7 @@ fun TremorWatchApp() {
         when (currentScreen) {
             "main" -> MainScreen(
                 onNavigateToSettings = { currentScreen = "settings" },
+                onNavigateToStats = { currentScreen = "stats" },
                 locationPermissionLauncher = locationPermissionLauncher
             )
             "settings" -> SettingsScreen(
@@ -335,6 +340,9 @@ fun TremorWatchApp() {
             "rating_settings" -> RatingConfigScreen(
                 onNavigateBack = { currentScreen = "settings" }
             )
+            "stats" -> StatsScreen(
+                onNavigateBack = { currentScreen = "main" }
+            )
         }
     }
 }
@@ -343,6 +351,7 @@ fun TremorWatchApp() {
 @Composable
 fun MainScreen(
     onNavigateToSettings: () -> Unit,
+    onNavigateToStats: () -> Unit,
     locationPermissionLauncher: androidx.activity.result.ActivityResultLauncher<Array<String>>
 ) {
     val context = LocalContext.current
@@ -424,6 +433,12 @@ fun MainScreen(
 
     var retentionHours by remember { mutableStateOf(PhoneDataConfig.getLocalStorageRetentionHours(context)) }
     var localStorageEnabled by remember { mutableStateOf(PhoneDataConfig.isLocalStorageEnabled(context)) }
+
+    val statsRepository = remember(context) { StatsRepository(context) }
+    var quickStats by remember { mutableStateOf<DailyStatsResult?>(null) }
+    var quickStatsLoading by remember { mutableStateOf(false) }
+    var quickStatsStatusText by remember { mutableStateOf<String?>(null) }
+    var quickStatsStatusIsError by remember { mutableStateOf(false) }
 
     val heartbeatPrefs = remember(context) {
         context.getSharedPreferences("heartbeat_prefs", Context.MODE_PRIVATE)
@@ -936,6 +951,22 @@ fun MainScreen(
                 
                 // Trigger chart reload
                 refreshTrigger++
+
+                // Refresh quick stats (user-triggered only)
+                if (localStorageEnabled) {
+                    quickStatsLoading = true
+                    quickStatsStatusText = null
+                    quickStatsStatusIsError = false
+                    quickStats = try {
+                        statsRepository.computeTodayStats()
+                    } catch (e: Exception) {
+                        quickStatsStatusText = e.message ?: "Failed to compute stats"
+                        quickStatsStatusIsError = true
+                        null
+                    } finally {
+                        quickStatsLoading = false
+                    }
+                }
                 
                 delay(500)
                 isRefreshing = false
@@ -994,6 +1025,38 @@ fun MainScreen(
                 )
             }
         }
+
+        // Quick stats panel
+        LaunchedEffect(localStorageEnabled, dataLoadTrigger) {
+            if (!localStorageEnabled) {
+                quickStats = null
+                quickStatsLoading = false
+                quickStatsStatusText = "Enable local storage in Settings to compute stats."
+                quickStatsStatusIsError = false
+                return@LaunchedEffect
+            }
+
+            quickStatsLoading = true
+            quickStatsStatusText = null
+            quickStatsStatusIsError = false
+            quickStats = try {
+                statsRepository.computeTodayStats()
+            } catch (e: Exception) {
+                quickStatsStatusText = e.message ?: "Failed to compute stats"
+                quickStatsStatusIsError = true
+                null
+            } finally {
+                quickStatsLoading = false
+            }
+        }
+
+        QuickStatsCard(
+            stats = quickStats,
+            isLoading = quickStatsLoading,
+            statusText = quickStatsStatusText,
+            statusTextIsError = quickStatsStatusIsError,
+            onOpenStats = onNavigateToStats
+        )
         
         // Permission Status Card (show if InfluxDB is enabled AND permissions missing)
         val influxDbEnabled = remember { mutableStateOf(PhoneDataConfig.isInfluxDbEnabled(context)) }
