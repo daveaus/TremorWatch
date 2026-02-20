@@ -38,6 +38,9 @@ class RatingActivity : ComponentActivity() {
             RatingSource.PROMPTED
         }
 
+        val contextSampleCount = intent.getIntExtra("contextSampleCount", -1)
+        Timber.i("RatingActivity opened: source=$sourceString, contextSamples=$contextSampleCount")
+
         // Read calibration config from SharedPreferences (stored by TremorService.applyRatingConfig)
         val ratingPrefs = getSharedPreferences("rating_prefs", MODE_PRIVATE)
         val calibrationEnabled = ratingPrefs.getBoolean("calibration_enabled", false)

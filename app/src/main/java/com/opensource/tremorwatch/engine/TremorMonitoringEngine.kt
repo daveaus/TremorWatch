@@ -69,6 +69,10 @@ class TremorMonitoringEngine(
 
         /** Confidence assigned to sensor-based fallback activity (lower than API). */
         const val FALLBACK_CONFIDENCE = 50
+
+        /** Motion artifact detection thresholds for suppressing false positives. */
+        const val MOTION_ARTIFACT_ACCEL_THRESHOLD = 12.0f
+        const val MOTION_ARTIFACT_SEVERITY_THRESHOLD = 1.5f
     }
 
     // Sensor data state
@@ -311,34 +315,56 @@ class TremorMonitoringEngine(
             Pair(state.type, state.confidence)
         }
 
-        // opus46 Issue 5: Expanded reliability to gold/silver/bronze tiers
-        // Gold: AR API confirmed STILL with high confidence
-        // Silver: sensor-inferred STILL with acceptable confidence, no artifacts
-        // Bronze: UNKNOWN activity but sensor signals consistent with rest, no artifacts
+        // Motion artifact detection: suppress high-severity readings caused by
+        // walking arm-swing, tilting, or unknown-context gross movement.
+        val likelyMotionArtifact = when {
+            activityType == DetectedActivity.RUNNING ||
+                activityType == DetectedActivity.ON_BICYCLE ||
+                activityType == DetectedActivity.IN_VEHICLE -> true
+            activityType == DetectedActivity.WALKING &&
+                activityConfidence >= config.activityMediumConfidenceThreshold &&
+                baseSeverity >= MOTION_ARTIFACT_SEVERITY_THRESHOLD -> true
+            activityType == DetectedActivity.TILTING &&
+                baseSeverity >= MOTION_ARTIFACT_SEVERITY_THRESHOLD -> true
+            activityType == DetectedActivity.UNKNOWN &&
+                baseSeverity >= MOTION_ARTIFACT_SEVERITY_THRESHOLD &&
+                lastAccelMagnitude >= MOTION_ARTIFACT_ACCEL_THRESHOLD -> true
+            baseSeverity >= MOTION_ARTIFACT_SEVERITY_THRESHOLD &&
+                lastAccelMagnitude >= 20.0f -> true
+            else -> false
+        }
+
+        // Reliability: only STILL with sufficient confidence qualifies.
+        // Gold: AR API confirmed STILL, high confidence, minimum detection confidence
+        // Silver: STILL with medium confidence AND higher detection confidence
         val hasActivityData = activityConfidence > 0
         val isReliable = when {
-            // Gold: AR API confirmed still with high confidence
-            activityType == DetectedActivity.STILL && activityConfidence >= 70 -> true
-            // Silver: sensor-inferred still (lower confidence but acceptable for analysis)
-            activityType == DetectedActivity.STILL && activityConfidence >= 40 -> true
-            // Bronze: unknown activity but sensor signals consistent with rest
-            // (This will be refined in metadataJson with artifact check)
-            activityType == DetectedActivity.UNKNOWN -> true
+            activityType == DetectedActivity.STILL &&
+                activityConfidence >= 70 &&
+                baseConfidence >= (config.confidenceThreshold * 0.5f) -> true
+            activityType == DetectedActivity.STILL &&
+                activityConfidence >= config.activityMediumConfidenceThreshold &&
+                baseConfidence >= config.confidenceThreshold -> true
             else -> false
-        } && baseSeverity <= MAX_RELIABLE_SEVERITY
+        } && baseSeverity <= MAX_RELIABLE_SEVERITY && !likelyMotionArtifact
 
-        val excludeFromAnalysis = hasActivityData &&
+        var excludeFromAnalysis = hasActivityData &&
             activityConfidence >= config.activityHighConfidenceThreshold &&
             (activityType == DetectedActivity.RUNNING ||
              activityType == DetectedActivity.ON_BICYCLE ||
              activityType == DetectedActivity.IN_VEHICLE)
+        if (likelyMotionArtifact) {
+            excludeFromAnalysis = true
+        }
+
+        val artifactPenalty = if (likelyMotionArtifact) 0.25f else 1f
 
         if (!config.activityFilteringEnabled ||
             !hasActivityData ||
             activityConfidence < config.activityLowConfidenceThreshold) {
             return ActivityAdjustment(
-                adjustedConfidence = baseConfidence,
-                adjustedSeverity = baseSeverity,
+                adjustedConfidence = (baseConfidence * artifactPenalty).coerceIn(0f, 1f),
+                adjustedSeverity = (baseSeverity * artifactPenalty).coerceAtLeast(0f),
                 isReliable = isReliable,
                 excludeFromAnalysis = excludeFromAnalysis,
                 activityType = activityType,
@@ -363,8 +389,8 @@ class TremorMonitoringEngine(
         val effectiveMultiplier = 1f - (1f - baseMultiplier) * confidenceWeight
 
         return ActivityAdjustment(
-            adjustedConfidence = (baseConfidence * effectiveMultiplier).coerceIn(0f, 1f),
-            adjustedSeverity = (baseSeverity * effectiveMultiplier).coerceAtLeast(0f),
+            adjustedConfidence = (baseConfidence * effectiveMultiplier * artifactPenalty).coerceIn(0f, 1f),
+            adjustedSeverity = (baseSeverity * effectiveMultiplier * artifactPenalty).coerceAtLeast(0f),
             isReliable = isReliable,
             excludeFromAnalysis = excludeFromAnalysis,
             activityType = activityType,
@@ -429,6 +455,21 @@ class TremorMonitoringEngine(
         // Energy not concentrated in tremor band despite high overall magnitude
         if (data.severity > 2.0 && data.bandRatio < 0.02f) {
             return "low_band_ratio"
+        }
+
+        // Unknown context with elevated severity and high acceleration — likely movement
+        if (data.activityType == "unknown" && data.severity > 1.5f && data.accelMagnitude > 12.0f) {
+            return "unknown_motion_context"
+        }
+
+        // Tilting with elevated severity — wrist orientation change
+        if (data.activityType == "tilting" && data.severity > 1.0f) {
+            return "tilting_context"
+        }
+
+        // Walking with elevated severity — arm swing artifact
+        if (data.activityType == "walking" && data.severity > 1.0f && data.accelMagnitude > 10.0f) {
+            return "walking_motion_context"
         }
 
         return null  // Not classified as artifact

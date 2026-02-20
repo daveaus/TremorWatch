@@ -103,6 +103,9 @@ class TremorService : LifecycleService(), SensorEventListener {
         private const val KEY_PROMPT_LAST_SHOWN_ELAPSED = "prompt_last_shown_elapsed"
         private const val RATING_CHANNEL_ID = "rating_prompts"
         private const val PROMPT_FOLLOWUP_DELAY_MS = 5 * 60 * 1000L
+        private const val KEY_SMART_TRIGGER_ENABLED = "smart_trigger_enabled"
+        private const val KEY_MIN_CONTEXT_SAMPLES = "min_context_samples"
+        private const val DEFAULT_MIN_CONTEXT_SAMPLES = 60
 
         /** WakeLock auto-release timeout. Monitor renews every 10 min, so 15 min gives safety margin. */
         private const val WAKELOCK_TIMEOUT_MS = 15 * 60 * 1000L // 15 minutes
@@ -1379,12 +1382,14 @@ class TremorService : LifecycleService(), SensorEventListener {
         val wasAtLimit = promptsToday >= oldMaxDaily
         val nowHasRoom = promptsToday < config.maxPromptsPerDay
         
-        // Store calibration config so RatingActivity can read it
+        // Store calibration + smart trigger config so RatingActivity can read it
         prefs.edit()
             .putBoolean("calibration_enabled", config.calibrationModeEnabled)
             .putInt("calibration_duration_seconds", config.calibrationDurationSeconds)
+            .putBoolean(KEY_SMART_TRIGGER_ENABLED, config.smartTriggerEnabled)
+            .putInt(KEY_MIN_CONTEXT_SAMPLES, DEFAULT_MIN_CONTEXT_SAMPLES)
             .apply()
-        Timber.i("Calibration config stored: enabled=${config.calibrationModeEnabled}, duration=${config.calibrationDurationSeconds}s")
+        Timber.i("Calibration config stored: enabled=${config.calibrationModeEnabled}, duration=${config.calibrationDurationSeconds}s, smartTrigger=${config.smartTriggerEnabled}")
 
         RatingPromptReceiver.applyConfig(
             context = this,
@@ -1600,6 +1605,48 @@ class TremorService : LifecycleService(), SensorEventListener {
             return
         }
 
+        // Data-readiness gate: never prompt if recent objective context is missing/sparse.
+        if (!::monitoringEngine.isInitialized) {
+            advanceAndSchedule("monitoring engine not initialized")
+            return
+        }
+        val minContextSamples = prefs.getInt(KEY_MIN_CONTEXT_SAMPLES, DEFAULT_MIN_CONTEXT_SAMPLES)
+        val smartTriggerEnabled = prefs.getBoolean(KEY_SMART_TRIGGER_ENABLED, false)
+        val nowMs = System.currentTimeMillis()
+        val recentSamples = monitoringEngine.getRecentTremorData(windowSeconds = 300)
+        if (recentSamples.size < minContextSamples) {
+            advanceAndSchedule(
+                "insufficient objective context (${recentSamples.size}/$minContextSamples samples in 5m)"
+            )
+            return
+        }
+
+        // Smart trigger: prompt only when short-term objective signal shows activity/change.
+        if (smartTriggerEnabled) {
+            val window60 = recentSamples.filter { it.timestamp >= nowMs - 60_000L }
+            if (window60.size < 10) {
+                advanceAndSchedule("smart trigger: insufficient 60s samples (${window60.size})")
+                return
+            }
+
+            val mean60 = window60.map { it.severity.toDouble() }.average()
+            val max60 = window60.maxOfOrNull { it.severity } ?: 0f
+            val nonZeroFraction60 =
+                window60.count { it.severity > 0f }.toDouble() / window60.size.toDouble()
+
+            val smartTriggered =
+                mean60 >= 0.35 || max60 >= 1.25f || nonZeroFraction60 >= 0.20
+
+            if (!smartTriggered) {
+                advanceAndSchedule(
+                    "smart trigger conditions not met " +
+                        "(mean60=${"%.3f".format(mean60)}, max60=${"%.3f".format(max60)}, " +
+                        "nzf60=${"%.3f".format(nonZeroFraction60)})"
+                )
+                return
+            }
+        }
+
         val today = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
         val dontAskDate = prefs.getString(KEY_DONT_ASK_DATE, null)
         if (dontAskDate == today) {
@@ -1643,8 +1690,9 @@ class TremorService : LifecycleService(), SensorEventListener {
                 .putBoolean(KEY_PROMPT_FOLLOWUP_PENDING, followupEnabled)
                 .commit()
         ) {
-            Timber.i("Showing rating prompt (${promptsToday + 1}/$maxDailyPrompts today) via service")
-            showRatingPromptNotification("PROMPTED")
+            val promptSource = if (smartTriggerEnabled) "TREMOR_CHANGE" else "PROMPTED"
+            Timber.i("Showing rating prompt (${promptsToday + 1}/$maxDailyPrompts today) via service, source=$promptSource, context=${recentSamples.size}")
+            showRatingPromptNotification(promptSource, recentSamples.size)
             triggerPromptVibration(followup = false)
             if (followupEnabled) {
                 scheduleFollowupVibration()
@@ -1669,7 +1717,7 @@ class TremorService : LifecycleService(), SensorEventListener {
         }
     }
 
-    private fun showRatingPromptNotification(source: String) {
+    private fun showRatingPromptNotification(source: String, contextSampleCount: Int = -1) {
         try {
             ensureRatingPromptChannel()
             val activityIntent = Intent().apply {
@@ -1678,6 +1726,9 @@ class TremorService : LifecycleService(), SensorEventListener {
                     Intent.FLAG_ACTIVITY_CLEAR_TASK or
                     Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS
                 putExtra("source", source)
+                if (contextSampleCount >= 0) {
+                    putExtra("contextSampleCount", contextSampleCount)
+                }
             }
             val pendingIntent = PendingIntent.getActivity(
                 this,
