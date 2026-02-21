@@ -59,6 +59,12 @@ class WatchDataListenerService : WearableListenerService() {
         // Phone-side diagnostic event retention (events are best-effort telemetry, not user data).
         private const val DIAG_MAX_EVENTS = 100
         private const val DIAG_MAX_AGE_MS = 7L * 24 * 60 * 60 * 1000 // 7 days
+
+        // Calibration reparse is a one-time migration; throttle to once per 12 hours
+        // to avoid filesystem/DB work on every service restart.
+        private const val CAL_REPARSE_COOLDOWN_MS = 12L * 60 * 60 * 1000
+        private const val CAL_REPARSE_PREFS = "cal_reparse_prefs"
+        private const val CAL_REPARSE_LAST_RUN_KEY = "last_reparse_run_ms"
     }
 
     // Coroutine scope for async operations
@@ -135,9 +141,19 @@ class WatchDataListenerService : WearableListenerService() {
         // Initialize channel client
         channelClient = Wearable.getChannelClient(this)
 
-        // One-time migration: reparse orphaned calibration files (opus46 Issue 1)
-        serviceScope.launch {
-            reparseOrphanedCalibrationFiles()
+        // One-time migration: reparse orphaned calibration files (opus46 Issue 1).
+        // Throttled to once per 12 hours — this is idempotent but still does FS+DB
+        // work, and running it on every service restart generates spurious warnings
+        // for rating IDs that simply have no calibration data.
+        val reparsePrefs = getSharedPreferences(CAL_REPARSE_PREFS, MODE_PRIVATE)
+        val lastReparse = reparsePrefs.getLong(CAL_REPARSE_LAST_RUN_KEY, 0L)
+        if (System.currentTimeMillis() - lastReparse >= CAL_REPARSE_COOLDOWN_MS) {
+            serviceScope.launch {
+                reparseOrphanedCalibrationFiles()
+                reparsePrefs.edit().putLong(CAL_REPARSE_LAST_RUN_KEY, System.currentTimeMillis()).apply()
+            }
+        } else {
+            Log.d(TAG, "Skipping calibration reparse (cooldown active)")
         }
 
         // Load persisted chunk assemblies from disk
@@ -315,6 +331,10 @@ class WatchDataListenerService : WearableListenerService() {
                     payload
                 }
             } ?: return
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            // Service lifecycle cancellation — expected, not an error.
+            Log.i(TAG, "Channel batch read cancelled (service lifecycle)")
+            throw e  // Always rethrow CancellationException in coroutines
         } catch (e: Exception) {
             Log.e(TAG, "Error reading channel batch: ${e.message}", e)
             return

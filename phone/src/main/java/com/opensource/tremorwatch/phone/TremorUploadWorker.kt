@@ -35,8 +35,17 @@ class TremorUploadWorker(
         const val KEY_IS_MANUAL_UPLOAD = "is_manual_upload"
         const val UNIQUE_WORK_NAME = "tremor_upload"
 
+        // Debounce: skip enqueueAllPending if called again within 30 seconds.
+        // Prevents WorkManager job floods when multiple batches arrive in quick succession.
+        private const val ENQUEUE_ALL_DEBOUNCE_MS = 30_000L
+        @Volatile private var lastEnqueueAllMs: Long = 0L
+
+        private fun uniqueWorkNameFor(batchFilePath: String): String =
+            "tremor_upload_${File(batchFilePath).nameWithoutExtension}"
+
         /**
-         * Enqueue a single batch for upload
+         * Enqueue a single batch for upload. Uses enqueueUniqueWork so that
+         * re-triggering for the same file is a no-op (KEEP policy).
          */
         fun enqueueBatch(
             context: Context,
@@ -66,13 +75,27 @@ class TremorUploadWorker(
                 )
                 .build()
 
-            return WorkManager.getInstance(context).enqueue(request)
+            // Use unique work per batch file: re-enqueueing the same file is a no-op.
+            // This prevents the "considered buggy" JobScheduler spam caused by duplicate jobs.
+            return WorkManager.getInstance(context).enqueueUniqueWork(
+                uniqueWorkNameFor(batchFilePath),
+                ExistingWorkPolicy.KEEP,
+                request
+            )
         }
 
         /**
-         * Enqueue all pending batches from queue
+         * Enqueue all pending batches from queue. Debounced to 30 seconds to prevent
+         * flooding WorkManager when many batches arrive simultaneously.
          */
         fun enqueueAllPending(context: Context, isManualUpload: Boolean = false) {
+            val now = System.currentTimeMillis()
+            if (!isManualUpload && now - lastEnqueueAllMs < ENQUEUE_ALL_DEBOUNCE_MS) {
+                Log.d(TAG, "Skipping enqueueAllPending (debounced)")
+                return
+            }
+            lastEnqueueAllMs = now
+
             val queueDir = File(context.filesDir, "upload_queue")
             if (!queueDir.exists()) return
 
