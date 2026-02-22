@@ -8,9 +8,11 @@ object StatsEngine {
 
     private const val USER_CONF_MIN = 0.5
     private const val USER_ADJ_CONF_MIN = 0.4
+    private const val USER_RELIABILITY_MIN = 0.35
 
     private const val CLINICAL_CONF_MIN = 0.7
     private const val CLINICAL_ADJ_CONF_MIN = 0.6
+    private const val CLINICAL_RELIABILITY_MIN = 0.55
 
     private const val VEHICLE_ACTIVITY_CONF_MIN = 0.7
     private const val WALKING_ACTIVITY_CONF_MIN = 0.7
@@ -31,13 +33,15 @@ object StatsEngine {
     )
 
     fun isValidForUserStats(s: StatsSample): Boolean {
-        val conf = s.confidence ?: 0.0
+        val conf = s.calibratedConfidence ?: s.confidence ?: 0.0
         val adjConf = s.activityAdjustedConfidence ?: 0.0
         val tremorTypeConf = s.tremorTypeConfidence ?: 0.0
+        val reliability = s.reliabilityScore
 
         val activityType = s.activityTypeCanonical()
         val activityConf = s.activityConfidence ?: 0.0
         val activityAgeMs = s.activityAgeMs ?: Long.MAX_VALUE
+        val stepsPerMinute = s.stepsPerMinute ?: 0
         val activityAgeOk = activityAgeMs <= ACTIVITY_STALE_MS_MAX
 
         // In the current pipeline, `confidence` is frequently low/zero during stable/no-tremor periods
@@ -46,6 +50,7 @@ object StatsEngine {
         // the confidence fields are low so we can still compute stability during proven-still intervals.
         val isExplicitlyReliable = s.isReliableMeasurement == true
         val confidenceOk = isExplicitlyReliable || (conf >= USER_CONF_MIN && adjConf >= USER_ADJ_CONF_MIN)
+        val reliabilityOk = reliability == null || reliability >= USER_RELIABILITY_MIN
 
         val vehicleOrBikePoison = (activityType == "IN_VEHICLE" || activityType == "ON_BICYCLE") &&
             activityConf >= VEHICLE_ACTIVITY_CONF_MIN
@@ -61,6 +66,8 @@ object StatsEngine {
             s.excludeFromAnalysis != true &&
             s.isReliableMeasurement != false &&
             confidenceOk &&
+            reliabilityOk &&
+            stepsPerMinute <= 130 &&
             !vehicleOrBikePoison &&
             activityType != "RUNNING" &&
             activityAgeOk &&
@@ -68,13 +75,15 @@ object StatsEngine {
     }
 
     fun isValidForClinicalStats(s: StatsSample): Boolean {
-        val conf = s.confidence ?: 0.0
+        val conf = s.calibratedConfidence ?: s.confidence ?: 0.0
         val adjConf = s.activityAdjustedConfidence ?: 0.0
         val tremorTypeConf = s.tremorTypeConfidence ?: 0.0
+        val reliability = s.reliabilityScore
 
         val activityType = s.activityTypeCanonical()
         val activityConf = s.activityConfidence ?: 0.0
         val activityAgeMs = s.activityAgeMs ?: Long.MAX_VALUE
+        val stepsPerMinute = s.stepsPerMinute ?: 0
         val activityAgeOk = activityAgeMs <= ACTIVITY_STALE_MS_MAX
 
         val vehicleOrBikePoison = (activityType == "IN_VEHICLE" || activityType == "ON_BICYCLE") &&
@@ -90,6 +99,8 @@ object StatsEngine {
             s.isReliableMeasurement == true &&
             conf >= CLINICAL_CONF_MIN &&
             adjConf >= CLINICAL_ADJ_CONF_MIN &&
+            (reliability == null || reliability >= CLINICAL_RELIABILITY_MIN) &&
+            stepsPerMinute <= 110 &&
             !vehicleOrBikePoison &&
             activityType != "RUNNING" &&
             activityAgeOk &&

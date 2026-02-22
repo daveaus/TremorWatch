@@ -12,8 +12,13 @@ import androidx.sqlite.db.SupportSQLiteDatabase
  * Provides fast indexed queries to replace slow JSONL file reading.
  */
 @Database(
-    entities = [TremorSample::class, SubjectiveRatingEntity::class, CalibrationDataEntity::class],
-    version = 5,
+    entities = [
+        TremorSample::class,
+        SubjectiveRatingEntity::class,
+        CalibrationDataEntity::class,
+        MedicationIngestionEntity::class
+    ],
+    version = 6,
     exportSchema = false
 )
 abstract class TremorRoomDatabase : RoomDatabase() {
@@ -117,6 +122,32 @@ abstract class TremorRoomDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * Migration from v5 to v6: adds medication_ingestions table.
+         */
+        private val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS medication_ingestions (
+                        id TEXT PRIMARY KEY NOT NULL,
+                        timestamp INTEGER NOT NULL,
+                        source TEXT NOT NULL,
+                        watchId TEXT,
+                        notes TEXT,
+                        payloadJson TEXT
+                    )
+                    """.trimIndent()
+                )
+                database.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_medication_ingestions_timestamp ON medication_ingestions(timestamp)"
+                )
+                database.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_medication_ingestions_source ON medication_ingestions(source)"
+                )
+            }
+        }
+
         fun getDatabase(context: Context): TremorRoomDatabase {
             return INSTANCE ?: synchronized(this) {
                 val instance = Room.databaseBuilder(
@@ -124,7 +155,13 @@ abstract class TremorRoomDatabase : RoomDatabase() {
                 TremorRoomDatabase::class.java,
                 "tremor_data.db"
             )
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
+                .addMigrations(
+                    MIGRATION_1_2,
+                    MIGRATION_2_3,
+                    MIGRATION_3_4,
+                    MIGRATION_4_5,
+                    MIGRATION_5_6
+                )
                 .build()
                 INSTANCE = instance
                 instance

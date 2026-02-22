@@ -21,6 +21,15 @@ interface TremorDao {
         val confidence: Double?,
         val metadataJson: String?
     )
+
+    data class MedicationIngestionRow(
+        val id: String,
+        val timestamp: Long,
+        val source: String,
+        val watchId: String?,
+        val notes: String?,
+        val payloadJson: String?
+    )
     
     /**
      * Get all samples after a cutoff timestamp.
@@ -158,7 +167,7 @@ interface TremorDao {
             SUM(tremorCount) as totalTremorCount,
             MAX(isWorn) as lastIsWorn,
             MAX(isCharging) as lastIsCharging,
-            MAX(confidence) as lastConfidence,
+            AVG(confidence) as avgConfidence,
             MAX(watchId) as lastWatchId
         FROM tremor_samples 
         WHERE timestamp >= :cutoffTime 
@@ -276,5 +285,30 @@ interface TremorDao {
      */
     @Query("UPDATE subjective_ratings SET calibrationModeEnabled = 1 WHERE id = :ratingId")
     suspend fun markRatingCalibrated(ratingId: String)
+
+    // ==================== Medication Ingestion Events ====================
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertMedicationIngestion(event: MedicationIngestionEntity)
+
+    @Query(
+        """
+        SELECT id, timestamp, source, watchId, notes, payloadJson
+        FROM medication_ingestions
+        WHERE timestamp >= :startTime
+        ORDER BY timestamp DESC
+        """
+    )
+    suspend fun getMedicationIngestionsSince(startTime: Long): List<MedicationIngestionRow>
+
+    @Query(
+        """
+        SELECT id, timestamp, source, watchId, notes, payloadJson
+        FROM medication_ingestions
+        ORDER BY timestamp DESC
+        LIMIT :limit
+        """
+    )
+    suspend fun getRecentMedicationIngestions(limit: Int = 200): List<MedicationIngestionRow>
 }
 

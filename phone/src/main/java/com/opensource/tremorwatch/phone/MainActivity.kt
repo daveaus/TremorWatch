@@ -22,6 +22,7 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.health.connect.client.PermissionController
 import androidx.appcompat.app.AppCompatActivity
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -129,6 +130,8 @@ import com.opensource.tremorwatch.phone.ui.dialogs.DisclaimerDialog
 import com.opensource.tremorwatch.phone.ui.dialogs.DisclaimerManager
 import com.opensource.tremorwatch.phone.ui.TremorDetectionSettingsScreen
 import com.opensource.tremorwatch.phone.ui.RatingConfigScreen
+import com.opensource.tremorwatch.phone.health.HealthConnectContextRepository
+import com.opensource.tremorwatch.phone.health.HealthContextSnapshot
 
 class MainActivity : AppCompatActivity() {
     companion object {
@@ -546,8 +549,21 @@ fun MainScreen(
     var isDailyProfileLoading by remember { mutableStateOf(false) }
     var dailyProfileError by remember { mutableStateOf<String?>(null) }
     var dailyProfileEmptyReason by remember { mutableStateOf<String?>(null) }
+    var healthContextSnapshot by remember { mutableStateOf<HealthContextSnapshot?>(null) }
 
     val dbHelper = remember(context) { TremorDatabaseHelper(context) }
+    val healthConnectRepository = remember(context) { HealthConnectContextRepository(context) }
+    val healthConnectAvailable = remember { healthConnectRepository.isHealthConnectAvailable() }
+    val healthPermissions = remember { healthConnectRepository.requiredReadPermissions() }
+    var healthPermissionsGranted by remember { mutableStateOf(false) }
+    var healthPermissionStatusKnown by remember { mutableStateOf(false) }
+    val healthPermissionLauncher = rememberLauncherForActivityResult(
+        contract = PermissionController.createRequestPermissionResultContract()
+    ) { granted ->
+        healthPermissionsGranted = healthPermissions.all { it in granted }
+        healthPermissionStatusKnown = true
+        dataLoadTrigger++
+    }
     val dailyProfileCache = remember {
         object : LinkedHashMap<String, DailyTremorProfile>(8, 0.75f, true) {
             override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, DailyTremorProfile>?): Boolean {
@@ -561,6 +577,40 @@ fun MainScreen(
         while (true) {
             delay(60000)
             dataLoadTrigger++
+        }
+    }
+
+    LaunchedEffect(healthConnectAvailable, dataLoadTrigger) {
+        if (!healthConnectAvailable) {
+            healthPermissionsGranted = false
+            healthPermissionStatusKnown = true
+            healthContextSnapshot = null
+            return@LaunchedEffect
+        }
+        healthPermissionsGranted = withContext(Dispatchers.IO) {
+            healthConnectRepository.hasAllRequiredPermissions()
+        }
+        healthPermissionStatusKnown = true
+    }
+
+    // Health Connect context is fetched periodically and used for future context-aware analytics.
+    // It does not gate real-time tremor detection.
+    LaunchedEffect(dataLoadTrigger, healthConnectAvailable, healthPermissionsGranted) {
+        if (!healthConnectAvailable || !healthPermissionsGranted) {
+            healthContextSnapshot = null
+            return@LaunchedEffect
+        }
+        if (dataLoadTrigger % 15 == 0 || healthContextSnapshot == null) {
+            healthContextSnapshot = withContext(Dispatchers.IO) {
+                healthConnectRepository.readSnapshot(windowHours = 24)
+            }
+            healthContextSnapshot?.let {
+                Log.d(
+                    "MainActivity",
+                    "Health context: available=${it.sourceAvailable}, steps=${it.steps}, " +
+                        "sleepMinutes=${it.sleepMinutes}, avgHr=${it.avgHeartRateBpm}"
+                )
+            }
         }
     }
 
@@ -622,12 +672,67 @@ fun MainScreen(
                 }
             }
             Log.d("MainActivity", "Raw data loaded: ${rawData.size} points")
-            allChartDataState = rawData
+
+            // Apply a default quality gate for chart rendering:
+            // - Keep timeline buckets to preserve gap detection/timestamps.
+            // - Zero-out low quality buckets instead of dropping rows.
+            // This keeps visual continuity while preventing low-confidence noise from
+            // inflating severity/event charts.
+            fun parseBooleanMeta(data: ChartData, key: String): Boolean? {
+                return when (val value = data.metadata[key]) {
+                    is Boolean -> value
+                    is String -> value.toBoolean()
+                    is Number -> value.toInt() != 0
+                    else -> null
+                }
+            }
+
+            fun parseDoubleMeta(data: ChartData, key: String): Double? {
+                return when (val value = data.metadata[key]) {
+                    is Double -> value
+                    is Float -> value.toDouble()
+                    is Int -> value.toDouble()
+                    is Long -> value.toDouble()
+                    is String -> value.toDoubleOrNull()
+                    else -> null
+                }
+            }
+
+            val qualityGatedData = rawData.map { point ->
+                val isWorn = parseBooleanMeta(point, "isWorn") ?: true
+                val isCharging = parseBooleanMeta(point, "isCharging") ?: false
+                val confidence = parseDoubleMeta(point, "confidence") ?: 0.0
+
+                val tier = when {
+                    !isWorn || isCharging -> "exclude"
+                    confidence >= 0.15 -> "clinical"
+                    confidence >= 0.10 -> "usable"
+                    else -> "low"
+                }
+
+                val gatedOut = tier == "exclude" || tier == "low"
+                val enrichedMeta = point.metadata.toMutableMap().apply {
+                    this["qualityTier"] = tier
+                    this["excludedByQualityGate"] = gatedOut
+                }
+
+                if (gatedOut) {
+                    point.copy(
+                        severity = 0.0,
+                        tremorCount = 0,
+                        metadata = enrichedMeta
+                    )
+                } else {
+                    point.copy(metadata = enrichedMeta)
+                }
+            }
+
+            allChartDataState = qualityGatedData
             
             // Detect gaps in the data with improved classification
             val gaps = mutableListOf<GapEvent>()
-            if (rawData.size > 1) {
-                val sorted = rawData.sortedBy { it.timestamp }
+            if (qualityGatedData.size > 1) {
+                val sorted = qualityGatedData.sortedBy { it.timestamp }
                 for (i in 1 until sorted.size) {
                     val timeDiff = sorted[i].timestamp - sorted[i-1].timestamp
 
@@ -697,19 +802,19 @@ fun MainScreen(
             isDataLoading = false  // Done loading
             
             // Log data range for debugging
-            if (rawData.isNotEmpty()) {
-                val sorted = rawData.sortedBy { it.timestamp }
+            if (qualityGatedData.isNotEmpty()) {
+                val sorted = qualityGatedData.sortedBy { it.timestamp }
                 val minTime = sorted.first().timestamp
                 val maxTime = sorted.last().timestamp
                 val minDate = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date(minTime))
                 val maxDate = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date(maxTime))
                 val now = System.currentTimeMillis()
                 val daysAgo = (now - maxTime) / (24 * 60 * 60 * 1000L)
-                Log.i("MainActivity", "Loaded ${rawData.size} data points, detected ${gaps.size} gaps")
+                Log.i("MainActivity", "Loaded ${qualityGatedData.size} chart points after quality gate, detected ${gaps.size} gaps")
                 Log.i("MainActivity", "Data range: $minDate to $maxDate (most recent data is $daysAgo days ago)")
             } else {
                 Log.w("MainActivity", "No data loaded - empty result from loadLocalData")
-                Log.i("MainActivity", "Loaded ${rawData.size} data points, detected ${gaps.size} gaps")
+                Log.i("MainActivity", "Loaded ${qualityGatedData.size} data points, detected ${gaps.size} gaps")
             }
         } catch (e: Exception) {
             Log.e("MainActivity", "Error loading chart data: ${e.message}", e)
@@ -796,7 +901,7 @@ fun MainScreen(
                         subjectiveOverlayMode = dailyProfileOverlayMode,
                         excludeCharging = true,
                         excludeOffWrist = true,
-                        minConfidence = null,
+                        minConfidence = 0.15,
                         iqrMultiplier = 1.5,
                         // Keep smoothing off by default so time-of-day variation is not flattened.
                         smoothingRadius = 0,
@@ -1057,6 +1162,31 @@ fun MainScreen(
             statusTextIsError = quickStatsStatusIsError,
             onOpenStats = onNavigateToStats
         )
+
+        if (healthConnectAvailable && healthPermissionStatusKnown && !healthPermissionsGranted) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        text = "Health Connect Context",
+                        style = MaterialTheme.typography.titleMedium
+                    )
+                    Text(
+                        text = "Grant read access for steps, sleep, heart rate, resting heart rate, and HRV so context analytics can run.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Button(onClick = { healthPermissionLauncher.launch(healthPermissions) }) {
+                        Text("Grant Health Access")
+                    }
+                }
+            }
+        }
         
         // Permission Status Card (show if InfluxDB is enabled AND permissions missing)
         val influxDbEnabled = remember { mutableStateOf(PhoneDataConfig.isInfluxDbEnabled(context)) }

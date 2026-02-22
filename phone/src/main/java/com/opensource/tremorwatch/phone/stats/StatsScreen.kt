@@ -32,7 +32,9 @@ import androidx.compose.ui.unit.dp
 import com.opensource.tremorwatch.phone.StatBox
 import kotlinx.coroutines.launch
 import java.time.LocalDate
+import java.time.Instant
 import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -48,9 +50,13 @@ fun StatsScreen(
     val recentDaysToShow = 7
 
     var history by remember { mutableStateOf<List<DailyStatsResult>>(emptyList()) }
+    var medicationResponses by remember { mutableStateOf<List<StatsRepository.MedicationDoseResponseRecord>>(emptyList()) }
     var selectedDate by remember { mutableStateOf<LocalDate?>(null) }
     var isLoading by remember { mutableStateOf(true) }
     var error by remember { mutableStateOf<String?>(null) }
+    var medicationLoading by remember { mutableStateOf(true) }
+    var medicationError by remember { mutableStateOf<String?>(null) }
+    val ingestionTimeFormatter = remember { DateTimeFormatter.ofPattern("MM-dd HH:mm") }
 
     LaunchedEffect(Unit) {
         isLoading = true
@@ -62,6 +68,17 @@ fun StatsScreen(
             emptyList()
         } finally {
             isLoading = false
+        }
+
+        medicationLoading = true
+        medicationError = null
+        medicationResponses = try {
+            repo.computeMedicationResponsesSince(hoursBack = recentDaysToShow * 24)
+        } catch (e: Exception) {
+            medicationError = e.message ?: "Failed to compute medication responses"
+            emptyList()
+        } finally {
+            medicationLoading = false
         }
 
         if (selectedDate == null) {
@@ -232,6 +249,103 @@ fun StatsScreen(
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 Text(
+                    text = "Medication Response (${recentDaysToShow}d)",
+                    style = MaterialTheme.typography.titleMedium
+                )
+
+                when {
+                    medicationLoading -> {
+                        Text(
+                            text = "Computing ingestion-anchored responses...",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+
+                    medicationError != null -> {
+                        Text(
+                            text = medicationError ?: "Unknown error",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    }
+
+                    medicationResponses.isEmpty() -> {
+                        Text(
+                            text = "No ingestion logs yet. Use \"Taken Now\" on the watch to anchor dose analytics.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+
+                    else -> {
+                        val counts = medicationResponses.groupingBy { it.response.status }.eachCount()
+                        val improvedCount = counts["improved"] ?: 0
+                        val noChangeCount = counts["no_change"] ?: 0
+                        val worseCount = counts["worse"] ?: 0
+                        val insufficientCount = counts["insufficient"] ?: 0
+
+                        Text(
+                            text = "Improved $improvedCount | No change $noChangeCount | Worse $worseCount | Insufficient $insufficientCount",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+
+                        val improved = medicationResponses
+                            .filter { it.response.status == "improved" }
+                            .map { it.response }
+                        val onsetValues = improved.mapNotNull { it.onsetMinutes?.toDouble() }
+                        val durationValues = improved.mapNotNull { it.durationMinutes?.toDouble() }
+                        val onsetAvg = if (onsetValues.isNotEmpty()) onsetValues.average() else null
+                        val durationAvg = if (durationValues.isNotEmpty()) durationValues.average() else null
+                        if (onsetAvg != null && durationAvg != null) {
+                            Text(
+                                text = "Improved-dose averages: onset ${String.format(Locale.US, "%.1f", onsetAvg)} min, duration ${String.format(Locale.US, "%.1f", durationAvg)} min",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+
+                        medicationResponses.take(5).forEachIndexed { idx, rec ->
+                            val ts = Instant.ofEpochMilli(rec.ingestionTimestamp).atZone(zoneId)
+                            val status = rec.response.status.replace('_', ' ')
+                            val delta = rec.response.deltaPercent?.let { String.format(Locale.US, "%.1f%%", it) } ?: "--"
+                            val onset = rec.response.onsetMinutes?.let { "${it}m" } ?: "--"
+                            val duration = rec.response.durationMinutes?.let { "${it}m" } ?: "--"
+                            val conf = String.format(Locale.US, "%.2f", rec.response.confidenceScore)
+
+                            Text(
+                                text = "${ingestionTimeFormatter.format(ts)}  ${status.uppercase(Locale.US)}  Δ $delta  onset $onset  duration $duration  conf $conf",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+
+                            if (rec.response.status == "insufficient" && rec.response.reason != null) {
+                                Text(
+                                    text = "Reason: ${rec.response.reason}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+
+                            if (idx != medicationResponses.take(5).lastIndex) {
+                                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+        ) {
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text(
                     text = "Recent Days",
                     style = MaterialTheme.typography.titleMedium
                 )
@@ -318,6 +432,17 @@ fun StatsScreen(
                             history = newHistory
                             selectedDate = selectedDate?.takeIf { sel -> newHistory.any { it.date == sel } }
                                 ?: newHistory.firstOrNull()?.date
+
+                            medicationLoading = true
+                            medicationError = null
+                            medicationResponses = try {
+                                repo.computeMedicationResponsesSince(hoursBack = recentDaysToShow * 24)
+                            } catch (e: Exception) {
+                                medicationError = e.message ?: "Failed to compute medication responses"
+                                emptyList()
+                            } finally {
+                                medicationLoading = false
+                            }
                         }
                     }
                 ) {

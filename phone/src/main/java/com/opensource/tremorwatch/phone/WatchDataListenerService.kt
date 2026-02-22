@@ -4,6 +4,7 @@ import android.content.Intent
 import android.util.Log
 import com.opensource.tremorwatch.phone.data.TremorDataRepository
 import com.opensource.tremorwatch.phone.database.CalibrationDataEntity
+import com.opensource.tremorwatch.phone.database.MedicationIngestionEntity
 import com.opensource.tremorwatch.phone.database.SubjectiveRatingEntity
 import com.opensource.tremorwatch.phone.database.TremorDao
 import com.opensource.tremorwatch.phone.database.TremorRoomDatabase
@@ -25,6 +26,7 @@ import java.io.ByteArrayOutputStream
 import java.io.EOFException
 import java.io.File
 import java.io.InputStream
+import java.util.UUID
 import java.util.zip.GZIPInputStream
 import kotlin.math.abs
 
@@ -923,12 +925,50 @@ class WatchDataListenerService : WearableListenerService() {
             
             // Queue for InfluxDB upload
             saveDiagnosticEventToQueue(eventType, timestamp, json)
+
+            if (eventType == "medication_ingestion") {
+                persistMedicationIngestionEvent(json, timestamp)
+            }
             
             // Trigger upload if on home network
             triggerUploadService()
             
         } catch (e: Exception) {
             Log.e(TAG, "Failed to handle diagnostic event: ${e.message}", e)
+        }
+    }
+
+    private fun persistMedicationIngestionEvent(event: JSONObject, timestamp: Long) {
+        serviceScope.launch(Dispatchers.IO) {
+            try {
+                val db = TremorRoomDatabase.getDatabase(this@WatchDataListenerService)
+                val dao = db.tremorDao()
+                val id = event.optString("id").takeIf { it.isNotBlank() } ?: UUID.randomUUID().toString()
+                val source = event.optString("source").ifBlank { "WATCH_TAKEN_NOW" }
+                val watchId = event.optNullableString("watchId")
+                val notes = event.optNullableString("notes")
+
+                dao.insertMedicationIngestion(
+                    MedicationIngestionEntity(
+                        id = id,
+                        timestamp = timestamp,
+                        source = source,
+                        watchId = watchId,
+                        notes = notes,
+                        payloadJson = event.toString()
+                    )
+                )
+
+                getSharedPreferences("medication_ingestion_prefs", MODE_PRIVATE)
+                    .edit()
+                    .putLong("last_medication_ingestion_time", timestamp)
+                    .putString("last_medication_ingestion_source", source)
+                    .apply()
+
+                Log.i(TAG, "✓ Saved medication ingestion event $id ($source)")
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to persist medication ingestion event: ${e.message}", e)
+            }
         }
     }
     

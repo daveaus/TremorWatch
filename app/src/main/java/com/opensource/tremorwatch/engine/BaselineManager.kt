@@ -101,9 +101,7 @@ class BaselineManager(private val context: Context) {
     private var restingBaseline = BaselineStats()
     private var activeBaseline = BaselineStats()
     
-    // Running variance calculation using Welford's algorithm
-    private var restingM2 = 0.0  // Sum of squared differences
-    private var activeM2 = 0.0
+    // Exponentially weighted variance is tracked directly in BaselineStats.magnitudeVariance.
     
     private val prefs: SharedPreferences by lazy {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -199,7 +197,6 @@ class BaselineManager(private val context: Context) {
             magnitudeVariance = variance,
             sampleCount = calibrationSamples.size
         )
-        restingM2 = (variance * calibrationSamples.size).toDouble()
         
         // Mark calibration complete and save
         prefs.edit().putBoolean(KEY_CALIBRATION_COMPLETE, true)
@@ -344,16 +341,13 @@ class BaselineManager(private val context: Context) {
         // Update total power with EMA
         baseline.totalPower = baseline.totalPower * (1 - alpha) + totalPower * alpha
         
-        // Update variance using Welford's online algorithm
-        val delta = magnitude - oldMagnitude
-        val delta2 = magnitude - baseline.magnitude
-        if (isResting) {
-            restingM2 += delta * delta2
-            baseline.magnitudeVariance = (restingM2 / baseline.sampleCount.coerceAtLeast(1)).toFloat()
-        } else {
-            activeM2 += delta * delta2
-            baseline.magnitudeVariance = (activeM2 / baseline.sampleCount.coerceAtLeast(1)).toFloat()
-        }
+        // Update variance with exponentially weighted innovation.
+        // Using EMA mean + classical cumulative M2 is statistically inconsistent.
+        // This keeps variance aligned with the EMA adaptation rate.
+        val innovation = magnitude - oldMagnitude
+        val prevVariance = baseline.magnitudeVariance.coerceAtLeast(1e-6f)
+        val ewVariance = (1f - alpha) * (prevVariance + alpha * innovation * innovation)
+        baseline.magnitudeVariance = ewVariance.coerceIn(1e-6f, 10f)
         
         // Persist periodically (every 60 samples = ~1 minute)
         if (baseline.sampleCount % 60 == 0) {
@@ -454,8 +448,6 @@ class BaselineManager(private val context: Context) {
     fun resetBaseline() {
         restingBaseline = BaselineStats()
         activeBaseline = BaselineStats()
-        restingM2 = 0.0
-        activeM2 = 0.0
         
         prefs.edit().clear().apply()
         Timber.i("Baseline reset - starting fresh calibration")

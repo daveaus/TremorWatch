@@ -51,7 +51,8 @@ class DailyTremorProfileAggregatorTest {
 
         val bucket = profile.buckets[8]
         assertTrue(bucket.lowDayCoverageFlag)
-        assertNull(bucket.objectiveMedian)
+        assertNotNull(bucket.objectiveMedian)
+        assertTrue((bucket.objectiveMedian ?: 0.0) > 0.0)
         assertEquals(60, bucket.objectiveRawSampleCount)
         assertEquals(60, bucket.objectiveTrimmedSampleCount)
     }
@@ -155,10 +156,11 @@ class DailyTremorProfileAggregatorTest {
             nowMs = ts(dayOffset = 1, hour = 12)
         )
 
-        assertTrue(profile.subjectiveCalibration.applied)
-        assertEquals(SubjectiveOverlayMode.CALIBRATED_SCALED, profile.subjectiveCalibration.appliedMode)
-        assertNotNull(profile.subjectiveCalibration.scale)
-        assertTrue((profile.subjectiveCalibration.scale ?: 0.0) > 0.0)
+        // Subjective display calibration is intentionally disabled; subjective is always RAW_X2.
+        assertFalse(profile.subjectiveCalibration.applied)
+        assertEquals(SubjectiveOverlayMode.RAW_X2, profile.subjectiveCalibration.appliedMode)
+        assertNull(profile.subjectiveCalibration.scale)
+        assertEquals("Scaled subjective overlay disabled.", profile.subjectiveCalibration.fallbackReason)
     }
 
     @Test

@@ -579,6 +579,127 @@ private fun AdvancedSettingsSection(
                     help = "Weight in confidence calculation",
                     isModified = config.frequencyValidationWeight != TremorDetectionConfig().frequencyValidationWeight
                 ) { onConfigChange(config.copy(frequencyValidationWeight = it)) }
+
+                Spacer(modifier = Modifier.height(12.dp))
+                Text("FFT Window Mode", style = MaterialTheme.typography.bodyMedium)
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    listOf("fixed_64", "fixed_128", "ab_test").forEach { mode ->
+                        FilterChip(
+                            selected = config.fftWindowMode == mode,
+                            onClick = { onConfigChange(config.copy(fftWindowMode = mode)) },
+                            label = { Text(mode.replace('_', ' ')) }
+                        )
+                    }
+                }
+
+                IntSliderSetting(
+                    label = "FFT Window Short",
+                    value = config.fftWindowSizeShort,
+                    range = 32..256,
+                    help = "Short path window size (samples)",
+                    isModified = config.fftWindowSizeShort != TremorDetectionConfig().fftWindowSizeShort
+                ) { onConfigChange(config.copy(fftWindowSizeShort = it)) }
+
+                IntSliderSetting(
+                    label = "FFT Window Long",
+                    value = config.fftWindowSizeLong,
+                    range = 64..512,
+                    help = "Long path window size (samples)",
+                    isModified = config.fftWindowSizeLong != TremorDetectionConfig().fftWindowSizeLong
+                ) { onConfigChange(config.copy(fftWindowSizeLong = it)) }
+
+                Spacer(modifier = Modifier.height(8.dp))
+                Text("Spectrum Mode", style = MaterialTheme.typography.bodyMedium)
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    listOf("classic", "welch", "hybrid").forEach { mode ->
+                        FilterChip(
+                            selected = config.fftSpectrumMode == mode,
+                            onClick = { onConfigChange(config.copy(fftSpectrumMode = mode)) },
+                            label = { Text(mode) }
+                        )
+                    }
+                }
+
+                SliderSetting(
+                    label = "Welch Overlap",
+                    value = config.fftWelchOverlap,
+                    range = 0.0f..0.9f,
+                    format = "%.2f",
+                    help = "Welch segment overlap",
+                    isModified = config.fftWelchOverlap != TremorDetectionConfig().fftWelchOverlap
+                ) { onConfigChange(config.copy(fftWelchOverlap = it)) }
+
+                SliderSetting(
+                    label = "Welch Blend",
+                    value = config.fftWelchBlend,
+                    range = 0.0f..1.0f,
+                    format = "%.2f",
+                    help = "Hybrid blend weight",
+                    isModified = config.fftWelchBlend != TremorDetectionConfig().fftWelchBlend
+                ) { onConfigChange(config.copy(fftWelchBlend = it)) }
+
+                Spacer(modifier = Modifier.height(8.dp))
+                Text("Confidence Calibration", style = MaterialTheme.typography.bodyMedium)
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    listOf("none", "platt", "isotonic").forEach { mode ->
+                        FilterChip(
+                            selected = config.confidenceCalibrationMode == mode,
+                            onClick = { onConfigChange(config.copy(confidenceCalibrationMode = mode)) },
+                            label = { Text(mode) }
+                        )
+                    }
+                }
+
+                SliderSetting(
+                    label = "Platt A",
+                    value = config.confidencePlattA,
+                    range = -8f..8f,
+                    format = "%.2f",
+                    help = "Platt scaling slope",
+                    isModified = config.confidencePlattA != TremorDetectionConfig().confidencePlattA
+                ) { onConfigChange(config.copy(confidencePlattA = it)) }
+
+                SliderSetting(
+                    label = "Platt B",
+                    value = config.confidencePlattB,
+                    range = -4f..4f,
+                    format = "%.2f",
+                    help = "Platt scaling bias",
+                    isModified = config.confidencePlattB != TremorDetectionConfig().confidencePlattB
+                ) { onConfigChange(config.copy(confidencePlattB = it)) }
+
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Hybrid Reranker", style = MaterialTheme.typography.bodyMedium)
+                    Switch(
+                        checked = config.hybridRerankerEnabled,
+                        onCheckedChange = { enabled ->
+                            onConfigChange(config.copy(hybridRerankerEnabled = enabled))
+                        }
+                    )
+                }
+
+                SliderSetting(
+                    label = "Reranker Threshold",
+                    value = config.hybridRerankerThreshold,
+                    range = 0.1f..0.9f,
+                    format = "%.2f",
+                    help = "Probability threshold for reranker support",
+                    isModified = config.hybridRerankerThreshold != TremorDetectionConfig().hybridRerankerThreshold
+                ) { onConfigChange(config.copy(hybridRerankerThreshold = it)) }
+
+                SliderSetting(
+                    label = "Reranker Blend",
+                    value = config.hybridRerankerBlend,
+                    range = 0.0f..1.0f,
+                    format = "%.2f",
+                    help = "Blend raw confidence with reranker probability",
+                    isModified = config.hybridRerankerBlend != TremorDetectionConfig().hybridRerankerBlend
+                ) { onConfigChange(config.copy(hybridRerankerBlend = it)) }
             }
         }
     }

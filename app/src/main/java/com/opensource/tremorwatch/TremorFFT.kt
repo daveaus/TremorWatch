@@ -89,6 +89,10 @@ class TremorFFT(private val sampleRate: Float = 20f) {
         val tremorBandPower: Float,      // Power spectral density in 4-12 Hz band
         val totalPower: Float,           // Total power across all frequencies
         val maxPower: Float,             // Maximum power in tremor band (for peak prominence)
+        val bandRatio: Float,            // Ratio of tremor-band power to total power
+        val peakProminence: Float,       // Peak-to-band ratio
+        val spectralEntropy: Float,      // Normalized spectral entropy [0..1]
+        val harmonicRatio: Float,        // 2f harmonic support ratio [0..1+]
         val isTremor: Boolean,           // Whether tremor was detected
         val confidence: Float            // 0-1 confidence score
     )
@@ -104,6 +108,19 @@ class TremorFFT(private val sampleRate: Float = 20f) {
         val isPersonalized: Boolean = false
     )
 
+    enum class SpectrumMode {
+        CLASSIC,
+        WELCH,
+        HYBRID
+    }
+
+    data class AnalysisOptions(
+        val spectrumMode: SpectrumMode = SpectrumMode.CLASSIC,
+        val welchSegmentSize: Int = 64,
+        val welchOverlap: Float = 0.5f,
+        val welchBlend: Float = 0.35f
+    )
+
     /**
      * Perform FFT analysis on a window of sensor magnitude samples (gyroscope or accelerometer).
      *
@@ -117,28 +134,20 @@ class TremorFFT(private val sampleRate: Float = 20f) {
     fun analyze(
         samples: FloatArray, 
         isResting: Boolean = false,
-        adaptiveThresholds: AdaptiveThresholds? = null
+        adaptiveThresholds: AdaptiveThresholds? = null,
+        options: AnalysisOptions = AnalysisOptions()
     ): FFTResult {
         if (samples.size < 16) {
-            return FFTResult(0f, 0f, 0f, 0f, false, 0f)
+            return FFTResult(0f, 0f, 0f, 0f, 0f, 0f, 1f, 0f, false, 0f)
         }
 
         // Use power-of-two size for FFT efficiency. If not already a power of 2, zero-pad.
         val n = nextPowerOfTwo(samples.size).coerceAtMost(MAX_FFT_SIZE)
         val paddedSamples = samples.copyOf(n)
 
-        // Apply Hanning window to reduce spectral leakage
-        val windowed = applyHanningWindow(paddedSamples)
-
-        // Compute FFT
-        val (real, imag) = fft(windowed)
-
-        // Compute power spectrum (magnitude squared)
-        val powerSpectrum = FloatArray(n / 2)
+        val powerSpectrum = computePowerSpectrum(paddedSamples, n, options)
         var totalPower = 0f
-
-        for (i in 0 until n / 2) {
-            powerSpectrum[i] = (real[i] * real[i] + imag[i] * imag[i]) / n
+        for (i in powerSpectrum.indices) {
             totalPower += powerSpectrum[i]
         }
 
@@ -155,6 +164,7 @@ class TremorFFT(private val sampleRate: Float = 20f) {
         var tremorBandPower = 0f
         var maxPower = 0f
         var dominantFreq = 0f
+        var dominantBin = -1
 
         for (i in 0 until n / 2) {
             val freq = i * freqResolution
@@ -165,6 +175,7 @@ class TremorFFT(private val sampleRate: Float = 20f) {
                 if (powerSpectrum[i] > maxPower) {
                     maxPower = powerSpectrum[i]
                     dominantFreq = freq
+                    dominantBin = i
                 }
             }
         }
@@ -174,6 +185,8 @@ class TremorFFT(private val sampleRate: Float = 20f) {
         // Uses configurable weights for flexibility
         val bandRatio = if (totalPower > 0) tremorBandPower / totalPower else 0f
         val peakProminence = if (tremorBandPower > 0) maxPower / tremorBandPower else 0f
+        val spectralEntropy = calculateNormalizedSpectralEntropy(powerSpectrum, totalPower)
+        val harmonicRatio = calculateHarmonicRatio(powerSpectrum, dominantBin)
 
         var confidence = 0f
 
@@ -207,6 +220,23 @@ class TremorFFT(private val sampleRate: Float = 20f) {
         }
         // High activity gets no bonus
 
+        // Spectral entropy weighting:
+        // Low entropy means concentrated oscillatory energy (tremor-like);
+        // high entropy means broadband chaotic motion (artifact-like).
+        val entropyPenalty = when {
+            spectralEntropy <= 0.45f -> 1.0f
+            spectralEntropy <= 0.65f -> 0.6f
+            else -> 0.2f
+        }
+        confidence *= entropyPenalty
+
+        // Harmonic support boosts confidence for tremor-like periodic structure.
+        confidence = when {
+            harmonicRatio >= 0.30f -> (confidence * 1.25f).coerceAtMost(1f)
+            harmonicRatio >= 0.15f -> (confidence * 1.10f).coerceAtMost(1f)
+            else -> confidence
+        }
+
         // Dual-sensor agreement bonus: 10% weight (Phase 4 - new)
         // This gets applied later in TremorMonitoringEngine when both sensors agree
 
@@ -225,6 +255,7 @@ class TremorFFT(private val sampleRate: Float = 20f) {
 
         val meetsFrequencyThreshold = dominantFreq >= config.minFrequencyHz
         val hasMinimumPower = tremorBandPower > config.minTremorPower
+        val entropyCompatible = spectralEntropy <= 0.85f || harmonicRatio >= 0.20f
         
         // High-energy, low-frequency movement filter (Phase 1 - keep)
         // Estimate severity from magnitude (will be refined in TremorMonitoringEngine)
@@ -247,6 +278,7 @@ class TremorFFT(private val sampleRate: Float = 20f) {
         val isTremor = hasMinimumPower &&
                        meetsFrequencyThreshold &&
                        !isHighEnergyLowBandRatio &&
+                       entropyCompatible &&
                        dominantFreq >= bandLow &&
                        confidence > confidenceThreshold
 
@@ -255,9 +287,120 @@ class TremorFFT(private val sampleRate: Float = 20f) {
             tremorBandPower = tremorBandPower,
             totalPower = totalPower,
             maxPower = maxPower,
+            bandRatio = bandRatio,
+            peakProminence = peakProminence,
+            spectralEntropy = spectralEntropy,
+            harmonicRatio = harmonicRatio,
             isTremor = isTremor,
             confidence = confidence.coerceIn(0f, 1f)
         )
+    }
+
+    private fun calculateNormalizedSpectralEntropy(powerSpectrum: FloatArray, totalPower: Float): Float {
+        if (powerSpectrum.isEmpty() || totalPower <= 0f) return 1f
+
+        var entropy = 0.0
+        powerSpectrum.forEach { power ->
+            if (power > 0f) {
+                val p = (power / totalPower).toDouble()
+                entropy -= p * log2(p)
+            }
+        }
+
+        val maxEntropy = log2(powerSpectrum.size.toDouble()).coerceAtLeast(1e-6)
+        return (entropy / maxEntropy).toFloat().coerceIn(0f, 1f)
+    }
+
+    private fun computePowerSpectrum(
+        samples: FloatArray,
+        n: Int,
+        options: AnalysisOptions
+    ): FloatArray {
+        val classic = computeClassicPowerSpectrum(samples, n)
+        return when (options.spectrumMode) {
+            SpectrumMode.CLASSIC -> classic
+            SpectrumMode.WELCH -> computeWelchPowerSpectrum(samples, n, options) ?: classic
+            SpectrumMode.HYBRID -> {
+                val welch = computeWelchPowerSpectrum(samples, n, options)
+                if (welch == null) {
+                    classic
+                } else {
+                    val blend = options.welchBlend.coerceIn(0f, 1f)
+                    FloatArray(classic.size) { i ->
+                        ((1f - blend) * classic[i] + blend * welch[i]).coerceAtLeast(0f)
+                    }
+                }
+            }
+        }
+    }
+
+    private fun computeClassicPowerSpectrum(samples: FloatArray, n: Int): FloatArray {
+        val windowed = applyHanningWindow(samples.copyOf(n))
+        val (real, imag) = fft(windowed)
+        return FloatArray(n / 2) { i ->
+            (real[i] * real[i] + imag[i] * imag[i]) / n
+        }
+    }
+
+    private fun computeWelchPowerSpectrum(
+        samples: FloatArray,
+        n: Int,
+        options: AnalysisOptions
+    ): FloatArray? {
+        if (n < 32) return null
+
+        val segment = nextPowerOfTwo(options.welchSegmentSize.coerceAtLeast(16)).coerceAtMost(n)
+        if (segment < 16) return null
+
+        val overlap = options.welchOverlap.coerceIn(0f, 0.9f)
+        val step = (segment * (1f - overlap)).toInt().coerceAtLeast(1)
+        if (step <= 0) return null
+
+        val spectrum = FloatArray(n / 2)
+        var segmentsUsed = 0
+        var start = 0
+
+        while (start + segment <= n) {
+            val segmentSamples = samples.copyOfRange(start, start + segment)
+            val segmentWindowed = applyHanningWindow(segmentSamples)
+            val (real, imag) = fft(segmentWindowed)
+            for (i in 0 until n / 2) {
+                val src = ((i.toFloat() / (n / 2).toFloat()) * (segment / 2 - 1)).toInt()
+                    .coerceIn(0, segment / 2 - 1)
+                spectrum[i] += (real[src] * real[src] + imag[src] * imag[src]) / segment
+            }
+            segmentsUsed++
+            start += step
+        }
+
+        if (segmentsUsed == 0) return null
+        for (i in spectrum.indices) {
+            spectrum[i] /= segmentsUsed.toFloat()
+        }
+        return spectrum
+    }
+
+    private fun calculateHarmonicRatio(powerSpectrum: FloatArray, dominantBin: Int): Float {
+        if (dominantBin <= 0 || dominantBin >= powerSpectrum.size) return 0f
+
+        val harmonicBin = dominantBin * 2
+        if (harmonicBin >= powerSpectrum.size) return 0f
+
+        val fundamentalPower = localBinPower(powerSpectrum, dominantBin)
+        val harmonicPower = localBinPower(powerSpectrum, harmonicBin)
+
+        if (fundamentalPower <= 1e-10f) return 0f
+        return (harmonicPower / fundamentalPower).coerceIn(0f, 2f)
+    }
+
+    private fun localBinPower(powerSpectrum: FloatArray, centerBin: Int): Float {
+        val low = (centerBin - 1).coerceAtLeast(0)
+        val high = (centerBin + 1).coerceAtMost(powerSpectrum.lastIndex)
+        var sum = 0f
+        for (i in low..high) {
+            sum += powerSpectrum[i]
+        }
+        return sum
     }
 
     /**

@@ -12,6 +12,7 @@ import com.opensource.tremorwatch.shared.models.TremorDetectionConfig
 import com.google.android.gms.location.DetectedActivity
 import java.text.SimpleDateFormat
 import java.util.*
+import kotlin.math.abs
 import kotlin.math.sqrt
 
 /**
@@ -87,10 +88,21 @@ class TremorMonitoringEngine(
     
     // FFT-based tremor analysis
     private val tremorFFT = TremorFFT(MonitoringConstants.FFT_SAMPLE_RATE)
+    private val gyroXWindow = mutableListOf<Float>()
+    private val gyroYWindow = mutableListOf<Float>()
+    private val gyroZWindow = mutableListOf<Float>()
     private val gyroMagnitudeWindow = mutableListOf<Float>() // Buffer for gyroscope FFT analysis
     private var lastGyroFFTResult: TremorFFT.FFTResult? = null
     private var lastAccelFFTResult: TremorFFT.FFTResult? = null
     private var fftProcessingCounter = 0  // Counter for FFT processing interval
+    private var lastDominantFrequencyHz = 0f
+    private var lastPrincipalAxisLabel = "magnitude"
+    private var lastPrincipalAxisVariance = 0f
+    private var lastSelectedFftWindowSize = MonitoringConstants.FFT_WINDOW_SIZE
+    private var lastFftSpectrumMode = "classic"
+    private var lastRerankerProbability = 0f
+    private var lastCalibratedConfidence = 0f
+    private val recentStepTimestampsMs = ArrayDeque<Long>(180)
     
     // Thread-safe buffer for sensor data
     private val dataBuffer = Collections.synchronizedList(mutableListOf<TremorData>())
@@ -154,8 +166,18 @@ class TremorMonitoringEngine(
         val dominantFrequency: Float = 0f,  // Hz - FFT dominant frequency in 4-12 Hz band
         val tremorBandPower: Float = 0f,     // Power spectral density in tremor band
         val totalPower: Float = 0f,          // Total power across all frequencies
+        val fftWindowSize: Int = MonitoringConstants.FFT_WINDOW_SIZE,
+        val fftSpectrumMode: String = "classic",
+        val principalAxis: String = "magnitude",
+        val principalAxisVariance: Float = 0f,
         val bandRatio: Float = 0f,           // Ratio of tremor band power to total power
         val peakProminence: Float = 0f,      // Prominence of dominant frequency peak
+        val spectralEntropy: Float = 1f,     // Normalized spectral entropy [0..1]
+        val harmonicRatio: Float = 0f,       // Harmonic support ratio
+        val crossSensorSupport: Float = 0f,  // Gyro/accel agreement score [0..1]
+        val frequencyStability: Float = 0f,  // Dominant frequency continuity [0..1]
+        val rerankerProbability: Float = 0f, // Hybrid reranker output probability
+        val calibratedConfidence: Float = 0f, // Confidence after calibration mode
         val severity: Float = 0f,            // Phase 5: Clinical severity score (0-10 scale)
         val baselineMultiplier: Float = 1f,  // Phase 5: How far above personal baseline
         // Phase 5b: Tremor type classification
@@ -166,9 +188,11 @@ class TremorMonitoringEngine(
         val activityType: String = "unknown",
         val activityConfidence: Float = 0f,          // 0-1
         val activityAgeMs: Long = -1L,
+        val stepsPerMinute: Int = 0,
         // Activity-adjusted metrics
         val activityAdjustedConfidence: Float = 0f,
         val activityAdjustedSeverity: Float = 0f,
+        val reliabilityScore: Float = 0f,
         val isReliableMeasurement: Boolean = false,
         val excludeFromAnalysis: Boolean = false
     )
@@ -178,6 +202,9 @@ class TremorMonitoringEngine(
      */
     fun setPaused(paused: Boolean) {
         isPausedDueToWearState = paused
+        if (paused) {
+            recentStepTimestampsMs.clear()
+        }
     }
     
     /**
@@ -218,11 +245,22 @@ class TremorMonitoringEngine(
         synchronized(recentSamplesBuffer) {
             recentSamplesBuffer.clear()
         }
+        gyroXWindow.clear()
+        gyroYWindow.clear()
+        gyroZWindow.clear()
         gyroMagnitudeWindow.clear()
         accelWindow.clear()
         accelMagnitudeWindow.clear()
         lastGyroFFTResult = null
         lastAccelFFTResult = null
+        lastDominantFrequencyHz = 0f
+        lastPrincipalAxisLabel = "magnitude"
+        lastPrincipalAxisVariance = 0f
+        lastSelectedFftWindowSize = MonitoringConstants.FFT_WINDOW_SIZE
+        lastFftSpectrumMode = "classic"
+        lastRerankerProbability = 0f
+        lastCalibratedConfidence = 0f
+        recentStepTimestampsMs.clear()
         startTimeSensorNs = 0L
         lastSavedTimeSensorNs = 0L
         lastSampleTime = 0L
@@ -246,11 +284,13 @@ class TremorMonitoringEngine(
     private data class ActivityAdjustment(
         val adjustedConfidence: Float,
         val adjustedSeverity: Float,
+        val reliabilityScore: Float,
         val isReliable: Boolean,
         val excludeFromAnalysis: Boolean,
         val activityType: Int,
         val activityConfidence: Int,
-        val activityAgeMs: Long
+        val activityAgeMs: Long,
+        val stepsPerMinute: Int
     )
 
     private fun getActivityName(type: Int): String = when (type) {
@@ -295,9 +335,77 @@ class TremorMonitoringEngine(
         }
     }
 
+    /**
+     * Estimate gyro/accel agreement for tremor-like motion.
+     *
+     * This is a low-cost proxy for cross-sensor coherence:
+     * - close dominant frequencies => better support
+     * - similar spectral shape (entropy) => better support
+     * - both detectors agreeing => better support
+     */
+    private fun calculateCrossSensorSupport(
+        gyroResult: TremorFFT.FFTResult?,
+        accelResult: TremorFFT.FFTResult?
+    ): Float {
+        val gyro = gyroResult ?: return 0f
+        val accel = accelResult ?: return 0.75f
+
+        val freqAgreement = if (gyro.dominantFrequency > 0f && accel.dominantFrequency > 0f) {
+            when {
+                abs(gyro.dominantFrequency - accel.dominantFrequency) <= 0.5f -> 1.0f
+                abs(gyro.dominantFrequency - accel.dominantFrequency) <= 1.0f -> 0.75f
+                abs(gyro.dominantFrequency - accel.dominantFrequency) <= 2.0f -> 0.45f
+                else -> 0.2f
+            }
+        } else {
+            0.35f
+        }
+
+        val entropyAgreement = (1f - abs(gyro.spectralEntropy - accel.spectralEntropy)).coerceIn(0f, 1f)
+
+        val tremorAgreement = when {
+            gyro.isTremor && accel.isTremor -> 1.0f
+            gyro.isTremor || accel.isTremor -> 0.55f
+            else -> 0.25f
+        }
+
+        return (
+            freqAgreement * 0.50f +
+            entropyAgreement * 0.25f +
+            tremorAgreement * 0.25f
+        ).coerceIn(0.1f, 1.0f)
+    }
+
+    /**
+     * Score how stable dominant frequency is over time.
+     * 1.0 = stable, 0.0 = highly unstable.
+     */
+    private fun calculateFrequencyStability(currentDominantFrequency: Float): Float {
+        if (currentDominantFrequency <= 0f) return 0f
+        if (lastDominantFrequencyHz <= 0f) {
+            lastDominantFrequencyHz = currentDominantFrequency
+            return 1.0f
+        }
+
+        val deltaHz = abs(currentDominantFrequency - lastDominantFrequencyHz)
+        lastDominantFrequencyHz = currentDominantFrequency
+
+        return when {
+            deltaHz <= 0.25f -> 1.0f
+            deltaHz <= 0.75f -> 0.8f
+            deltaHz <= 1.5f -> 0.5f
+            else -> 0.2f
+        }
+    }
+
     private fun adjustForActivity(
         baseConfidence: Float,
         baseSeverity: Float,
+        spectralEntropy: Float,
+        harmonicRatio: Float,
+        crossSensorSupport: Float,
+        frequencyStability: Float,
+        stepsPerMinute: Int,
         nowMs: Long
     ): ActivityAdjustment {
         val state = activityState
@@ -321,6 +429,7 @@ class TremorMonitoringEngine(
             activityType == DetectedActivity.RUNNING ||
                 activityType == DetectedActivity.ON_BICYCLE ||
                 activityType == DetectedActivity.IN_VEHICLE -> true
+            stepsPerMinute > 130 -> true
             activityType == DetectedActivity.WALKING &&
                 activityConfidence >= config.activityMediumConfidenceThreshold &&
                 baseSeverity >= MOTION_ARTIFACT_SEVERITY_THRESHOLD -> true
@@ -334,30 +443,75 @@ class TremorMonitoringEngine(
             else -> false
         }
 
-        // Reliability: only STILL with sufficient confidence qualifies.
-        // Gold: AR API confirmed STILL, high confidence, minimum detection confidence
-        // Silver: STILL with medium confidence AND higher detection confidence
         val hasActivityData = activityConfidence > 0
-        val isReliable = when {
-            activityType == DetectedActivity.STILL &&
-                activityConfidence >= 70 &&
-                baseConfidence >= (config.confidenceThreshold * 0.5f) -> true
-            activityType == DetectedActivity.STILL &&
-                activityConfidence >= config.activityMediumConfidenceThreshold &&
-                baseConfidence >= config.confidenceThreshold -> true
-            else -> false
-        } && baseSeverity <= MAX_RELIABLE_SEVERITY && !likelyMotionArtifact
 
         var excludeFromAnalysis = hasActivityData &&
             activityConfidence >= config.activityHighConfidenceThreshold &&
             (activityType == DetectedActivity.RUNNING ||
              activityType == DetectedActivity.ON_BICYCLE ||
              activityType == DetectedActivity.IN_VEHICLE)
+        if (stepsPerMinute > 140) {
+            excludeFromAnalysis = true
+        }
         if (likelyMotionArtifact) {
             excludeFromAnalysis = true
         }
 
         val artifactPenalty = if (likelyMotionArtifact) 0.25f else 1f
+        val freshnessScore = when {
+            !isStale -> 1.0f
+            ageMs <= (config.activityStaleThresholdMs * 2) -> 0.7f
+            else -> 0.4f
+        }
+
+        val activityScore = when (activityType) {
+            DetectedActivity.STILL -> 1.0f
+            DetectedActivity.TILTING -> 0.55f
+            DetectedActivity.UNKNOWN -> 0.45f
+            DetectedActivity.WALKING, DetectedActivity.ON_FOOT -> 0.30f
+            DetectedActivity.RUNNING, DetectedActivity.ON_BICYCLE, DetectedActivity.IN_VEHICLE -> 0.10f
+            else -> 0.35f
+        }
+
+        val spectralScore = when {
+            spectralEntropy <= 0.45f -> 1.0f
+            spectralEntropy <= 0.65f -> 0.65f
+            else -> 0.20f
+        }
+
+        val harmonicScore = when {
+            harmonicRatio >= 0.30f -> 1.0f
+            harmonicRatio >= 0.15f -> 0.75f
+            harmonicRatio >= 0.05f -> 0.50f
+            else -> 0.30f
+        }
+
+        val confidenceFactor = 0.4f + 0.6f * baseConfidence.coerceIn(0f, 1f)
+        val stepPenalty = when {
+            stepsPerMinute <= 0 -> 1.0f
+            stepsPerMinute <= 60 -> 0.85f
+            stepsPerMinute <= 110 -> 0.60f
+            else -> 0.35f
+        }
+        val reliabilityScore = (
+            0.25f * activityScore +
+            0.25f * spectralScore +
+            0.20f * crossSensorSupport.coerceIn(0f, 1f) +
+            0.15f * harmonicScore +
+            0.10f * freshnessScore +
+            0.05f * frequencyStability.coerceIn(0f, 1f)
+        ).coerceIn(0f, 1f) * confidenceFactor * artifactPenalty * stepPenalty
+
+        // Reliability is no longer hardcoded to STILL only.
+        // We allow tremor-like tilting/unknown contexts if signal quality is strong.
+        val isContextEligible = activityType == DetectedActivity.STILL ||
+            activityType == DetectedActivity.TILTING ||
+            activityType == DetectedActivity.UNKNOWN
+        val isReliable = isContextEligible &&
+            reliabilityScore >= 0.55f &&
+            baseSeverity <= MAX_RELIABLE_SEVERITY &&
+            !likelyMotionArtifact &&
+            stepsPerMinute <= 110
 
         if (!config.activityFilteringEnabled ||
             !hasActivityData ||
@@ -365,11 +519,13 @@ class TremorMonitoringEngine(
             return ActivityAdjustment(
                 adjustedConfidence = (baseConfidence * artifactPenalty).coerceIn(0f, 1f),
                 adjustedSeverity = (baseSeverity * artifactPenalty).coerceAtLeast(0f),
+                reliabilityScore = reliabilityScore.coerceIn(0f, 1f),
                 isReliable = isReliable,
                 excludeFromAnalysis = excludeFromAnalysis,
                 activityType = activityType,
                 activityConfidence = activityConfidence,
-                activityAgeMs = if (ageMs == Long.MAX_VALUE) -1L else ageMs
+                activityAgeMs = if (ageMs == Long.MAX_VALUE) -1L else ageMs,
+                stepsPerMinute = stepsPerMinute
             )
         }
 
@@ -391,11 +547,13 @@ class TremorMonitoringEngine(
         return ActivityAdjustment(
             adjustedConfidence = (baseConfidence * effectiveMultiplier * artifactPenalty).coerceIn(0f, 1f),
             adjustedSeverity = (baseSeverity * effectiveMultiplier * artifactPenalty).coerceAtLeast(0f),
+            reliabilityScore = reliabilityScore.coerceIn(0f, 1f),
             isReliable = isReliable,
             excludeFromAnalysis = excludeFromAnalysis,
             activityType = activityType,
             activityConfidence = activityConfidence,
-            activityAgeMs = if (ageMs == Long.MAX_VALUE) -1L else ageMs
+            activityAgeMs = if (ageMs == Long.MAX_VALUE) -1L else ageMs,
+            stepsPerMinute = stepsPerMinute
         )
     }
 
@@ -551,9 +709,6 @@ class TremorMonitoringEngine(
         // Use sensor timestamps (monotonic, not affected by wall clock changes)
         val sensorTimestampNs = event.timestamp
         
-        // Track last sensor event time for watchdog freeze detection
-        lastSampleTime = System.currentTimeMillis()
-        
         // Initialize sensor start time on first event
         if (startTimeSensorNs == 0L) {
             startTimeSensorNs = sensorTimestampNs
@@ -561,21 +716,145 @@ class TremorMonitoringEngine(
         
         when (event.sensor?.type) {
             Sensor.TYPE_LOW_LATENCY_OFFBODY_DETECT -> {
+                lastSampleTime = System.currentTimeMillis()
                 handleOffBodySensorEvent(event, sensorTimestampNs)
             }
             
             Sensor.TYPE_GYROSCOPE -> {
                 if (!isPausedDueToWearState) {
+                    lastSampleTime = System.currentTimeMillis()
                     handleGyroscopeEvent(event, sensorTimestampNs)
                 }
             }
             
             Sensor.TYPE_LINEAR_ACCELERATION -> {
                 if (!isPausedDueToWearState) {
+                    lastSampleTime = System.currentTimeMillis()
                     handleAccelerometerEvent(event)
                 }
             }
+
+            Sensor.TYPE_STEP_DETECTOR -> {
+                if (!isPausedDueToWearState) {
+                    handleStepDetectorEvent()
+                }
+            }
         }
+    }
+
+    private fun handleStepDetectorEvent() {
+        val nowMs = System.currentTimeMillis()
+        recentStepTimestampsMs.addLast(nowMs)
+        val cutoff = nowMs - 60_000L
+        while (recentStepTimestampsMs.isNotEmpty() && recentStepTimestampsMs.first() < cutoff) {
+            recentStepTimestampsMs.removeFirst()
+        }
+    }
+
+    private fun getStepsPerMinute(nowMs: Long): Int {
+        val cutoff = nowMs - 60_000L
+        while (recentStepTimestampsMs.isNotEmpty() && recentStepTimestampsMs.first() < cutoff) {
+            recentStepTimestampsMs.removeFirst()
+        }
+        return recentStepTimestampsMs.size
+    }
+
+    private data class AxisSelection(
+        val label: String,
+        val samples: FloatArray,
+        val variance: Float
+    )
+
+    private fun getPrimaryFftWindowSize(nowMs: Long): Int {
+        return when (config.fftWindowMode.lowercase()) {
+            "fixed_128" -> config.fftWindowSizeLong
+            "ab_test" -> {
+                val minuteBucket = nowMs / 60_000L
+                if (minuteBucket % 2L == 0L) config.fftWindowSizeShort else config.fftWindowSizeLong
+            }
+            else -> config.fftWindowSizeShort
+        }
+    }
+
+    private fun getSecondaryFftWindowSize(nowMs: Long): Int? {
+        if (config.fftWindowMode.lowercase() != "ab_test") return null
+        val primary = getPrimaryFftWindowSize(nowMs)
+        return if (primary == config.fftWindowSizeShort) config.fftWindowSizeLong else config.fftWindowSizeShort
+    }
+
+    private fun getBufferRetentionSize(): Int {
+        val shortSize = config.fftWindowSizeShort.coerceAtLeast(32)
+        val longSize = config.fftWindowSizeLong.coerceAtLeast(shortSize)
+        return maxOf(shortSize, longSize)
+    }
+
+    private fun trimWindow(window: MutableList<Float>, maxSize: Int) {
+        while (window.size > maxSize) {
+            window.removeAt(0)
+        }
+    }
+
+    private fun selectPrincipalGyroAxis(windowSize: Int): AxisSelection? {
+        if (windowSize <= 0) return null
+        if (gyroXWindow.size < windowSize || gyroYWindow.size < windowSize || gyroZWindow.size < windowSize) {
+            return null
+        }
+
+        val xSlice = gyroXWindow.takeLast(windowSize).toFloatArray()
+        val ySlice = gyroYWindow.takeLast(windowSize).toFloatArray()
+        val zSlice = gyroZWindow.takeLast(windowSize).toFloatArray()
+
+        val vx = variance(xSlice)
+        val vy = variance(ySlice)
+        val vz = variance(zSlice)
+
+        return when {
+            vx >= vy && vx >= vz -> AxisSelection("x", xSlice, vx)
+            vy >= vx && vy >= vz -> AxisSelection("y", ySlice, vy)
+            else -> AxisSelection("z", zSlice, vz)
+        }
+    }
+
+    private fun variance(values: FloatArray): Float {
+        if (values.isEmpty()) return 0f
+        var mean = 0.0
+        values.forEach { mean += it.toDouble() }
+        mean /= values.size.toDouble()
+        var sum = 0.0
+        values.forEach {
+            val d = it.toDouble() - mean
+            sum += d * d
+        }
+        return (sum / values.size.toDouble()).toFloat()
+    }
+
+    private fun spectrumModeFromConfig(): TremorFFT.SpectrumMode {
+        return when (config.fftSpectrumMode.lowercase()) {
+            "welch" -> TremorFFT.SpectrumMode.WELCH
+            "hybrid" -> TremorFFT.SpectrumMode.HYBRID
+            else -> TremorFFT.SpectrumMode.CLASSIC
+        }
+    }
+
+    private fun analysisOptionsFromConfig(): TremorFFT.AnalysisOptions {
+        return TremorFFT.AnalysisOptions(
+            spectrumMode = spectrumModeFromConfig(),
+            welchSegmentSize = config.fftWelchSegmentSize,
+            welchOverlap = config.fftWelchOverlap,
+            welchBlend = config.fftWelchBlend
+        )
+    }
+
+    private fun selectBetterFftResult(
+        primary: TremorFFT.FFTResult?,
+        secondary: TremorFFT.FFTResult?
+    ): TremorFFT.FFTResult? {
+        if (primary == null) return secondary
+        if (secondary == null) return primary
+
+        val primaryScore = (if (primary.isTremor) 0.5f else 0f) + primary.confidence + primary.bandRatio * 0.5f
+        val secondaryScore = (if (secondary.isTremor) 0.5f else 0f) + secondary.confidence + secondary.bandRatio * 0.5f
+        return if (secondaryScore > primaryScore) secondary else primary
     }
     
     private fun handleOffBodySensorEvent(event: SensorEvent, sensorTimestampNs: Long) {
@@ -673,53 +952,97 @@ class TremorMonitoringEngine(
             return
         }
         
-        // CRITICAL: Fill FFT window at sensor rate (~50 Hz) for proper frequency detection
-        // Tremor frequencies (4-12 Hz) require sampling at least 24 Hz (Nyquist: 2 * 12 Hz)
-        // We use ~50 Hz sensor rate, which allows detection up to 25 Hz (fully covers all tremor ranges)
-        // Add to FFT window buffer at sensor rate (every event)
+        // Fill FFT windows at sensor rate for frequency-domain features.
+        val retentionSize = getBufferRetentionSize()
+        gyroXWindow.add(x)
+        gyroYWindow.add(y)
+        gyroZWindow.add(z)
         gyroMagnitudeWindow.add(magnitude)
-        if (gyroMagnitudeWindow.size > MonitoringConstants.FFT_WINDOW_SIZE) {
-            gyroMagnitudeWindow.removeAt(0)
-        }
+        trimWindow(gyroXWindow, retentionSize)
+        trimWindow(gyroYWindow, retentionSize)
+        trimWindow(gyroZWindow, retentionSize)
+        trimWindow(gyroMagnitudeWindow, retentionSize)
 
-        // Perform FFT analysis on gyroscope data
-        // Also analyze accelerometer if we have enough samples
+        // Perform FFT analysis on gyroscope/accelerometer when enough buffered samples exist.
         fftProcessingCounter++
-        if (gyroMagnitudeWindow.size >= MonitoringConstants.FFT_WINDOW_SIZE &&
+        val nowWall = System.currentTimeMillis()
+        val primaryWindowSize = getPrimaryFftWindowSize(nowWall)
+        if (gyroMagnitudeWindow.size >= primaryWindowSize &&
             fftProcessingCounter >= MonitoringConstants.FFT_PROCESSING_INTERVAL) {
-            
-            // Determine activity state from previous FFT result's total power
-            // If no previous result, default to resting state (more conservative for resting tremor)
-            val isResting = lastGyroFFTResult?.let { 
-                it.totalPower < TremorFFT.RESTING_POWER_THRESHOLD 
-            } ?: true  // Default to resting state if no previous result
-            
-            // Phase 5: Get adaptive thresholds from BaselineManager (if calibrated)
+
+            // Determine activity state from previous FFT result's total power.
+            val isResting = lastGyroFFTResult?.let {
+                it.totalPower < TremorFFT.RESTING_POWER_THRESHOLD
+            } ?: true
+
+            // Get adaptive thresholds from BaselineManager (if calibrated).
             val adaptiveThresholds = baselineManager?.let { manager ->
                 if (manager.hasCompletedCalibration()) {
                     val thresholds = manager.getAdaptiveThresholds(isResting)
                     TremorFFT.AdaptiveThresholds(
                         severityFloor = thresholds.severityFloor,
                         minBandRatio = thresholds.minBandRatio,
-                        confidenceThreshold = if (thresholds.isPersonalized) 0.30f else 0.35f, // Lower threshold for calibrated users
+                        confidenceThreshold = if (thresholds.isPersonalized) 0.30f else 0.35f,
                         isPersonalized = thresholds.isPersonalized
                     )
                 } else null
             }
-            
-            // Analyze gyroscope data with activity-aware frequency band
-            // Resting: 4-6 Hz (resting tremor)
-            // Active: 4-12 Hz (postural/kinetic tremor)
-            // Uses adaptive thresholds if user has calibrated
-            lastGyroFFTResult = tremorFFT.analyze(gyroMagnitudeWindow.toFloatArray(), isResting, adaptiveThresholds)
-            
-            // Analyze accelerometer data if we have enough samples (dual-sensor validation)
-            // Use same activity state and adaptive thresholds for consistency
-            if (accelMagnitudeWindow.size >= MonitoringConstants.FFT_WINDOW_SIZE) {
-                lastAccelFFTResult = tremorFFT.analyze(accelMagnitudeWindow.toFloatArray(), isResting, adaptiveThresholds)
+
+            val analysisOptions = analysisOptionsFromConfig()
+            lastFftSpectrumMode = config.fftSpectrumMode.lowercase()
+
+            // Principal-axis gyro FFT (higher SNR than magnitude-only FFT).
+            val primaryAxis = selectPrincipalGyroAxis(primaryWindowSize)
+            val primaryGyroSamples = primaryAxis?.samples
+                ?: gyroMagnitudeWindow.takeLast(primaryWindowSize).toFloatArray()
+            val primaryGyroResult = tremorFFT.analyze(
+                samples = primaryGyroSamples,
+                isResting = isResting,
+                adaptiveThresholds = adaptiveThresholds,
+                options = analysisOptions
+            )
+            var chosenResult = primaryGyroResult
+            var chosenWindowSize = primaryWindowSize
+            var chosenAxisLabel = primaryAxis?.label ?: "magnitude"
+            var chosenAxisVariance = primaryAxis?.variance ?: 0f
+
+            // Optional A/B path: evaluate alternate window size and keep stronger result.
+            val secondaryWindowSize = getSecondaryFftWindowSize(nowWall)
+            if (secondaryWindowSize != null && gyroMagnitudeWindow.size >= secondaryWindowSize) {
+                val secondaryAxis = selectPrincipalGyroAxis(secondaryWindowSize)
+                val secondarySamples = secondaryAxis?.samples
+                    ?: gyroMagnitudeWindow.takeLast(secondaryWindowSize).toFloatArray()
+                val secondaryResult = tremorFFT.analyze(
+                    samples = secondarySamples,
+                    isResting = isResting,
+                    adaptiveThresholds = adaptiveThresholds,
+                    options = analysisOptions
+                )
+                val selected = selectBetterFftResult(primaryGyroResult, secondaryResult)
+                if (selected === secondaryResult) {
+                    chosenResult = secondaryResult
+                    chosenWindowSize = secondaryWindowSize
+                    chosenAxisLabel = secondaryAxis?.label ?: "magnitude"
+                    chosenAxisVariance = secondaryAxis?.variance ?: 0f
+                }
             }
 
-            fftProcessingCounter = 0  // Reset counter
+            lastGyroFFTResult = chosenResult
+            lastSelectedFftWindowSize = chosenWindowSize
+            lastPrincipalAxisLabel = chosenAxisLabel
+            lastPrincipalAxisVariance = chosenAxisVariance
+
+            // Accelerometer analysis uses matched window size for cross-sensor agreement.
+            if (accelMagnitudeWindow.size >= chosenWindowSize) {
+                lastAccelFFTResult = tremorFFT.analyze(
+                    samples = accelMagnitudeWindow.takeLast(chosenWindowSize).toFloatArray(),
+                    isResting = isResting,
+                    adaptiveThresholds = adaptiveThresholds,
+                    options = analysisOptions
+                )
+            }
+
+            fftProcessingCounter = 0
         }
 
         // Only save samples at configured rate (1 Hz standard)
@@ -734,6 +1057,7 @@ class TremorMonitoringEngine(
         // Get FFT-enhanced classification with dual-sensor validation
         val gyroFFTResult = lastGyroFFTResult
         val accelFFTResult = lastAccelFFTResult
+        val crossSensorSupport = calculateCrossSensorSupport(gyroFFTResult, accelFFTResult)
         
         // Determine activity state from gyroscope FFT result (more accurate than preliminary estimate)
         val totalPower = gyroFFTResult?.totalPower ?: 0f
@@ -747,7 +1071,7 @@ class TremorMonitoringEngine(
                 // Weighted combination: gyroscope 60% (angular velocity), accelerometer 40% (linear acceleration)
                 val combinedConfidence = (gyroFFTResult.confidence * 0.6f + 
                                         accelFFTResult.confidence * 0.4f).coerceIn(0f, 1f)
-                Pair(true, combinedConfidence)
+                Pair(true, (combinedConfidence * crossSensorSupport).coerceIn(0f, 1f))
             }
             // Only gyroscope detects tremor (accelerometer not available or doesn't agree)
             gyroFFTResult != null && gyroFFTResult.isTremor -> {
@@ -759,22 +1083,30 @@ class TremorMonitoringEngine(
                     // Accelerometer not available - use gyroscope confidence
                     gyroFFTResult.confidence
                 }
-                Pair(true, confidence.coerceIn(0f, 1f))
+                Pair(true, (confidence * crossSensorSupport).coerceIn(0f, 1f))
             }
             // Fallback to threshold-based classification
             else -> classifyMovement(magnitude, lastAccelMagnitude)
         }
-        
+
         // Calculate derived metrics from gyroscope FFT result (primary sensor)
         val tremorBandPower = gyroFFTResult?.tremorBandPower ?: 0f
         val maxPower = gyroFFTResult?.maxPower ?: 0f
-        val bandRatio = if (totalPower > 0f) tremorBandPower / totalPower else 0f
-        val peakProminence = if (tremorBandPower > 0f) maxPower / tremorBandPower else 0f
+        val bandRatio = gyroFFTResult?.bandRatio ?: if (totalPower > 0f) tremorBandPower / totalPower else 0f
+        val peakProminence = gyroFFTResult?.peakProminence ?: if (tremorBandPower > 0f) maxPower / tremorBandPower else 0f
         val dominantFrequency = gyroFFTResult?.dominantFrequency ?: 0f
+        val spectralEntropy = gyroFFTResult?.spectralEntropy ?: 1f
+        val harmonicRatio = gyroFFTResult?.harmonicRatio ?: 0f
+        val frequencyStability = calculateFrequencyStability(dominantFrequency)
+        val stepsPerMinute = getStepsPerMinute(now)
         
         // Phase 2: Apply dynamic thresholding and post-processing filters (Google's recommendations)
         var finalIsTremor = classification.first
         var finalConfidence = classification.second
+        finalConfidence *= (0.7f + 0.3f * frequencyStability)
+        if (frequencyStability < 0.2f && finalIsTremor) {
+            finalConfidence *= 0.4f
+        }
         
         // Calculate actual severity from magnitude (for severity floor check)
         val estimatedSeverity = magnitude.coerceAtMost(5f)  // Cap at 5.0
@@ -824,6 +1156,30 @@ class TremorMonitoringEngine(
         if (baselineEval != null && baselineEval.confidenceBoost > 0f && finalIsTremor) {
             finalConfidence = (finalConfidence + baselineEval.confidenceBoost).coerceIn(0f, 1f)
         }
+
+        // Hybrid reranker for borderline cases (rules remain hard safety rails).
+        val rerankerInput = HybridRerankerInput(
+            baseConfidence = finalConfidence,
+            bandRatio = bandRatio,
+            spectralEntropy = spectralEntropy,
+            harmonicRatio = harmonicRatio,
+            crossSensorSupport = crossSensorSupport,
+            frequencyStability = frequencyStability,
+            stepsPerMinute = stepsPerMinute,
+            isRestingState = isResting
+        )
+        val rerankerResult = HybridTremorReranker.rerank(rerankerInput, config)
+        lastRerankerProbability = rerankerResult.probability
+        finalConfidence = rerankerResult.blendedConfidence
+        if (!finalIsTremor && rerankerResult.supportsTremor && finalConfidence >= config.confidenceThreshold) {
+            finalIsTremor = true
+        } else if (finalIsTremor && !rerankerResult.supportsTremor && rerankerResult.probability < 0.20f) {
+            finalIsTremor = false
+        }
+
+        // Optional confidence calibration (none/platt/isotonic).
+        finalConfidence = ConfidenceCalibrator.calibrate(finalConfidence, config)
+        lastCalibratedConfidence = finalConfidence
         
         // Update baseline with this sample (only non-tremor samples)
         baselineManager?.updateBaseline(magnitude, bandRatio, totalPower, isResting, finalIsTremor)
@@ -849,6 +1205,11 @@ class TremorMonitoringEngine(
         val activityAdjustment = adjustForActivity(
             baseConfidence = finalConfidence,
             baseSeverity = severity,
+            spectralEntropy = spectralEntropy,
+            harmonicRatio = harmonicRatio,
+            crossSensorSupport = crossSensorSupport,
+            frequencyStability = frequencyStability,
+            stepsPerMinute = stepsPerMinute,
             nowMs = now
         )
 
@@ -864,32 +1225,45 @@ class TremorMonitoringEngine(
         } else null
 
         val tremorData = TremorData(
-            now,  // Use absolute wall clock timestamp
-            datetimeIso,
-            timeFormatted,
-            x, y, z,
-            magnitude,
-            lastAccelMagnitude,
-            finalIsTremor,  // Use filtered classification
-            finalConfidence.coerceIn(0f, 1f),  // Use filtered confidence
-            isWatchWorn,
-            isCharging,
-            dominantFrequency,
-            tremorBandPower,
-            totalPower,
-            bandRatio,
-            peakProminence,
+            timestamp = now,
+            datetimeIso = datetimeIso,
+            timeFormatted = timeFormatted,
+            x = x,
+            y = y,
+            z = z,
+            magnitude = magnitude,
+            accelMagnitude = lastAccelMagnitude,
+            isTremor = finalIsTremor,
+            confidence = finalConfidence.coerceIn(0f, 1f),
+            isWorn = isWatchWorn,
+            isCharging = isCharging,
+            dominantFrequency = dominantFrequency,
+            tremorBandPower = tremorBandPower,
+            totalPower = totalPower,
+            fftWindowSize = lastSelectedFftWindowSize,
+            fftSpectrumMode = lastFftSpectrumMode,
+            principalAxis = lastPrincipalAxisLabel,
+            principalAxisVariance = lastPrincipalAxisVariance,
+            bandRatio = bandRatio,
+            peakProminence = peakProminence,
+            spectralEntropy = spectralEntropy,
+            harmonicRatio = harmonicRatio,
+            crossSensorSupport = crossSensorSupport,
+            frequencyStability = frequencyStability,
+            rerankerProbability = lastRerankerProbability,
+            calibratedConfidence = lastCalibratedConfidence,
             severity = severity,
             baselineMultiplier = baselineMultiplier,
-            // Tremor type classification
             tremorType = tremorClassification?.primaryType?.name?.lowercase() ?: "none",
             tremorTypeConfidence = tremorClassification?.confidence ?: 0f,
             isRestingState = tremorClassification?.isResting ?: isResting,
             activityType = getActivityName(activityAdjustment.activityType),
             activityConfidence = activityAdjustment.activityConfidence / 100f,
             activityAgeMs = activityAdjustment.activityAgeMs,
+            stepsPerMinute = activityAdjustment.stepsPerMinute,
             activityAdjustedConfidence = activityAdjustment.adjustedConfidence,
             activityAdjustedSeverity = activityAdjustment.adjustedSeverity,
+            reliabilityScore = activityAdjustment.reliabilityScore,
             isReliableMeasurement = activityAdjustment.isReliable,
             excludeFromAnalysis = activityAdjustment.excludeFromAnalysis
         )
@@ -946,9 +1320,7 @@ class TremorMonitoringEngine(
         // CRITICAL: Fill accelerometer FFT window at sensor rate (~50 Hz) for dual-sensor validation
         // This enables combining accelerometer and gyroscope data for improved tremor detection
         accelMagnitudeWindow.add(lastAccelMagnitude)
-        if (accelMagnitudeWindow.size > MonitoringConstants.FFT_WINDOW_SIZE) {
-            accelMagnitudeWindow.removeAt(0)
-        }
+        trimWindow(accelMagnitudeWindow, getBufferRetentionSize())
     }
     
     /**

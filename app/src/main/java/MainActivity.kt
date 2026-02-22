@@ -460,6 +460,7 @@ fun MainScreen(
 
     // Battery optimization status
     var isBatteryOptimized by remember { mutableStateOf(false) }
+    var medicationLogStatus by remember { mutableStateOf<String?>(null) }
 
     // Check calibration status
     LaunchedEffect(Unit) {
@@ -606,6 +607,59 @@ fun MainScreen(
                 .fillMaxWidth()
                 .padding(vertical = 2.dp)
         )
+
+        // Medication ingestion logger - explicit user-confirmed timestamp.
+        Chip(
+            onClick = {
+                val watchId = try {
+                    android.provider.Settings.Secure.getString(
+                        context.contentResolver,
+                        android.provider.Settings.Secure.ANDROID_ID
+                    ) ?: "unknown"
+                } catch (_: Exception) {
+                    "unknown"
+                }
+
+                val ingestionId = java.util.UUID.randomUUID().toString()
+                WatchDataSender(context).sendDiagnosticEvent(
+                    eventType = "medication_ingestion",
+                    eventData = mapOf(
+                        "id" to ingestionId,
+                        "source" to "WATCH_TAKEN_NOW",
+                        "watchId" to watchId,
+                        "ingestionTimestamp" to System.currentTimeMillis()
+                    )
+                ) { success ->
+                    medicationLogStatus = if (success) "Dose logged" else "Dose log failed"
+                }
+            },
+            label = {
+                Text(
+                    "Taken Now",
+                    fontSize = 14.sp,
+                    modifier = Modifier.fillMaxWidth(),
+                    textAlign = TextAlign.Center
+                )
+            },
+            icon = { Text("💊", fontSize = 16.sp) },
+            colors = ChipDefaults.secondaryChipColors(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 2.dp)
+        )
+
+        medicationLogStatus?.let { status ->
+            Text(
+                text = status,
+                fontSize = 9.sp,
+                color = if (status.contains("failed", ignoreCase = true)) {
+                    MaterialTheme.colors.error
+                } else {
+                    MaterialTheme.colors.primary
+                },
+                textAlign = TextAlign.Center
+            )
+        }
 
         // Start/Stop button - full width chip
         Chip(

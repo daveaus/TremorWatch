@@ -94,7 +94,52 @@ data class TremorDetectionConfig(
     val activityMediumConfidenceThreshold: Int = 60,
     val activityLowConfidenceThreshold: Int = 40,
     /** Ignore activity states older than this */
-    val activityStaleThresholdMs: Long = 30_000L
+    val activityStaleThresholdMs: Long = 30_000L,
+
+    // === FFT Pipeline Settings ===
+    /** FFT window mode: fixed_64, fixed_128, or ab_test */
+    val fftWindowMode: String = "fixed_64",
+    /** Short FFT window size used by fixed_64/ab_test path */
+    val fftWindowSizeShort: Int = 64,
+    /** Long FFT window size used by fixed_128/ab_test path */
+    val fftWindowSizeLong: Int = 128,
+    /** Spectrum analysis mode: classic, welch, hybrid */
+    val fftSpectrumMode: String = "classic",
+    /** Welch segment size when fftSpectrumMode uses Welch */
+    val fftWelchSegmentSize: Int = 64,
+    /** Welch overlap fraction [0..0.9] */
+    val fftWelchOverlap: Float = 0.5f,
+    /** Hybrid mode blend of Welch into classic [0..1] */
+    val fftWelchBlend: Float = 0.35f,
+
+    // === Confidence Calibration ===
+    /** Confidence calibration mode: none, platt, isotonic */
+    val confidenceCalibrationMode: String = "none",
+    /** Platt scaling coefficient A */
+    val confidencePlattA: Float = 1.0f,
+    /** Platt scaling coefficient B */
+    val confidencePlattB: Float = 0.0f,
+    /** Isotonic X knots (must be sorted ascending in [0..1]) */
+    val confidenceIsotonicX: List<Float> = listOf(0f, 0.25f, 0.5f, 0.75f, 1f),
+    /** Isotonic Y knots (must match X size, values in [0..1]) */
+    val confidenceIsotonicY: List<Float> = listOf(0f, 0.20f, 0.50f, 0.80f, 1f),
+
+    // === Hybrid Reranker ===
+    /** Enables lightweight on-device reranker over rule-based confidence */
+    val hybridRerankerEnabled: Boolean = true,
+    /** Probability threshold for reranker-supported tremor */
+    val hybridRerankerThreshold: Float = 0.45f,
+    /** Blend factor: 0 keeps raw confidence, 1 uses reranker only */
+    val hybridRerankerBlend: Float = 0.5f,
+    /** Logistic reranker intercept */
+    val hybridRerankerIntercept: Float = -0.70f,
+    val hybridRerankerWConfidence: Float = 2.0f,
+    val hybridRerankerWBandRatio: Float = 1.1f,
+    val hybridRerankerWEntropy: Float = -2.0f,
+    val hybridRerankerWHarmonic: Float = 1.0f,
+    val hybridRerankerWCrossSensor: Float = 1.4f,
+    val hybridRerankerWFreqStability: Float = 0.8f,
+    val hybridRerankerWStepsPerMinute: Float = -0.012f
 ) {
     init {
         // Validate logical consistency of parameters
@@ -165,6 +210,60 @@ data class TremorDetectionConfig(
             "Activity medium confidence must be >= low confidence"
         }
         require(activityStaleThresholdMs >= 0) { "Activity stale threshold must be >= 0" }
+
+        // FFT pipeline validation
+        require(fftWindowMode.lowercase() in setOf("fixed_64", "fixed_128", "ab_test")) {
+            "fftWindowMode must be one of: fixed_64, fixed_128, ab_test"
+        }
+        require(fftWindowSizeShort in 32..256 && fftWindowSizeShort % 2 == 0) {
+            "fftWindowSizeShort must be even and in [32, 256]"
+        }
+        require(fftWindowSizeLong in 64..512 && fftWindowSizeLong % 2 == 0) {
+            "fftWindowSizeLong must be even and in [64, 512]"
+        }
+        require(fftWindowSizeLong >= fftWindowSizeShort) {
+            "fftWindowSizeLong must be >= fftWindowSizeShort"
+        }
+        require(fftSpectrumMode.lowercase() in setOf("classic", "welch", "hybrid")) {
+            "fftSpectrumMode must be one of: classic, welch, hybrid"
+        }
+        require(fftWelchSegmentSize in 16..256) {
+            "fftWelchSegmentSize must be in [16, 256]"
+        }
+        require(fftWelchOverlap in 0.0f..0.9f) {
+            "fftWelchOverlap must be in [0.0, 0.9]"
+        }
+        require(fftWelchBlend in 0.0f..1.0f) {
+            "fftWelchBlend must be in [0, 1]"
+        }
+
+        // Calibration validation
+        require(confidenceCalibrationMode.lowercase() in setOf("none", "platt", "isotonic")) {
+            "confidenceCalibrationMode must be one of: none, platt, isotonic"
+        }
+        require(confidenceIsotonicX.size >= 2 && confidenceIsotonicX.size == confidenceIsotonicY.size) {
+            "confidence isotonic knots must have matching size >= 2"
+        }
+        require(confidenceIsotonicX.first() >= 0f && confidenceIsotonicX.last() <= 1f) {
+            "confidenceIsotonicX must be within [0, 1]"
+        }
+        require(confidenceIsotonicY.all { it in 0f..1f }) {
+            "confidenceIsotonicY values must be in [0, 1]"
+        }
+        require(confidenceIsotonicX.zipWithNext().all { (a, b) -> b >= a }) {
+            "confidenceIsotonicX must be non-decreasing"
+        }
+        require(confidenceIsotonicY.zipWithNext().all { (a, b) -> b >= a }) {
+            "confidenceIsotonicY must be non-decreasing"
+        }
+
+        // Hybrid reranker validation
+        require(hybridRerankerThreshold in 0.0f..1.0f) {
+            "hybridRerankerThreshold must be in [0, 1]"
+        }
+        require(hybridRerankerBlend in 0.0f..1.0f) {
+            "hybridRerankerBlend must be in [0, 1]"
+        }
     }
 
     /**
@@ -177,7 +276,7 @@ data class TremorDetectionConfig(
 
     companion object {
         /** Current schema version - increment when adding/removing fields */
-        const val CURRENT_VERSION = 2
+        const val CURRENT_VERSION = 3
 
         /** JSON serializer with pretty printing */
         private val json = Json {

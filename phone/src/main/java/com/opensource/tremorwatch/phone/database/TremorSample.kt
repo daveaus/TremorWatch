@@ -58,6 +58,6 @@ data class AggregatedChartData(
     val totalTremorCount: Int,
     val lastIsWorn: Boolean?,
     val lastIsCharging: Boolean?,
-    val lastConfidence: Double?,
+    val avgConfidence: Double?,
     val lastWatchId: String?
 )

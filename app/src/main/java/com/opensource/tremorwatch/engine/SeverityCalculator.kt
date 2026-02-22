@@ -84,14 +84,33 @@ object SeverityCalculator {
         // Combine factors
         val rawSeverity = baseSeverity * frequencyWeight * qualityFactor * durationFactor * baselineBoost
 
-        // Apply confidence as a gate (low confidence reduces final severity)
-        val confidenceGate = (confidence * 1.5f).coerceIn(0.3f, 1.0f)
+        // Apply confidence as a gate.
+        // Previously, low-confidence samples were floored to 0.3 and could still produce
+        // meaningful severity scores. This taper zeros near-zero confidence values while
+        // preserving high-confidence measurements.
+        val confidenceGate = calculateConfidenceGate(confidence)
 
         val result = rawSeverity * confidenceGate
         // Guard against NaN/Infinity from floating point edge cases
         if (result.isNaN() || result.isInfinite()) return 0f
 
         return result.coerceIn(0f, MAX_SEVERITY)
+    }
+
+    /**
+     * Confidence gate for severity output.
+     *
+     * Piecewise gate keeps high confidence fully intact, tapers uncertain regions,
+     * and hard-zeros very low confidence to reduce phantom severity.
+     */
+    private fun calculateConfidenceGate(confidence: Float): Float {
+        val c = confidence.coerceIn(0f, 1f)
+        return when {
+            c >= 0.5f -> 1.0f
+            c >= 0.2f -> ((c - 0.1f) / 0.4f).coerceIn(0.25f, 1.0f)
+            c >= 0.1f -> c * 0.5f
+            else -> 0.0f
+        }
     }
     
     /**

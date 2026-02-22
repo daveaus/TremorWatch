@@ -80,3 +80,22 @@ data class CalibrationDataEntity(
     // Avoids schema churn for new fields - stored as JSON blob
     val metadataJson: String? = null
 )
+
+/**
+ * User-confirmed medication ingestion event.
+ *
+ * Stored separately from subjective ratings so dose-response analytics can be
+ * anchored to real ingestion timestamps instead of schedule assumptions.
+ */
+@Entity(
+    tableName = "medication_ingestions",
+    indices = [Index(value = ["timestamp"]), Index(value = ["source"])]
+)
+data class MedicationIngestionEntity(
+    @PrimaryKey val id: String,
+    val timestamp: Long,
+    val source: String,          // e.g. WATCH_TAKEN_NOW
+    val watchId: String?,
+    val notes: String? = null,
+    val payloadJson: String? = null
+)

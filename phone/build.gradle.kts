@@ -94,6 +94,9 @@ dependencies {
     implementation("androidx.room:room-ktx:2.6.1")
     kapt("androidx.room:room-compiler:2.6.1")
 
+    // Health Connect (context signals: sleep, steps, heart rate)
+    implementation("androidx.health.connect:connect-client:1.0.0-alpha11")
+
     // Testing / Debug
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation(platform(libs.compose.bom))

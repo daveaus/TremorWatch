@@ -132,6 +132,7 @@ class TremorService : LifecycleService(), SensorEventListener {
     private lateinit var sensorManager: SensorManager
     private var gyroscope: Sensor? = null
     private var accelerometer: Sensor? = null
+    private var stepDetector: Sensor? = null
     private var offBodySensor: Sensor? = null
     private var wakeLock: PowerManager.WakeLock? = null
     /** True when gyroscope is running at reduced rate due to STILL activity. */
@@ -299,8 +300,18 @@ class TremorService : LifecycleService(), SensorEventListener {
             "dominantFrequency" to data.dominantFrequency,
             "tremorBandPower" to data.tremorBandPower,
             "totalPower" to data.totalPower,
+            "fftWindowSize" to data.fftWindowSize,
+            "fftSpectrumMode" to data.fftSpectrumMode,
+            "principalAxis" to data.principalAxis,
+            "principalAxisVariance" to data.principalAxisVariance,
             "bandRatio" to data.bandRatio,
             "peakProminence" to data.peakProminence,
+            "spectralEntropy" to data.spectralEntropy,
+            "harmonicRatio" to data.harmonicRatio,
+            "crossSensorSupport" to data.crossSensorSupport,
+            "frequencyStability" to data.frequencyStability,
+            "rerankerProbability" to data.rerankerProbability,
+            "calibratedConfidence" to data.calibratedConfidence,
             "watch_id" to watchId,
             "time_of_day" to timeOfDay,
             "day_of_week" to dayOfWeekStr,
@@ -315,9 +326,11 @@ class TremorService : LifecycleService(), SensorEventListener {
             "activityType" to data.activityType,
             "activityConfidence" to data.activityConfidence,
             "activityAgeMs" to data.activityAgeMs,
+            "stepsPerMinute" to data.stepsPerMinute,
             "activitySource" to if (data.activityAgeMs in 0..30_000L) "ar_api" else "sensor_infer",
             "activityAdjustedConfidence" to data.activityAdjustedConfidence,
             "activityAdjustedSeverity" to data.activityAdjustedSeverity,
+            "reliabilityScore" to data.reliabilityScore,
             "isReliableMeasurement" to data.isReliableMeasurement,
             "excludeFromAnalysis" to data.excludeFromAnalysis
         )
@@ -334,14 +347,12 @@ class TremorService : LifecycleService(), SensorEventListener {
         metadata["inTremorEpisode"] = monitoringEngine?.isInTremorEpisode() ?: false
         metadata["episodeDurationMs"] = monitoringEngine?.getCurrentEpisodeDuration() ?: 0L
 
-        // opus46 Issue 5: Add reliability tier based on activity type, confidence, and artifact status
+        // Reliability tiers for downstream analytics and chart gating.
         val reliabilityTier = when {
-            // Gold: AR API confirmed still with high confidence
-            data.activityType == "still" && data.activityConfidence >= 0.7f -> "gold"
-            // Silver: sensor-inferred still with acceptable confidence, no artifacts
-            data.activityType == "still" && data.activityConfidence >= 0.4f && artifactType == null -> "silver"
-            // Bronze: unknown activity but sensor signals consistent with rest, no artifacts
-            data.activityType == "unknown" && data.accelMagnitude < 12.0f && data.bandRatio > 0.02f && artifactType == null -> "bronze"
+            !data.isWorn || data.isCharging || data.excludeFromAnalysis -> "unrated"
+            data.reliabilityScore >= 0.80f -> "gold"
+            data.reliabilityScore >= 0.55f -> "silver"
+            data.reliabilityScore >= 0.30f -> "bronze"
             else -> "unrated"
         }
         metadata["reliabilityTier"] = reliabilityTier
@@ -1059,6 +1070,7 @@ class TremorService : LifecycleService(), SensorEventListener {
         sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
         gyroscope = sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
         accelerometer = sensorManager.getDefaultSensor(Sensor.TYPE_LINEAR_ACCELERATION)
+        stepDetector = sensorManager.getDefaultSensor(Sensor.TYPE_STEP_DETECTOR)
         offBodySensor = sensorManager.getDefaultSensor(Sensor.TYPE_LOW_LATENCY_OFFBODY_DETECT)
 
         if (gyroscope == null) {
@@ -1066,6 +1078,9 @@ class TremorService : LifecycleService(), SensorEventListener {
         }
         if (accelerometer == null) {
             Timber.e("TremorWatch: ERROR: No linear acceleration sensor found!")
+        }
+        if (stepDetector == null) {
+            Timber.w("Step detector not available - cadence artifact gate disabled")
         }
         if (offBodySensor == null) {
             Timber.w("No off-body detection sensor available - defaulting to always worn")
@@ -1138,8 +1153,20 @@ class TremorService : LifecycleService(), SensorEventListener {
                     e.printStackTrace()
                 }
             }
+            stepDetector?.let {
+                try {
+                    val result = sensorManager.registerListener(
+                        monitoringEngine, it,
+                        SensorManager.SENSOR_DELAY_NORMAL
+                    )
+                    Timber.d("Step detector registration result: $result")
+                } catch (e: Exception) {
+                    Timber.e("ERROR: Failed to register step detector: ${e.message}", e)
+                    e.printStackTrace()
+                }
+            }
         } else {
-            Timber.i("Skipping gyro + accel registration - monitoring is paused (charging=$isCharging, worn=$isWatchWorn)")
+            Timber.i("Skipping gyro + accel + step registration - monitoring is paused (charging=$isCharging, worn=$isWatchWorn)")
         }
         // Start Activity Recognition updates on boot (not just when config arrives from phone)
         if (!isPausedDueToWearState) {
@@ -2074,12 +2101,13 @@ class TremorService : LifecycleService(), SensorEventListener {
         }
         stopActivityRecognitionUpdates()
 
-        // BATTERY FIX: Unregister gyroscope and accelerometer to stop 50Hz sensor wake-ups.
+        // BATTERY FIX: Unregister gyroscope, accelerometer, and step detector to stop sensor wake-ups.
         // Keep off-body sensor registered so we detect when the watch is put back on.
         if (::sensorManager.isInitialized && ::monitoringEngine.isInitialized) {
             gyroscope?.let { sensorManager.unregisterListener(monitoringEngine, it) }
             accelerometer?.let { sensorManager.unregisterListener(monitoringEngine, it) }
-            Timber.i("Sensors unregistered (gyro + accel) to save battery while paused")
+            stepDetector?.let { sensorManager.unregisterListener(monitoringEngine, it) }
+            Timber.i("Sensors unregistered (gyro + accel + step) to save battery while paused")
         }
 
         // BATTERY FIX: Release wake lock so the device can enter doze mode.
@@ -2123,7 +2151,7 @@ class TremorService : LifecycleService(), SensorEventListener {
             }
         }
 
-        // BATTERY FIX: Re-register gyroscope and accelerometer that were unregistered during pause.
+        // BATTERY FIX: Re-register gyroscope, accelerometer, and step detector that were unregistered during pause.
         if (::sensorManager.isInitialized && ::monitoringEngine.isInitialized) {
             gyroscope?.let {
                 try {
@@ -2152,6 +2180,17 @@ class TremorService : LifecycleService(), SensorEventListener {
                     Timber.i("Accelerometer re-registered on resume")
                 } catch (e: Exception) {
                     Timber.e("Failed to re-register accelerometer on resume: ${e.message}", e)
+                }
+            }
+            stepDetector?.let {
+                try {
+                    sensorManager.registerListener(
+                        monitoringEngine, it,
+                        SensorManager.SENSOR_DELAY_NORMAL
+                    )
+                    Timber.i("Step detector re-registered on resume")
+                } catch (e: Exception) {
+                    Timber.e("Failed to re-register step detector on resume: ${e.message}", e)
                 }
             }
         }
@@ -2260,6 +2299,7 @@ class TremorService : LifecycleService(), SensorEventListener {
             Timber.w("TremorWatch: WATCHDOG: Sensors frozen (${timeSinceLastSample / 1000}s), re-registering")
 
             // Unregister all sensors
+            sensorManager.unregisterListener(monitoringEngine)
             sensorManager.unregisterListener(this)
 
                 // Re-register gyroscope with batching
@@ -2292,6 +2332,19 @@ class TremorService : LifecycleService(), SensorEventListener {
                         Timber.d("Linear acceleration re-registered: $result (batched)")
                     } catch (e: Exception) {
                         Timber.e("Failed to re-register accelerometer: ${e.message}", e)
+                    }
+                }
+
+                // Re-register step detector (event-driven)
+                stepDetector?.let {
+                    try {
+                        val result = sensorManager.registerListener(
+                            monitoringEngine, it,
+                            SensorManager.SENSOR_DELAY_NORMAL
+                        )
+                        Timber.d("Step detector re-registered: $result")
+                    } catch (e: Exception) {
+                        Timber.e("Failed to re-register step detector: ${e.message}", e)
                     }
                 }
 
@@ -2345,7 +2398,7 @@ class TremorService : LifecycleService(), SensorEventListener {
     override fun onSensorChanged(event: SensorEvent?) {
         event ?: return
 
-        // Delegate gyroscope, linear accelerometer, and off-body sensor to monitoring engine
+        // Delegate gyroscope, linear accelerometer, step detector, and off-body sensor to monitoring engine
         if (::monitoringEngine.isInitialized) {
             monitoringEngine.onSensorChanged(event)
         }

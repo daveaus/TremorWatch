@@ -1,6 +1,11 @@
 package com.opensource.tremorwatch.phone.stats
 
 import android.content.Context
+import com.opensource.tremorwatch.phone.analytics.ConfidenceCalibration
+import com.opensource.tremorwatch.phone.analytics.ConfidenceCalibrationModel
+import com.opensource.tremorwatch.phone.analytics.MedicationDoseResponse
+import com.opensource.tremorwatch.phone.analytics.MedicationResponseModelConfig
+import com.opensource.tremorwatch.phone.analytics.MedicationStateSpaceModel
 import com.opensource.tremorwatch.phone.database.TremorRoomDatabase
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -31,7 +36,17 @@ class StatsRepository(context: Context) {
         private const val LIMITED_WORN_MINUTES = 120.0
         private const val MIN_BOUT_TREMOR_SAMPLES = 10  // ~= 10 seconds at 1 Hz
         private const val MAX_GAP_SAMPLES_IN_BOUT = 2   // allow brief gaps within a bout
+        private const val MED_RESPONSE_PRELOAD_MS = 90L * 60_000L
+        private const val MED_RESPONSE_POSTLOAD_MS = 240L * 60_000L
     }
+
+    data class MedicationDoseResponseRecord(
+        val ingestionId: String,
+        val ingestionTimestamp: Long,
+        val source: String,
+        val watchId: String?,
+        val response: MedicationDoseResponse
+    )
 
     suspend fun computeTodayStats(
         nowMs: Long = System.currentTimeMillis(),
@@ -71,6 +86,79 @@ class StatsRepository(context: Context) {
         }
 
         results.sortedByDescending { it.date }
+    }
+
+    suspend fun computeMedicationResponsesSince(
+        hoursBack: Int = 72,
+        modelConfig: MedicationResponseModelConfig = MedicationResponseModelConfig()
+    ): List<MedicationDoseResponseRecord> = withContext(Dispatchers.Default) {
+        val cutoff = System.currentTimeMillis() - hoursBack.coerceAtLeast(1) * 60L * 60_000L
+        val events = withContext(Dispatchers.IO) {
+            dao.getMedicationIngestionsSince(cutoff)
+        }
+        if (events.isEmpty()) return@withContext emptyList()
+
+        events.map { event ->
+            val start = (event.timestamp - MED_RESPONSE_PRELOAD_MS).coerceAtLeast(0L)
+            val end = event.timestamp + MED_RESPONSE_POSTLOAD_MS
+            val samples = loadStatsSamplesInRange(start, end)
+            val response = MedicationStateSpaceModel.inferDoseResponse(
+                allSamples = samples,
+                ingestionTimestamp = event.timestamp,
+                modelConfig = modelConfig
+            )
+            MedicationDoseResponseRecord(
+                ingestionId = event.id,
+                ingestionTimestamp = event.timestamp,
+                source = event.source,
+                watchId = event.watchId,
+                response = response
+            )
+        }.sortedByDescending { it.ingestionTimestamp }
+    }
+
+    suspend fun fitConfidenceCalibrationFromRatings(
+        daysBack: Int = 14
+    ): ConfidenceCalibrationModel = withContext(Dispatchers.Default) {
+        val cutoff = System.currentTimeMillis() - daysBack.coerceAtLeast(1) * 24L * 60 * 60_000L
+        val ratings = withContext(Dispatchers.IO) {
+            dao.getRatingsAfter(cutoff)
+        }
+        if (ratings.isEmpty()) return@withContext ConfidenceCalibrationModel.None
+
+        val rawScores = mutableListOf<Double>()
+        val labels = mutableListOf<Boolean>()
+
+        for (rating in ratings) {
+            val label = rating.rating >= 3
+            val windowStart = (rating.timestamp - 5 * 60_000L).coerceAtLeast(0L)
+            val windowEnd = rating.timestamp + 5 * 60_000L
+            val rows = withContext(Dispatchers.IO) {
+                dao.getStatsRowsInRangeAfter(
+                    startTime = windowStart,
+                    endTime = windowEnd,
+                    afterTimestamp = windowStart - 1,
+                    limit = 400
+                )
+            }
+            rows.forEach { row ->
+                val score = (row.metadataJson?.let { parseMetadataSafely(it)?.optDoubleOrNull("calibratedConfidence") }
+                    ?: row.confidence)
+                    ?.coerceIn(0.0, 1.0)
+                    ?: return@forEach
+                rawScores += score
+                labels += label
+            }
+        }
+
+        if (rawScores.size < 30) return@withContext ConfidenceCalibrationModel.None
+
+        val platt = ConfidenceCalibration.fitPlatt(rawScores, labels)
+        val isotonic = ConfidenceCalibration.fitIsotonic(rawScores, labels)
+        val plattBrier = ConfidenceCalibration.brierScore(rawScores, labels, platt)
+        val isoBrier = ConfidenceCalibration.brierScore(rawScores, labels, isotonic)
+
+        if (isoBrier.isFinite() && isoBrier < plattBrier) isotonic else platt
     }
 
     private suspend fun computeDailyStatsStreaming(
@@ -362,6 +450,17 @@ class StatsRepository(context: Context) {
         }
     }
 
+    private suspend fun loadStatsSamplesInRange(
+        startMs: Long,
+        endMsInclusive: Long
+    ): List<StatsSample> = withContext(Dispatchers.Default) {
+        val out = mutableListOf<StatsSample>()
+        forEachStatsSampleInRange(startMs, endMsInclusive) { sample ->
+            out += sample
+        }
+        out
+    }
+
     private fun com.opensource.tremorwatch.phone.database.TremorDao.StatsSampleRow.toStatsSample(): StatsSample {
         val meta = metadataJson?.let { parseMetadataSafely(it) }
 
@@ -375,11 +474,15 @@ class StatsRepository(context: Context) {
             isWorn = isWorn,
             isCharging = isCharging,
             confidence = confidence,
+            calibratedConfidence = meta?.optDoubleOrNull("calibratedConfidence"),
+            rerankerProbability = meta?.optDoubleOrNull("rerankerProbability"),
             activityType = meta?.optStringOrNull("activityType"),
             activityConfidence = meta?.optDoubleOrNull("activityConfidence"),
             activityAgeMs = meta?.optLongOrNull("activityAgeMs"),
+            stepsPerMinute = meta?.optIntOrNull("stepsPerMinute"),
             activityAdjustedSeverity = meta?.optDoubleOrNull("activityAdjustedSeverity"),
             activityAdjustedConfidence = meta?.optDoubleOrNull("activityAdjustedConfidence"),
+            reliabilityScore = meta?.optDoubleOrNull("reliabilityScore"),
             tremorTypeConfidence = meta?.optDoubleOrNull("tremorTypeConfidence"),
             isRestingState = meta?.optBooleanOrNull("isRestingState"),
             isReliableMeasurement = meta?.optBooleanOrNull("isReliableMeasurement"),
@@ -463,6 +566,16 @@ class StatsRepository(context: Context) {
             is Boolean -> v
             is Number -> v.toInt() != 0
             is String -> v.equals("true", ignoreCase = true) || v == "1"
+            else -> null
+        }
+    }
+
+    private fun JSONObject.optIntOrNull(key: String): Int? {
+        if (!has(key) || isNull(key)) return null
+        val v = opt(key)
+        return when (v) {
+            is Number -> v.toInt()
+            is String -> v.toIntOrNull()
             else -> null
         }
     }

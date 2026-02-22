@@ -106,7 +106,7 @@ class TremorDatabaseHelper(private val context: Context) {
                 val metadata = buildMap<String, Any> {
                     agg.lastIsWorn?.let { put("isWorn", it) }
                     agg.lastIsCharging?.let { put("isCharging", it) }
-                    agg.lastConfidence?.let { put("confidence", it) }
+                    agg.avgConfidence?.let { put("confidence", it) }
                     agg.lastWatchId?.let { put("watch_id", it) }
                 }
                 
