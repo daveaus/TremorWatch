@@ -248,8 +248,13 @@ class TremorService : LifecycleService(), SensorEventListener {
         // Non-tremor samples correctly have severity 0
         val severity = data.severity
 
-        // Count as tremor if flagged as tremor
-        val tremorCount = if (data.isTremor) 1 else 0
+        // Count tremor events only when they remain clinically meaningful after
+        // activity/confidence adjustment. This keeps event counts aligned with
+        // displayed severity and avoids "tremorCount>0 with severity=0" inflation.
+        val countedTremorEvent = data.isTremor &&
+            data.activityAdjustedSeverity > 0f &&
+            data.activityAdjustedConfidence >= 0.10f
+        val tremorCount = if (countedTremorEvent) 1 else 0
 
         // Calculate time-based tags
         val calendar = Calendar.getInstance()
@@ -332,7 +337,9 @@ class TremorService : LifecycleService(), SensorEventListener {
             "activityAdjustedSeverity" to data.activityAdjustedSeverity,
             "reliabilityScore" to data.reliabilityScore,
             "isReliableMeasurement" to data.isReliableMeasurement,
-            "excludeFromAnalysis" to data.excludeFromAnalysis
+            "excludeFromAnalysis" to data.excludeFromAnalysis,
+            "rawIsTremor" to data.isTremor,
+            "countedTremorEvent" to countedTremorEvent
         )
 
         // opus46 Issue 4: Add artifact classification and episode state metadata
