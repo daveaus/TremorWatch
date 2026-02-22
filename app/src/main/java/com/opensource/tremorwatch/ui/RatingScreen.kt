@@ -61,8 +61,9 @@ fun RatingScreen(
         }
     }
 
-    // Rating options - reversed order (5 at top for easier access during bad tremors)
-    // Added 0 option for no tremor with firework
+    // Rating options - reversed order (5 at top for easier access during bad tremors).
+    // Negative values are special context labels (not clinical scores): -1 sleeping, -2 unsure.
+    // These help label nocturnal detection episodes and uncertain recall.
     val ratingOptions = remember {
         listOf(
             RatingOption(5, "5 - Very Severe", "Hard to use this hand", "😣"),
@@ -70,7 +71,9 @@ fun RatingScreen(
             RatingOption(3, "3 - Moderate", "Annoying but manageable", "😐"),
             RatingOption(2, "2 - Mild", "Noticeable but not annoying", "🙂"),
             RatingOption(1, "1 - Minimal", "Not bothering me", "😊"),
-            RatingOption(0, "0 - No Tremor", "Feeling great!", "🎆")
+            RatingOption(0, "0 - No Tremor", "Feeling great!", "🎆"),
+            RatingOption(-1, "Was Sleeping", "Not relevant right now", "😴"),
+            RatingOption(-2, "Not Sure", "Can't remember", "🤷")
         )
     }
 
@@ -193,6 +196,7 @@ private fun RatingChip(
     onClick: () -> Unit
 ) {
     val backgroundColor = when (option.rating) {
+        -2, -1 -> Color(0xFF9E9E9E).copy(alpha = if (isSelected) 0.3f else 0.1f) // Grey for special states
         0 -> Color(0xFF2196F3).copy(alpha = if (isSelected) 0.3f else 0.1f)  // Blue for no tremor
         1 -> Color(0xFF4CAF50).copy(alpha = if (isSelected) 0.3f else 0.1f)  // Green
         2 -> Color(0xFF8BC34A).copy(alpha = if (isSelected) 0.3f else 0.1f)  // Light Green
@@ -203,6 +207,7 @@ private fun RatingChip(
     }
 
     val textColor = when (option.rating) {
+        -2, -1 -> Color(0xFF9E9E9E)  // Grey for special states
         0 -> Color(0xFF2196F3)
         1 -> Color(0xFF4CAF50)
         2 -> Color(0xFF8BC34A)
@@ -280,6 +285,8 @@ private fun RatingResultScreen(
     }
 
     val ratingEmoji = when (rating) {
+        -2 -> "🤷"
+        -1 -> "😴"
         0 -> "🎆"
         1 -> "😊"
         2 -> "🙂"
@@ -292,6 +299,7 @@ private fun RatingResultScreen(
     val ratingLabel = SubjectiveRating.RATING_LABELS[rating] ?: "Unknown"
 
     val backgroundColor = when (rating) {
+        -2, -1 -> Color(0xFF9E9E9E).copy(alpha = 0.2f)
         0 -> Color(0xFF2196F3).copy(alpha = 0.2f)
         1 -> Color(0xFF4CAF50).copy(alpha = 0.2f)
         2 -> Color(0xFF8BC34A).copy(alpha = 0.2f)
@@ -307,7 +315,7 @@ private fun RatingResultScreen(
             .background(backgroundColor),
         contentAlignment = Alignment.Center
     ) {
-        // Firework animation for rating 0
+        // Firework animation for "No Tremor" celebration (not for special context states)
         if (rating == 0) {
             FireworkAnimation()
         }
@@ -329,7 +337,12 @@ private fun RatingResultScreen(
 
             // Rating number
             Text(
-                text = if (rating == 0) "No Tremor!" else "Rating: $rating",
+                text = when (rating) {
+                    -2 -> "Noted!"
+                    -1 -> "Sleep logged!"
+                    0 -> "No Tremor!"
+                    else -> "Rating: $rating"
+                },
                 style = MaterialTheme.typography.title1,
                 textAlign = TextAlign.Center
             )
@@ -461,6 +474,8 @@ fun RatingStatusIndicator(
     }
 
     val emoji = when (lastRating) {
+        -2 -> "🤷"
+        -1 -> "😴"
         0 -> "🎆"
         1 -> "😊"
         2 -> "🙂"

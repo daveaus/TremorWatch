@@ -106,6 +106,11 @@ class TremorService : LifecycleService(), SensorEventListener {
         private const val KEY_SMART_TRIGGER_ENABLED = "smart_trigger_enabled"
         private const val KEY_MIN_CONTEXT_SAMPLES = "min_context_samples"
         private const val DEFAULT_MIN_CONTEXT_SAMPLES = 60
+        // Written by onSampleReady when any sensor activity is detected; read by
+        // RatingPromptReceiver to gate prompts when watch has been idle (off-wrist,
+        // not worn, or monitoring paused). Throttled to at most once per 30 seconds.
+        const val KEY_LAST_SIGNIFICANT_DETECTION_MS = "last_significant_detection_ms"
+        private const val DETECTION_WRITE_THROTTLE_MS = 30_000L
 
         /** WakeLock auto-release timeout. Monitor renews every 10 min, so 15 min gives safety margin. */
         private const val WAKELOCK_TIMEOUT_MS = 15 * 60 * 1000L // 15 minutes
@@ -178,6 +183,9 @@ class TremorService : LifecycleService(), SensorEventListener {
 
     // Calibration capture manager for subjective rating data collection
     private lateinit var calibrationCaptureManager: CalibrationCaptureManager
+
+    // Throttle timestamp for writing last_significant_detection_ms to SharedPrefs
+    @Volatile private var lastDetectionWriteMs = 0L
 
     // Periodic status update handler
     private val statusUpdateHandler = Handler(Looper.getMainLooper())
@@ -963,6 +971,17 @@ class TremorService : LifecycleService(), SensorEventListener {
             }
             ,
             onSampleReady = { data ->
+                // Record sensor activity timestamp so RatingPromptReceiver can gate prompts when
+                // the watch has been idle (off-wrist, not worn). Throttled to once per 30 s.
+                val nowMs = System.currentTimeMillis()
+                if (nowMs - lastDetectionWriteMs > DETECTION_WRITE_THROTTLE_MS) {
+                    lastDetectionWriteMs = nowMs
+                    getSharedPreferences(RATING_PREFS_NAME, Context.MODE_PRIVATE)
+                        .edit()
+                        .putLong(KEY_LAST_SIGNIFICANT_DETECTION_MS, nowMs)
+                        .apply()
+                }
+
                 // Calibration capture is time-bounded and must not depend on batch boundaries (10 min).
                 if (::calibrationCaptureManager.isInitialized && calibrationCaptureManager.isCapturing()) {
                     val sample = CalibrationSample(

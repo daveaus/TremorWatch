@@ -30,8 +30,13 @@ data class SubjectiveRating(
     companion object {
         const val CURRENT_SCHEMA_VERSION = 1
         
-        // Functional rating labels for consistent user understanding
+        // Functional rating labels for consistent user understanding.
+        // Negative values are special non-clinical states, not tremor severity scores.
+        //   -1 = Was sleeping / not conscious of tremor
+        //   -2 = Not sure / can't remember
         val RATING_LABELS = mapOf(
+            -2 to "Not sure / can't remember",
+            -1 to "Was sleeping",
             0 to "No tremor",
             1 to "Minimal (not bothering me)",
             2 to "Mild (noticeable but not annoying)",
@@ -41,6 +46,8 @@ data class SubjectiveRating(
         )
 
         val RATING_EMOJIS = mapOf(
+            -2 to "🤷",
+            -1 to "😴",
             0 to "🎆",
             1 to "😊",
             2 to "🙂",

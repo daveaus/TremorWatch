@@ -36,6 +36,9 @@ class RatingPromptReceiver : BroadcastReceiver() {
         private const val KEY_PROMPT_VIBRATION_ENABLED = "prompt_vibration_enabled"
         private const val KEY_PROMPT_VIBRATION_STRONG = "prompt_vibration_strong"
         private const val KEY_PROMPT_FOLLOWUP_VIBRATION = "prompt_followup_vibration"
+        // Sensor-activity gate: shared with TremorService.KEY_LAST_SIGNIFICANT_DETECTION_MS
+        private const val KEY_LAST_SIGNIFICANT_DETECTION_MS = "last_significant_detection_ms"
+        private const val DETECTION_STALENESS_GATE_MS = 5 * 60 * 1000L // 5 minutes
         private const val DEFAULT_MAX_DAILY_PROMPTS = 6
         private const val DEFAULT_MIN_INTERVAL_MINUTES = 60
         private const val REQUEST_CODE = 3  // Same as used in TremorService
@@ -216,12 +219,24 @@ class RatingPromptReceiver : BroadcastReceiver() {
         val currentHour = Calendar.getInstance().get(Calendar.HOUR_OF_DAY)
         val startHour = prefs.getInt(KEY_ACTIVE_HOURS_START, 6)
         val endHour = prefs.getInt(KEY_ACTIVE_HOURS_END, 22)
-        
+
         if (currentHour < startHour || currentHour >= endHour) {
             advanceNextPrompt("outside active hours ($currentHour not in $startHour-$endHour)")
             return
         }
-        
+
+        // Sensor-activity gate: skip prompts if TremorService hasn't recorded any sensor
+        // data in the last 5 minutes. This avoids prompting when the watch is off-wrist,
+        // monitoring is paused, or the service hasn't started yet after a reboot.
+        val lastDetectionMs = prefs.getLong(KEY_LAST_SIGNIFICANT_DETECTION_MS, 0L)
+        val timeSinceDetectionMs = System.currentTimeMillis() - lastDetectionMs
+        if (lastDetectionMs == 0L || timeSinceDetectionMs > DETECTION_STALENESS_GATE_MS) {
+            advanceNextPrompt(
+                "no sensor activity in last 5m (last=${timeSinceDetectionMs / 1000}s ago)"
+            )
+            return
+        }
+
         // Increment prompt count and record next prompt time
         prefs.edit()
             .putInt(KEY_PROMPTS_TODAY, promptsToday + 1)

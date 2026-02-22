@@ -30,34 +30,49 @@ class TremorDatabaseHelper(private val context: Context) {
     suspend fun saveBatch(batch: TremorBatch): Boolean = withContext(Dispatchers.IO) {
         try {
             val samples = batch.samples.map { sample ->
-                // Only create JSON if activity metadata exists (FIX #5)
-                val metadataJson = if (sample.metadata.containsKey("activityType")) {
+                // Serialize full metadata to JSON. Previously gated on activityType presence,
+                // which silently dropped context for ~20% of rows. Now always attempted with
+                // NaN/Infinity sanitization to prevent JSONObject serialization failures.
+                val metadataJson = if (sample.metadata.isNotEmpty()) {
                     try {
-                        JSONObject(sample.metadata).toString()
+                        val sanitized = sample.metadata.mapValues { (_, v) ->
+                            when {
+                                v is Double && (v.isNaN() || v.isInfinite()) -> 0.0
+                                v is Float && (v.isNaN() || v.isInfinite()) -> 0.0f
+                                else -> v
+                            }
+                        }
+                        JSONObject(sanitized).toString()
                     } catch (e: Exception) {
+                        Log.w(TAG, "Failed to serialize metadata, storing null: ${e.message}")
                         null
                     }
                 } else {
                     null
                 }
 
+                // Use (as? Number)?.toDouble() instead of (as? Double) to handle both Float
+                // and Double values that arrive from JSON deserialization. Previously ~185k rows
+                // stored null because Kotlin's as? Double fails silently on Float values.
+                fun Any?.toDoubleOrNull(): Double? = (this as? Number)?.toDouble()
+
                 TremorSample(
                     timestamp = sample.timestamp,
                     severity = sample.severity,
                     tremorCount = sample.tremorCount,
-                    x = sample.metadata["x"] as? Double,
-                    y = sample.metadata["y"] as? Double,
-                    z = sample.metadata["z"] as? Double,
-                    magnitude = sample.metadata["magnitude"] as? Double,
-                    accelMagnitude = sample.metadata["accelMagnitude"] as? Double,
-                    dominantFrequency = sample.metadata["dominantFrequency"] as? Double,
-                    tremorBandPower = sample.metadata["tremorBandPower"] as? Double,
-                    totalPower = sample.metadata["totalPower"] as? Double,
-                    bandRatio = sample.metadata["bandRatio"] as? Double,
-                    peakProminence = sample.metadata["peakProminence"] as? Double,
+                    x = sample.metadata["x"].toDoubleOrNull(),
+                    y = sample.metadata["y"].toDoubleOrNull(),
+                    z = sample.metadata["z"].toDoubleOrNull(),
+                    magnitude = sample.metadata["magnitude"].toDoubleOrNull(),
+                    accelMagnitude = sample.metadata["accelMagnitude"].toDoubleOrNull(),
+                    dominantFrequency = sample.metadata["dominantFrequency"].toDoubleOrNull(),
+                    tremorBandPower = sample.metadata["tremorBandPower"].toDoubleOrNull(),
+                    totalPower = sample.metadata["totalPower"].toDoubleOrNull(),
+                    bandRatio = sample.metadata["bandRatio"].toDoubleOrNull(),
+                    peakProminence = sample.metadata["peakProminence"].toDoubleOrNull(),
                     isWorn = sample.metadata["isWorn"] as? Boolean,
                     isCharging = sample.metadata["isCharging"] as? Boolean,
-                    confidence = sample.metadata["confidence"] as? Double,
+                    confidence = sample.metadata["confidence"].toDoubleOrNull(),
                     watchId = sample.metadata["watch_id"] as? String,
                     metadataJson = metadataJson
                 )

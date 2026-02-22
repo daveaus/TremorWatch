@@ -82,7 +82,7 @@ data class TremorDetectionConfig(
     val activityFilteringEnabled: Boolean = true,
     /** Multipliers applied by detected activity (0-1). */
     val activityStillMultiplier: Float = 1.0f,
-    val activityTiltingMultiplier: Float = 0.5f,
+    val activityTiltingMultiplier: Float = 0.15f,  // Tightened from 0.5 — tilting is almost always motion artifact
     val activityWalkingMultiplier: Float = 0.3f,
     val activityRunningMultiplier: Float = 0.1f,
     val activityOnBicycleMultiplier: Float = 0.1f,

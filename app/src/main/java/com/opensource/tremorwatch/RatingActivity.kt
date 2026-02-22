@@ -68,6 +68,16 @@ class RatingActivity : ComponentActivity() {
                         // Get watch-side objective context from service buffer (opus46 Issue 3d)
                         val watchContext = com.opensource.tremorwatch.service.TremorService.getWatchObjectiveContext()
 
+                        // Extract scalar detection metrics from the 60-second window so the
+                        // phone-side DB can correlate subjective and objective data without
+                        // needing to parse the full watchObjectiveContext JSON. (data-quality fix)
+                        val window60 = watchContext?.optJSONObject("window_60s")
+                        val detectedSeverity = window60?.optDouble("meanSeverity")
+                            ?.takeIf { !it.isNaN() && !it.isInfinite() }
+                        val detectedConfidence = window60?.optDouble("avgConfidence")
+                            ?.takeIf { !it.isNaN() && !it.isInfinite() }
+                            ?.toFloat()
+
                         // Send rating to phone with detection state and calibration flags
                         WatchDataSender(this@RatingActivity).sendSubjectiveRating(
                             ratingId = ratingId,
@@ -76,6 +86,8 @@ class RatingActivity : ComponentActivity() {
                             watchId = watchId,
                             calibrationModeEnabled = calibrationEnabled,
                             calibrationDurationSeconds = calibrationDuration,
+                            detectedSeverity = detectedSeverity,
+                            detectedConfidence = detectedConfidence,
                             watchObjectiveContext = watchContext
                         ) { success ->
                             Timber.i("Rating sent to phone: $success")
