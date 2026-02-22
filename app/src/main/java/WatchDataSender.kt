@@ -2,7 +2,6 @@ package com.opensource.tremorwatch
 
 import android.content.Context
 import android.util.Log
-import com.opensource.tremorwatch.communication.WatchChannelSender
 import com.opensource.tremorwatch.shared.Constants
 import com.opensource.tremorwatch.shared.models.TremorBatch
 import com.google.android.gms.tasks.Tasks
@@ -194,13 +193,24 @@ class WatchDataSender(private val context: Context) {
     }
 
     /**
-     * Send batch to a specific phone node using ChannelClient for streaming.
-     * ChannelClient eliminates manual chunking and provides reliable streaming.
+     * Send batch to a specific phone node.
+     *
+     * Strategy:
+     * 1) Prefer reliable DataClient when compressed payload is reasonably small.
+     * 2) Fall back to chunked MessageClient for larger payloads.
+     *
+     * This avoids relying solely on channel events for delivery.
      */
     private suspend fun sendBatchToNode(batch: TremorBatch, node: Node): Boolean {
         return withContext(Dispatchers.IO) {
-            val channelSender = WatchChannelSender(context)
             var lastError: Throwable? = null
+
+            val jsonBytes = batch.toJsonString().toByteArray(Charsets.UTF_8)
+            val compressedData = compressData(jsonBytes)
+            // Conservative ceiling for reliable DataClient payloads.
+            // Larger payloads use chunked MessageClient transport.
+            val dataClientMaxBytes = 96 * 1024
+            val useReliableDataItem = compressedData.size <= dataClientMaxBytes
 
             for (attemptNumber in 0..Constants.MAX_SEND_RETRIES) {
                 try {
@@ -210,9 +220,21 @@ class WatchDataSender(private val context: Context) {
                         delay(delayMs)
                     }
 
-                    // Use ChannelClient for all batch sizes
-                    // Eliminates manual chunking and provides better flow control
-                    val success = channelSender.sendBatch(batch, node)
+                    val success = if (useReliableDataItem) {
+                        sendSingleMessage(
+                            node = node,
+                            batchId = batch.batchId,
+                            data = compressedData,
+                            isCompressed = true
+                        )
+                    } else {
+                        sendChunkedBatch(
+                            node = node,
+                            batchId = batch.batchId,
+                            data = compressedData,
+                            isCompressed = true
+                        )
+                    }
 
                     if (success) {
                         return@withContext true
@@ -227,11 +249,7 @@ class WatchDataSender(private val context: Context) {
                 }
             }
 
-            Log.e(
-                TAG,
-                "Failed to send batch ${batch.batchId} after ${Constants.MAX_SEND_RETRIES + 1} attempts",
-                lastError
-            )
+            Log.e(TAG, "Failed to send batch ${batch.batchId} after ${Constants.MAX_SEND_RETRIES + 1} attempts", lastError)
             false
         }
     }
@@ -315,12 +333,15 @@ class WatchDataSender(private val context: Context) {
 
                     val payload = metadata.toByteArray() + byteArrayOf(0) + chunk.toByteArray()
 
-                    // Fire-and-forget: send without waiting for completion
-                    // This prevents timeout when Data Layer is slow
-                    messageClient.sendMessage(
-                        node.id,
-                        Constants.MESSAGE_PATH_TREMOR_CHUNK,
-                        payload
+                    // Await each chunk enqueue to surface transport errors.
+                    Tasks.await(
+                        messageClient.sendMessage(
+                            node.id,
+                            Constants.MESSAGE_PATH_TREMOR_CHUNK,
+                            payload
+                        ),
+                        Constants.MESSAGE_TIMEOUT_MS,
+                        TimeUnit.MILLISECONDS
                     )
 
                     Log.d(TAG, "✓ Sent chunk ${index + 1}/$totalChunks for batch $batchId (${chunk.size} bytes)")
