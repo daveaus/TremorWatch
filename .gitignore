@@ -81,6 +81,16 @@ captures/
 *.iml
 .idea/
 .idea_modules/
+.kotlin/
+
+# Root-level hidden local tooling/state folders
+/.agent/
+/.claude/
+/.gradle/
+/.idea/
+/.kotlin/
+/.stfolder/
+/.stignore
 
 # Keystore files
 *.jks
