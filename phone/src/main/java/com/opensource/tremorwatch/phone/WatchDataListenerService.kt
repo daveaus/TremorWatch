@@ -209,6 +209,10 @@ class WatchDataListenerService : WearableListenerService() {
                 Log.d(TAG, "Processing calibration data message")
                 handleCalibrationData(messageEvent.data)
             }
+            // IG-04: Silently ignore WearOS notification bridge paths (no processing needed)
+            messageEvent.path.startsWith("/notification") -> {
+                // No-op: WearOS notification bridge message, not TremorWatch data
+            }
             else -> {
                 Log.w(TAG, "Unknown message path: ${messageEvent.path}")
             }
