@@ -125,6 +125,19 @@ class TremorMonitoringEngine(
     // External state (managed by service)
     private var isPausedDueToWearState = false
     private var isCharging = false
+    // ES-04: Sensor rate flag — true at 50Hz (full), false at 10Hz (low-power).
+    // FFT analysis is gated on this to prevent hallucinated frequency results.
+    @Volatile
+    var isFullSensorRate: Boolean = true
+        private set
+
+    /** ES-04: Called by TremorService when gyro sensor rate changes. */
+    fun setFullSensorRate(fullRate: Boolean) {
+        isFullSensorRate = fullRate
+        if (!fullRate) {
+            Timber.d("ES-04: FFT analysis DISABLED (sensor in low-power mode)")
+        }
+    }
     
     // Phase 4: Temporal smoothing state for episode tracking (opus45 review)
     // Tracks consecutive tremor/non-tremor samples for noise filtering
@@ -962,6 +975,14 @@ class TremorMonitoringEngine(
         trimWindow(gyroYWindow, retentionSize)
         trimWindow(gyroZWindow, retentionSize)
         trimWindow(gyroMagnitudeWindow, retentionSize)
+
+        // ES-04: Skip FFT when in low-power sensor mode (10Hz).
+        // The FFT math is tuned for 50Hz data; running it on 10Hz data would produce
+        // mathematically hallucinated frequency results (Nyquist limit 5Hz < tremor band 4-12Hz).
+        if (!isFullSensorRate) {
+            // Still save 1 Hz samples below, just skip FFT analysis
+            fftProcessingCounter = 0
+        }
 
         // Perform FFT analysis on gyroscope/accelerometer when enough buffered samples exist.
         fftProcessingCounter++

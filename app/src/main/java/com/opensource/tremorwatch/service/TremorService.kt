@@ -2777,6 +2777,8 @@ class TremorService : LifecycleService(), SensorEventListener {
             )
 
             isGyroInLowPowerMode = shouldUseLowPower
+            // ES-04: Inform engine so FFT analysis is gated when sensor rate is too low
+            monitoringEngine.setFullSensorRate(!shouldUseLowPower)
             val rateHz = 1_000_000 / newRate
             Timber.i("Gyroscope duty-cycle: ${if (shouldUseLowPower) "LOW POWER" else "FULL"} (${rateHz}Hz, registered=$result)")
         } catch (e: Exception) {

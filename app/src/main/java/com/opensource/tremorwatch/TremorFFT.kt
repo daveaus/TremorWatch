@@ -277,10 +277,12 @@ class TremorFFT(private val sampleRate: Float = 20f) {
         // Use adaptive confidence threshold if personalized, otherwise default 0.35
         val isTremor = hasMinimumPower &&
                        meetsFrequencyThreshold &&
+                       meetsDynamicBandRatioThreshold &&  // ES-01: activity-aware band-ratio gate
                        !isHighEnergyLowBandRatio &&
                        entropyCompatible &&
                        dominantFreq >= bandLow &&
                        confidence > confidenceThreshold
+        // FIXME: Validate band-ratio constants against clinical data
 
         return FFTResult(
             dominantFrequency = dominantFreq,
