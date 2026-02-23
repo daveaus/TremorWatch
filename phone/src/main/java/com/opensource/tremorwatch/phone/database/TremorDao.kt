@@ -162,26 +162,27 @@ interface TremorDao {
      */
     @Query("""
         SELECT 
-            (timestamp / 60000) * 60000 as bucketTimestamp,
-            AVG(severity) as avgSeverity,
-            SUM(tremorCount) as totalTremorCount,
-            (SELECT sub.isWorn FROM tremor_samples AS sub
-             WHERE sub.timestamp / 60000 = main.timestamp / 60000
-               AND sub.timestamp >= :cutoffTime
-             ORDER BY sub.timestamp DESC LIMIT 1) as lastIsWorn,
-            (SELECT sub.isCharging FROM tremor_samples AS sub
-             WHERE sub.timestamp / 60000 = main.timestamp / 60000
-               AND sub.timestamp >= :cutoffTime
-             ORDER BY sub.timestamp DESC LIMIT 1) as lastIsCharging,
-            AVG(confidence) as avgConfidence,
-            (SELECT sub.watchId FROM tremor_samples AS sub
-             WHERE sub.timestamp / 60000 = main.timestamp / 60000
-               AND sub.timestamp >= :cutoffTime
-             ORDER BY sub.timestamp DESC LIMIT 1) as lastWatchId
-        FROM tremor_samples AS main
-        WHERE timestamp >= :cutoffTime 
-        GROUP BY timestamp / 60000 
-        ORDER BY bucketTimestamp ASC
+            agg.bucketTimestamp,
+            agg.avgSeverity,
+            agg.totalTremorCount,
+            last.isWorn as lastIsWorn,
+            last.isCharging as lastIsCharging,
+            agg.avgConfidence,
+            last.watchId as lastWatchId
+        FROM (
+            SELECT 
+                (timestamp / 60000) * 60000 as bucketTimestamp,
+                AVG(severity) as avgSeverity,
+                SUM(tremorCount) as totalTremorCount,
+                AVG(confidence) as avgConfidence,
+                MAX(timestamp) as maxTs
+            FROM tremor_samples
+            WHERE timestamp >= :cutoffTime
+            GROUP BY timestamp / 60000
+        ) agg
+        INNER JOIN tremor_samples last
+            ON last.timestamp = agg.maxTs
+        ORDER BY agg.bucketTimestamp ASC
     """)
     suspend fun getAggregatedChartData(cutoffTime: Long): List<AggregatedChartData>
     
