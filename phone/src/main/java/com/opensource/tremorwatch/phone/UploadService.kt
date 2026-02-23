@@ -24,6 +24,7 @@ import java.io.File
 import java.io.IOException
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Foreground service that handles uploading tremor batches to InfluxDB.
@@ -37,7 +38,7 @@ class UploadService : Service() {
         private const val TAG = "UploadService"
         private const val UPLOAD_DELAY_MS = 100L
         private const val NOTIFICATION_UPDATE_INTERVAL_MS = 60000L
-        private const val QUEUE_CHECK_INTERVAL_MS = 5000L
+        private const val FALLBACK_CHECK_INTERVAL_MS = 300000L  // 5 minutes (was 5 seconds)
         private const val MIN_NOTIFICATION_UPDATE_INTERVAL_MS = 3000L
         private const val MAX_BATCHES_PER_CHUNK = 50 // Increased from 10 to 50
         private const val MAX_FAILURES = 3 // Max failures before moving a batch to failed queue
@@ -54,7 +55,7 @@ class UploadService : Service() {
     }
 
     private var isRunningAsForeground = false
-    private var isProcessingUpload = false
+    private val isUploadInProgress = AtomicBoolean(false)
     private var lastNotificationUpdateTime = 0L
 
     private val handler = Handler(Looper.getMainLooper())
@@ -96,11 +97,14 @@ class UploadService : Service() {
         }
 
         val shouldProcessNow = intent?.getBooleanExtra("process_now", false) ?: false
-        if (shouldProcessNow && !isProcessingUpload) {
+        if (shouldProcessNow) {
             processUploadQueue()
         }
 
-        return START_STICKY
+        // START_NOT_STICKY: service should NOT auto-restart when killed.
+        // It will be re-started by explicit intents from triggerUploadService() or
+        // WatchDataListenerService when new batches arrive.
+        return START_NOT_STICKY
     }
 
     private fun startForegroundService() {
@@ -133,7 +137,7 @@ class UploadService : Service() {
     private fun startPeriodicNotificationUpdates() {
         handler.post(object : Runnable {
             override fun run() {
-                if (!isProcessingUpload) {
+                if (!isUploadInProgress.get()) {
                     updateIdleNotification()
                 }
                 handler.postDelayed(this, NOTIFICATION_UPDATE_INTERVAL_MS)
@@ -141,15 +145,20 @@ class UploadService : Service() {
         })
     }
 
+    /**
+     * 5-minute fallback check for orphaned batches.
+     * Primary trigger is explicit intents from triggerUploadService() in WatchDataListenerService.
+     * This fallback catches edge cases where the explicit trigger was missed.
+     */
     private fun startPeriodicQueueChecks() {
         handler.postDelayed(object : Runnable {
             override fun run() {
-                if (!isProcessingUpload) {
+                if (!isUploadInProgress.get()) {
                     checkAndProcessQueue()
                 }
-                handler.postDelayed(this, QUEUE_CHECK_INTERVAL_MS)
+                handler.postDelayed(this, FALLBACK_CHECK_INTERVAL_MS)
             }
-        }, QUEUE_CHECK_INTERVAL_MS)
+        }, FALLBACK_CHECK_INTERVAL_MS)
     }
 
     private fun updateIdleNotification() {
@@ -157,7 +166,7 @@ class UploadService : Service() {
     }
 
     private fun checkAndProcessQueue() {
-        Log.d(TAG, "Periodic queue check")
+        Log.d(TAG, "Fallback queue check (5-min interval)")
         processUploadQueue()
     }
 
@@ -174,8 +183,9 @@ class UploadService : Service() {
      * CRITICAL FIX: Returns early when not on home network to prevent false failures.
      */
     private fun processUploadQueue() {
-        if (isProcessingUpload) {
-            Log.d(TAG, "Already processing upload queue, skipping")
+        // ES-10: Atomic guard — if already in progress, skip this trigger entirely
+        if (!isUploadInProgress.compareAndSet(false, true)) {
+            Log.d(TAG, "Upload already in progress, skipping trigger")
             return
         }
 
@@ -191,6 +201,10 @@ class UploadService : Service() {
         // Get pending files first
         val queueDir = File(filesDir, "upload_queue")
         if (!queueDir.exists()) {
+            isUploadInProgress.set(false)
+            // MF-01: Queue empty — shut down service to save battery
+            Log.i(TAG, "No upload_queue dir, stopping service")
+            stopSelf()
             return
         }
 
@@ -199,6 +213,10 @@ class UploadService : Service() {
         }?.sortedBy { it.name } ?: emptyList()
 
         if (pendingFiles.isEmpty()) {
+            isUploadInProgress.set(false)
+            // MF-01: Queue empty — shut down service to save battery
+            Log.i(TAG, "Upload queue empty, stopping service to save battery")
+            stopSelf()
             return
         }
 
@@ -211,11 +229,13 @@ class UploadService : Service() {
                 return
             }
             !hasNetwork -> {
+                isUploadInProgress.set(false)
                 Log.i(TAG, "No network available - ${pendingFiles.size} batches queued for upload when network available")
                 updateNotificationThrottled(ServiceStatus.WAITING, "${pendingFiles.size} batches queued (no network)")
                 return // STOP HERE - don't process queue
             }
             !isOnHomeNetwork -> {
+                isUploadInProgress.set(false)
                 Log.i(TAG, "Not on home network - ${pendingFiles.size} batches queued for upload when on home network")
                 updateNotificationThrottled(ServiceStatus.WAITING, "${pendingFiles.size} batches queued (away from home)")
                 return // STOP HERE - don't process queue
@@ -234,7 +254,7 @@ class UploadService : Service() {
      * Process batches for local storage only (InfluxDB not configured)
      */
     private fun processBatchesForLocalStorageOnly(files: List<File>) {
-        isProcessingUpload = true
+        // isUploadInProgress already set to true by processUploadQueue
 
         backgroundExecutor.execute {
             var successCount = 0
@@ -278,9 +298,11 @@ class UploadService : Service() {
             }
 
             handler.post {
-                isProcessingUpload = false
+                isUploadInProgress.set(false)
                 Log.i(TAG, "Local storage processing complete: $successCount successful, $errorCount errors")
                 updateNotificationThrottled(ServiceStatus.IDLE, "Local storage updated")
+                // Check if we should shut down
+                stopSelf()
             }
         }
     }
@@ -289,7 +311,7 @@ class UploadService : Service() {
      * Process batches for upload (on home network)
      */
     private fun processBatchesForUpload(files: List<File>) {
-        isProcessingUpload = true
+        // isUploadInProgress already set to true by processUploadQueue
 
         val totalBatches = files.size
         val batchesToProcess = files.take(MAX_BATCHES_PER_CHUNK)
@@ -313,7 +335,7 @@ class UploadService : Service() {
 
                 if (index == batchesToProcess.size - 1) {
                     handler.postDelayed({
-                        isProcessingUpload = false
+                        isUploadInProgress.set(false)
                         val remainingBatches = totalBatches - batchesToProcess.size
                         if (remainingBatches > 0) {
                             Log.i(TAG, "Chunk complete - $remainingBatches batches remaining")
@@ -322,6 +344,8 @@ class UploadService : Service() {
                         } else {
                             Log.i(TAG, "Completed processing all batches")
                             updateNotificationThrottled(ServiceStatus.IDLE, "Upload complete")
+                            // Queue drained — shut down to save battery
+                            stopSelf()
                         }
                     }, 1000)
                 }

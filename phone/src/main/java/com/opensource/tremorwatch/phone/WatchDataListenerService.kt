@@ -18,6 +18,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import org.json.JSONObject
 import org.json.JSONArray
@@ -94,13 +95,14 @@ class WatchDataListenerService : WearableListenerService() {
         fun assembleData(): ByteArray? {
             if (!isComplete()) return null
 
-            // Concatenate chunks in order
-            val result = mutableListOf<Byte>()
+            // Concatenate chunks in order using ByteArrayOutputStream
+            // (avoids per-byte boxing overhead of mutableListOf<Byte>)
+            val bos = ByteArrayOutputStream()
             for (i in 0 until totalChunks) {
                 val chunk = chunks[i] ?: return null
-                result.addAll(chunk.toList())
+                bos.write(chunk)
             }
-            return result.toByteArray()
+            return bos.toByteArray()
         }
     }
 
@@ -113,7 +115,7 @@ class WatchDataListenerService : WearableListenerService() {
     /**
      * Decompress GZIP data
      */
-    private fun decompressData(data: ByteArray): ByteArray {
+    private fun decompressData(data: ByteArray): ByteArray? {
         return try {
             ByteArrayInputStream(data).use { bis ->
                 GZIPInputStream(bis).use { gzip ->
@@ -128,8 +130,8 @@ class WatchDataListenerService : WearableListenerService() {
                 }
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to decompress data: ${e.message}")
-            data // Return original if decompression fails
+            Log.e(TAG, "Failed to decompress data (${data.size} bytes): ${e.message}", e)
+            null
         }
     }
 
@@ -281,7 +283,7 @@ class WatchDataListenerService : WearableListenerService() {
         }
     }
 
-    private fun decompressDataWithLimit(data: ByteArray, maxOutputBytes: Int): ByteArray {
+    private fun decompressDataWithLimit(data: ByteArray, maxOutputBytes: Int): ByteArray? {
         return try {
             ByteArrayInputStream(data).use { bis ->
                 GZIPInputStream(bis).use { gzip ->
@@ -302,8 +304,8 @@ class WatchDataListenerService : WearableListenerService() {
                 }
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to decompress data: ${e.message}")
-            data // Return original if decompression fails
+            Log.e(TAG, "Failed to decompress data (${data.size} bytes): ${e.message}", e)
+            null
         }
     }
 
@@ -349,6 +351,10 @@ class WatchDataListenerService : WearableListenerService() {
 
         try {
             val jsonBytes = decompressDataWithLimit(compressedData, MAX_TREMOR_BATCH_DECOMPRESSED_BYTES)
+            if (jsonBytes == null) {
+                Log.e(TAG, "Channel batch decompression failed, discarding payload")
+                return
+            }
             val jsonString = String(jsonBytes, Charsets.UTF_8)
             val batch = TremorBatch.fromJsonString(jsonString)
             processBatch(batch)
@@ -420,6 +426,10 @@ class WatchDataListenerService : WearableListenerService() {
 
         try {
             val decompressed = decompressDataWithLimit(payload.compressedData, MAX_CALIBRATION_DECOMPRESSED_BYTES)
+            if (decompressed == null) {
+                Log.e(TAG, "Calibration decompression failed for ${payload.filename}, discarding")
+                return
+            }
             val calibrationJson = String(decompressed, Charsets.UTF_8)
             Log.i(TAG, "✓ Received calibration file: ${payload.filename} (${decompressed.size} bytes decompressed)")
 
@@ -650,19 +660,26 @@ class WatchDataListenerService : WearableListenerService() {
 
             // Single chunk message (no assembly needed)
             if (totalChunks == 1) {
-                try {
-                    val jsonData = if (isCompressed) {
-                        Log.d(TAG, "Decompressing single chunk for batch $batchId")
-                        decompressData(chunkData)
-                    } else {
-                        chunkData
+                serviceScope.launch {
+                    try {
+                        val jsonData = if (isCompressed) {
+                            Log.d(TAG, "Decompressing single chunk for batch $batchId")
+                            val decompressed = decompressData(chunkData)
+                            if (decompressed == null) {
+                                Log.e(TAG, "Decompression failed for single-chunk batch $batchId, discarding")
+                                return@launch
+                            }
+                            decompressed
+                        } else {
+                            chunkData
+                        }
+                        val jsonString = String(jsonData, Charsets.UTF_8)
+                        Log.d(TAG, "Parsing single chunk batch $batchId (${jsonString.length} chars)")
+                        val batch = TremorBatch.fromJsonString(jsonString)
+                        processBatch(batch)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Failed to process single chunk batch $batchId: ${e.message}", e)
                     }
-                    val jsonString = String(jsonData, Charsets.UTF_8)
-                    Log.d(TAG, "Parsing single chunk batch $batchId (${jsonString.length} chars)")
-                    val batch = TremorBatch.fromJsonString(jsonString)
-                    processBatch(batch)
-                } catch (e: Exception) {
-                    Log.e(TAG, "Failed to process single chunk batch $batchId: ${e.message}", e)
                 }
                 return
             }
@@ -687,16 +704,26 @@ class WatchDataListenerService : WearableListenerService() {
                         // Decompress if needed
                         if (assembly.isCompressed) {
                             val originalSize = assembledData.size
-                            assembledData = decompressData(assembledData)
+                            val decompressed = decompressData(assembledData)
+                            if (decompressed == null) {
+                                Log.e(TAG, "Decompression failed for assembled batch $batchId, discarding")
+                                chunkAssemblies.remove(batchId)
+                                return@synchronized
+                            }
+                            assembledData = decompressed
                             Log.d(TAG, "Decompressed batch $batchId: $originalSize -> ${assembledData.size} bytes")
                         }
 
                         val jsonString = String(assembledData, Charsets.UTF_8)
                         Log.d(TAG, "Parsing assembled batch $batchId (${jsonString.length} chars from $totalChunks chunks)")
                         val batch = TremorBatch.fromJsonString(jsonString)
-                        processBatch(batch)
+                        val batchCopy = batch
+                        val assemblyBatchId = batchId
                         chunkAssemblies.remove(batchId)
-                        Log.i(TAG, "✓ Successfully assembled and processed batch $batchId from $totalChunks chunks")
+                        serviceScope.launch {
+                            processBatch(batchCopy)
+                            Log.i(TAG, "✓ Successfully assembled and processed batch $assemblyBatchId from $totalChunks chunks")
+                        }
                     } else {
                         Log.e(TAG, "Failed to assemble data for batch $batchId")
                         chunkAssemblies.remove(batchId)
@@ -725,7 +752,9 @@ class WatchDataListenerService : WearableListenerService() {
             Log.d(TAG, "Received legacy DataItem batch (${jsonString.length} bytes)")
 
             val batch = TremorBatch.fromJsonString(jsonString)
-            processBatch(batch)
+            serviceScope.launch {
+                processBatch(batch)
+            }
 
         } catch (e: Exception) {
             Log.e(TAG, "Failed to handle legacy batch DataItem: ${e.message}", e)
@@ -737,11 +766,12 @@ class WatchDataListenerService : WearableListenerService() {
      * CRITICAL: Save to local storage IMMEDIATELY to prevent data loss
      * CRITICAL FIX: Stop processing if immediate save fails - don't continue with data that will be lost
      */
-    private fun processBatch(batch: TremorBatch) {
+    private suspend fun processBatch(batch: TremorBatch) {
         try {
             Log.i(TAG, "✓ Processing batch ${batch.batchId} with ${batch.samples.size} samples (timestamp: ${batch.timestamp})")
 
             // STEP 1: CRITICAL - Save to local storage IMMEDIATELY (before anything else)
+            // insertAll uses OnConflictStrategy.REPLACE, so re-sent batches are inherently deduped
             try {
                 saveToLocalStorageImmediate(batch)
                 Log.i(TAG, "✓ Saved batch ${batch.batchId} to local storage immediately")
@@ -751,7 +781,10 @@ class WatchDataListenerService : WearableListenerService() {
                 return
             }
 
-            // STEP 2: Record data reception (for UI/notifications)
+            // STEP 2: Send persistence ACK to watch so it can safely delete its local copy
+            sendPersistenceAck(batch.batchId)
+
+            // STEP 3: Record data reception (for UI/notifications)
             NotificationHelper.recordDataReceived(this)
 
             // Save batch to upload queue for InfluxDB sync
@@ -780,17 +813,56 @@ class WatchDataListenerService : WearableListenerService() {
     }
 
     /**
+     * Send a persistence ACK to the watch after a batch has been durably saved to the phone DB.
+     * The watch should only delete its local copy of the batch upon receiving this ACK.
+     * Uses Constants.MESSAGE_PATH_BATCH_ACK which already exists in the shared module.
+     *
+     * Best-effort: failure to send ACK is logged but does not block processing.
+     * The watch will simply retry the batch on the next send cycle.
+     */
+    private fun sendPersistenceAck(batchId: String) {
+        serviceScope.launch(Dispatchers.IO) {
+            try {
+                val messageClient = Wearable.getMessageClient(this@WatchDataListenerService)
+                val nodeClient = Wearable.getNodeClient(this@WatchDataListenerService)
+                val nodes = nodeClient.connectedNodes.await()
+                if (nodes.isEmpty()) {
+                    Log.w(TAG, "No connected nodes to send ACK for batch $batchId")
+                    return@launch
+                }
+                val ackPayload = JSONObject().apply {
+                    put(Constants.KEY_BATCH_ID, batchId)
+                    put(Constants.KEY_TIMESTAMP, System.currentTimeMillis())
+                }.toString().toByteArray(Charsets.UTF_8)
+
+                for (node in nodes) {
+                    messageClient.sendMessage(
+                        node.id,
+                        Constants.MESSAGE_PATH_BATCH_ACK,
+                        ackPayload
+                    ).await()
+                    Log.d(TAG, "✓ Sent persistence ACK for batch $batchId to node ${node.id}")
+                }
+            } catch (e: Exception) {
+                // Best-effort: watch will retry the batch if ACK is lost
+                Log.w(TAG, "Failed to send persistence ACK for batch $batchId: ${e.message}")
+            }
+        }
+    }
+
+    /**
      * Save batch to local storage immediately (before upload queue)
      * This ensures data is never lost even if InfluxDB is unavailable
      * Uses repository for centralized data management with caching
      * 
-     * CRITICAL: This must be SYNCHRONOUS to ensure data is saved before function returns!
-     * Using runBlocking because we MUST wait for save to complete before continuing.
+     * CRITICAL: Callers must be in a coroutine scope (serviceScope.launch).
+     * Uses withContext(IO) instead of runBlocking to avoid blocking the service thread.
      */
-    private fun saveToLocalStorageImmediate(batch: TremorBatch) {
-        // Use runBlocking to ensure data is saved IMMEDIATELY - not async!
-        // This is intentional: we must guarantee data is persisted before continuing
-        kotlinx.coroutines.runBlocking(Dispatchers.IO) {
+    private suspend fun saveToLocalStorageImmediate(batch: TremorBatch) {
+        // Use withContext(IO) instead of runBlocking — callers are already in a coroutine
+        // scope (serviceScope.launch), so this preserves the sequential guarantee without
+        // blocking the service thread.
+        withContext(Dispatchers.IO) {
             repository.saveTremorBatch(batch)
                 .onSuccess {
                     Log.d(TAG, "Saved batch ${batch.batchId} to local storage via repository")
@@ -842,7 +914,12 @@ class WatchDataListenerService : WearableListenerService() {
                 // Decompress if needed
                 if (isCompressed) {
                     val originalSize = batchData.size
-                    batchData = decompressData(batchData)
+                    val decompressed = decompressData(batchData)
+                    if (decompressed == null) {
+                        Log.e(TAG, "Decompression failed for reliable batch $batchId, discarding")
+                        return
+                    }
+                    batchData = decompressed
                     Log.i(TAG, "Decompressed reliable batch $batchId: $originalSize -> ${batchData.size} bytes")
                 }
 
@@ -852,22 +929,12 @@ class WatchDataListenerService : WearableListenerService() {
                 val batchJson = String(batchData, Charsets.UTF_8)
                 val batch = TremorBatch.fromJsonString(batchJson)
 
-                // CRITICAL: Save to local storage IMMEDIATELY (consistent with other paths)
-                try {
-                    saveToLocalStorageImmediate(batch)
-                    Log.i(TAG, "✓ Saved reliable batch $batchId to local storage immediately (${batch.samples.size} samples)")
-                } catch (e: Exception) {
-                    Log.e(TAG, "Failed to save reliable batch $batchId to local storage: ${e.message}", e)
-                    // Continue - queue may still work, and watch will retry
+                // Route through processBatch for consistent save + ACK + queue handling
+                serviceScope.launch {
+                    processBatch(batch)
                 }
 
-                // Save batch to queue directory for UploadService
-                saveBatchToQueue(batch)
-
-                // Trigger UploadService (only if on home network)
-                triggerUploadService()
-
-                Log.i(TAG, "✓ Successfully processed reliable batch $batchId with ${batch.samples.size} samples")
+                Log.i(TAG, "✓ Dispatched reliable batch $batchId with ${batch.samples.size} samples for processing")
             } else {
                 Log.e(TAG, "No batch data found in DataItem for batch $batchId")
             }

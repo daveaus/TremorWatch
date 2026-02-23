@@ -437,12 +437,12 @@ class WatchDataSender(private val context: Context) {
      */
     private fun queueBatchForLater(batch: TremorBatch) {
         try {
-            val queueDir = File(context.filesDir, "pending_batches")
+            val queueDir = File(context.filesDir, Constants.PENDING_BATCHES_DIR)
             if (!queueDir.exists()) {
                 queueDir.mkdirs()
             }
 
-            val batchFile = File(queueDir, "batch_${batch.batchId}.json")
+            val batchFile = File(queueDir, "${Constants.PENDING_BATCH_FILE_PREFIX}${batch.batchId}.json")
 
             // Check if batch is already queued to prevent duplicates
             if (batchFile.exists()) {
@@ -452,7 +452,7 @@ class WatchDataSender(private val context: Context) {
 
             // Use atomic write: write to temp file first, then rename
             // This prevents corruption if the write is interrupted
-            val tempFile = File(queueDir, "batch_${batch.batchId}.json.tmp")
+            val tempFile = File(queueDir, "${Constants.PENDING_BATCH_FILE_PREFIX}${batch.batchId}.json.tmp")
             tempFile.writeText(batch.toJsonString())
 
             // Atomic rename
@@ -475,14 +475,14 @@ class WatchDataSender(private val context: Context) {
     fun sendPendingBatches(onComplete: (Int, Int) -> Unit) {
         scope.launch {
             try {
-                val queueDir = File(context.filesDir, "pending_batches")
+                val queueDir = File(context.filesDir, Constants.PENDING_BATCHES_DIR)
                 if (!queueDir.exists()) {
                     onComplete(0, 0)
                     return@launch
                 }
 
                 val pendingFiles = queueDir.listFiles { file ->
-                    file.name.startsWith("batch_") && file.name.endsWith(".json")
+                    file.name.startsWith(Constants.PENDING_BATCH_FILE_PREFIX) && file.name.endsWith(".json")
                 }?.sortedBy { it.name } ?: emptyList()
 
                 if (pendingFiles.isEmpty()) {
@@ -547,11 +547,11 @@ class WatchDataSender(private val context: Context) {
      */
     fun getPendingBatchCount(): Int {
         return try {
-            val queueDir = File(context.filesDir, "pending_batches")
+            val queueDir = File(context.filesDir, Constants.PENDING_BATCHES_DIR)
             if (!queueDir.exists()) return 0
 
             queueDir.listFiles { file ->
-                file.name.startsWith("batch_") && file.name.endsWith(".json")
+                file.name.startsWith(Constants.PENDING_BATCH_FILE_PREFIX) && file.name.endsWith(".json")
             }?.size ?: 0
         } catch (e: Exception) {
             Log.e(TAG, "Failed to get pending batch count: ${e.message}", e)

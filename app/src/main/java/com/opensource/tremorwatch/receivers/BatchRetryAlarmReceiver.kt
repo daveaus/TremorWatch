@@ -9,7 +9,9 @@ import android.os.Build
 import android.os.SystemClock
 import android.util.Log
 import com.opensource.tremorwatch.config.MonitoringState
+import com.opensource.tremorwatch.shared.Constants
 import com.opensource.tremorwatch.utils.NetworkUtils
+import java.io.File
 
 /**
  * Broadcast receiver that handles batch retry alarms with exponential backoff.
@@ -80,9 +82,14 @@ class BatchRetryAlarmReceiver : BroadcastReceiver() {
 
         try {
             // Check if there are pending batches waiting to be sent
-            val pendingFiles = context.filesDir.listFiles { file ->
-                file.name.startsWith("tremor_batch_") && file.name.endsWith(".json")
-            }?.sortedBy { it.name } ?: emptyList()
+            val pendingDir = File(context.filesDir, Constants.PENDING_BATCHES_DIR)
+            val pendingFiles = if (pendingDir.exists()) {
+                pendingDir.listFiles { file ->
+                    file.name.startsWith(Constants.PENDING_BATCH_FILE_PREFIX) && file.name.endsWith(".json")
+                }?.sortedBy { it.name } ?: emptyList()
+            } else {
+                emptyList()
+            }
 
             if (pendingFiles.isEmpty()) {
                 Log.d(TAG, "No pending batches found - resetting retry count")

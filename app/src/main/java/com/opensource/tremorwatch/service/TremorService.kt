@@ -119,6 +119,12 @@ class TremorService : LifecycleService(), SensorEventListener {
         @Volatile
         private var instance: TremorService? = null
 
+        // ES-08: Static flag so ServiceWatchdogReceiver can check before blindly starting
+        @Volatile
+        @JvmStatic
+        var isRunning = false
+            private set
+
         /**
          * Get watch-side objective context from the service's in-memory buffer.
          * Returns null if service is not running or no recent data available.
@@ -195,19 +201,20 @@ class TremorService : LifecycleService(), SensorEventListener {
     private val heartbeatHandler = Handler(Looper.getMainLooper())
     private val heartbeatRunnable = object : Runnable {
         override fun run() {
-            sendHeartbeatToPhone()
+            // ES-07: Skip heartbeat entirely when monitoring is paused
+            if (!isPausedDueToWearState) {
+                sendHeartbeatToPhone()
+            } else {
+                Timber.d("Heartbeat skipped — monitoring is paused")
+            }
             heartbeatHandler.postDelayed(this, Constants.HEARTBEAT_INTERVAL_MS)
         }
     }
 
-    // WakeLock monitor to fight Samsung FreecessController
-    private val wakeLockMonitorHandler = Handler(Looper.getMainLooper())
-    private val wakeLockMonitorRunnable = object : Runnable {
-        override fun run() {
-            verifyAndRenewWakeLock()
-            wakeLockMonitorHandler.postDelayed(this, MonitoringConstants.WAKELOCK_CHECK_INTERVAL_MS)
-        }
-    }
+    // MF-07: WakeLock monitor timer REMOVED. Wake lock is now verified
+    // inline in onSensorChanged() — fires naturally with sensor events,
+    // zero CPU cost when paused (no sensor events = no check).
+    private var lastWakeLockCheckMs = 0L
 
     // Battery optimization monitor - checks frequently for changes
     private val batteryOptMonitorHandler = Handler(Looper.getMainLooper())
@@ -698,13 +705,11 @@ class TremorService : LifecycleService(), SensorEventListener {
         }
 
         /**
-         * Start periodic wakelock monitoring to fight Samsung FreecessController.
-         * Checks periodically if wakelock is still held and re-acquires if Samsung disabled it.
+         * MF-07: WakeLock monitor timer REMOVED.
+         * The periodic handler/runnable that woke the CPU every 10 min just to call
+         * verifyAndRenewWakeLock() has been deleted. The check now piggybacks on
+         * sensor events in onSensorChanged(), costing zero extra wakeups.
          */
-        private fun startWakeLockMonitor() {
-            Timber.w("★★★ Starting WakeLock monitor - checking every ${MonitoringConstants.WAKELOCK_CHECK_INTERVAL_MS / 1000}s")
-            wakeLockMonitorHandler.post(wakeLockMonitorRunnable)
-        }
 
         /**
          * Start periodic battery optimization monitoring.
@@ -894,6 +899,9 @@ class TremorService : LifecycleService(), SensorEventListener {
     override fun onCreate() {
         super.onCreate()  // LifecycleService.onCreate() transitions to CREATED state
 
+        // ES-08: Mark service as running
+        isRunning = true
+
         // Set instance for watch-side objective context access (opus46 Issue 3d)
         instance = this
 
@@ -1068,8 +1076,7 @@ class TremorService : LifecycleService(), SensorEventListener {
             setReferenceCounted(false)
         }
 
-        // Start periodic wakelock verification to fight Samsung FreecessController
-        startWakeLockMonitor()
+        // MF-07: WakeLock monitor timer removed — check now lives in onSensorChanged()
 
         // Start periodic battery optimization monitoring
         startBatteryOptMonitor()
@@ -2405,6 +2412,19 @@ class TremorService : LifecycleService(), SensorEventListener {
     override fun onSensorChanged(event: SensorEvent?) {
         event ?: return
 
+        // MF-07: Lightweight wake lock check — piggybacks on sensor events that
+        // already wake the CPU. Throttled to at most once per 60 seconds.
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastWakeLockCheckMs >= 60_000L) {
+            lastWakeLockCheckMs = now
+            wakeLock?.let { wl ->
+                if (!wl.isHeld && !isPausedDueToWearState) {
+                    Timber.w("MF-07: WakeLock not held during active monitoring — re-acquiring")
+                    verifyAndRenewWakeLock()
+                }
+            }
+        }
+
         // Delegate gyroscope, linear accelerometer, step detector, and off-body sensor to monitoring engine
         if (::monitoringEngine.isInitialized) {
             monitoringEngine.onSensorChanged(event)
@@ -2419,7 +2439,9 @@ class TremorService : LifecycleService(), SensorEventListener {
     }
 
     override fun onDestroy() {
-        Timber.d("onDestroy() called - cleaning up service")
+        // ES-08: Mark service as not running
+        isRunning = false
+        Timber.d("onDestroy() called - cleaning up service (isRunning=false)")
         Timber.d("Lifecycle state before destroy: ${lifecycle.currentState}")
 
         // Clear instance for watch-side objective context (opus46 Issue 3d)
@@ -2484,14 +2506,13 @@ class TremorService : LifecycleService(), SensorEventListener {
                 Timber.d("Rating config listener unregistered")
             }
 
-            // 4. Cancel periodic status updates, heartbeats, and wakelock monitor
+            // 4. Cancel periodic status updates, heartbeats, and monitors
             statusUpdateHandler.removeCallbacks(statusUpdateRunnable)
             heartbeatHandler.removeCallbacks(heartbeatRunnable)
-            wakeLockMonitorHandler.removeCallbacks(wakeLockMonitorRunnable)
             batteryOptMonitorHandler.removeCallbacks(batteryOptMonitorRunnable)
             ratingPromptHandler.removeCallbacks(ratingPromptRunnable)
             ratingFollowupHandler.removeCallbacks(ratingFollowupRunnable)
-            Timber.d("Periodic handlers stopped (status, heartbeat, wakelock monitor, battery opt monitor)")
+            Timber.d("Periodic handlers stopped (status, heartbeat, battery opt monitor)")
 
             // 5. Unregister broadcast receivers
             unregisterChargingReceiver()

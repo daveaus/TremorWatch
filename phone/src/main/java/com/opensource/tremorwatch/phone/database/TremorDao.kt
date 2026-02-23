@@ -165,11 +165,20 @@ interface TremorDao {
             (timestamp / 60000) * 60000 as bucketTimestamp,
             AVG(severity) as avgSeverity,
             SUM(tremorCount) as totalTremorCount,
-            MAX(isWorn) as lastIsWorn,
-            MAX(isCharging) as lastIsCharging,
+            (SELECT sub.isWorn FROM tremor_samples AS sub
+             WHERE sub.timestamp / 60000 = main.timestamp / 60000
+               AND sub.timestamp >= :cutoffTime
+             ORDER BY sub.timestamp DESC LIMIT 1) as lastIsWorn,
+            (SELECT sub.isCharging FROM tremor_samples AS sub
+             WHERE sub.timestamp / 60000 = main.timestamp / 60000
+               AND sub.timestamp >= :cutoffTime
+             ORDER BY sub.timestamp DESC LIMIT 1) as lastIsCharging,
             AVG(confidence) as avgConfidence,
-            MAX(watchId) as lastWatchId
-        FROM tremor_samples 
+            (SELECT sub.watchId FROM tremor_samples AS sub
+             WHERE sub.timestamp / 60000 = main.timestamp / 60000
+               AND sub.timestamp >= :cutoffTime
+             ORDER BY sub.timestamp DESC LIMIT 1) as lastWatchId
+        FROM tremor_samples AS main
         WHERE timestamp >= :cutoffTime 
         GROUP BY timestamp / 60000 
         ORDER BY bucketTimestamp ASC

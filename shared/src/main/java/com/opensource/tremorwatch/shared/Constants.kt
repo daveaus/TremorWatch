@@ -57,6 +57,10 @@ object Constants {
     const val MAX_SAMPLES_PER_BATCH = 100
     const val MAX_BATCH_AGE_MS = 300000L  // 5 minutes
 
+    // Pending batch file storage (MF-06: single source of truth)
+    const val PENDING_BATCHES_DIR = "pending_batches"
+    const val PENDING_BATCH_FILE_PREFIX = "batch_"
+
     // Chunking configuration (for MessageClient)
     const val MAX_CHUNK_SIZE_BYTES = 8000  // Increased to 8KB - Wear OS MessageClient handles up to 100KB
     const val CHUNK_SEND_DELAY_MS = 50L  // Minimal delay - data layer handles buffering efficiently
