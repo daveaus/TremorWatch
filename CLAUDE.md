@@ -8,6 +8,7 @@ TremorWatch is a multi-module Kotlin project:
 Read order for any AI agent:
 1. `agents.md` - operating rules, battery constraints, build/test commands.
 2. `features.md` - current feature status and known gaps from latest audit.
+3. `changelog.md` - chronological record of all code changes. Always append when making changes.
 
 Do not assume feature completeness from README claims; use `features.md` as the current state baseline.
 

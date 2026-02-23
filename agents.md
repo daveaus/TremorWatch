@@ -12,6 +12,7 @@ Primary goals:
 1. "Always prioritize battery efficiency: verify sensor listeners are closed."
 2. "Never leave a UI toggle disconnected from its preference logic."
 3. "Before coding, check features.md to avoid duplicating existing logic."
+4. "After every code change, append an entry to `changelog.md` describing what changed and why."
 
 ## Operating Workflow
 1. Read `CLAUDE.md` and this file.

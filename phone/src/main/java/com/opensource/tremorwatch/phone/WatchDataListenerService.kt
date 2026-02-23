@@ -791,24 +791,29 @@ class WatchDataListenerService : WearableListenerService() {
             // STEP 3: Record data reception (for UI/notifications)
             NotificationHelper.recordDataReceived(this)
 
-            // Save batch to upload queue for InfluxDB sync
-            val saved = saveBatchToQueue(batch)
-            if (!saved) {
-                Log.e(TAG, "Failed to save batch ${batch.batchId} to queue")
-                // Data is already in local storage, so this is not critical
+            // Only queue for InfluxDB upload if upload is enabled
+            if (PhoneDataConfig.isInfluxDbEnabled(this)) {
+                // Save batch to upload queue for InfluxDB sync
+                val saved = saveBatchToQueue(batch)
+                if (!saved) {
+                    Log.e(TAG, "Failed to save batch ${batch.batchId} to queue")
+                    // Data is already in local storage, so this is not critical
+                } else {
+                    Log.i(TAG, "✓ Saved batch ${batch.batchId} to upload queue")
+                }
+
+                // Update notification
+                NotificationHelper.updateNotification(
+                    this,
+                    ServiceStatus.RECEIVING,
+                    "${batch.samples.size} samples"
+                )
+
+                // Trigger UploadService (only if on home network)
+                triggerUploadService()
             } else {
-                Log.i(TAG, "✓ Saved batch ${batch.batchId} to upload queue")
+                Log.d(TAG, "InfluxDB upload disabled — batch ${batch.batchId} saved to local DB only")
             }
-
-            // Update notification
-            NotificationHelper.updateNotification(
-                this,
-                ServiceStatus.RECEIVING,
-                "${batch.samples.size} samples"
-            )
-
-            // Trigger UploadService (only if on home network)
-            triggerUploadService()
 
         } catch (e: Exception) {
             Log.e(TAG, "Failed to process batch: ${e.message}", e)
