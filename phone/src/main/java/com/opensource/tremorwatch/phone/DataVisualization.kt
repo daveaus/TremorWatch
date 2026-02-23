@@ -1099,27 +1099,39 @@ fun UnifiedTremorChart(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceEvenly
             ) {
-                val statsDataInRange = filteredData
                 if (showTremorCount) {
-                    // For tremor events, show hourly aggregated stats
-                    val hoursInRange = ((endTime - startTime) / (60 * 60 * 1000)).toInt().coerceAtLeast(1)
-                    val hourlyBuckets = mutableMapOf<Int, Int>()
-                    statsDataInRange.forEach { point ->
-                        val hourIndex = ((point.timestamp - startTime) / (60 * 60 * 1000)).toInt()
-                            .coerceIn(0, hoursInRange - 1)
-                        hourlyBuckets[hourIndex] = (hourlyBuckets[hourIndex] ?: 0) + point.tremorCount
+                    // ES-09: Memoize hourly stats to avoid recomputing on every recomposition
+                    val hoursInRange = remember(startTime, endTime) {
+                        ((endTime - startTime) / (60 * 60 * 1000)).toInt().coerceAtLeast(1)
                     }
-                    val totalEvents = statsDataInRange.sumOf { it.tremorCount }
-                    val maxHourlyCount = hourlyBuckets.values.maxOrNull() ?: 0
-                    val avgPerHour = if (hoursInRange > 0) totalEvents.toFloat() / hoursInRange else 0f
+                    val statsResult = remember(filteredData, startTime, endTime) {
+                        val hourlyBuckets = mutableMapOf<Int, Int>()
+                        filteredData.forEach { point ->
+                            val hourIndex = ((point.timestamp - startTime) / (60 * 60 * 1000)).toInt()
+                                .coerceIn(0, hoursInRange - 1)
+                            hourlyBuckets[hourIndex] = (hourlyBuckets[hourIndex] ?: 0) + point.tremorCount
+                        }
+                        val totalEvents = filteredData.sumOf { it.tremorCount }
+                        val maxHourlyCount = hourlyBuckets.values.maxOrNull() ?: 0
+                        val avgPerHour = if (hoursInRange > 0) totalEvents.toFloat() / hoursInRange else 0f
+                        Triple(totalEvents, maxHourlyCount, avgPerHour)
+                    }
                     
-                    StatBox(label = "Total", value = totalEvents.toString())
-                    StatBox(label = "Peak/hr", value = maxHourlyCount.toString())
-                    StatBox(label = "Avg/hr", value = String.format("%.1f", avgPerHour))
+                    StatBox(label = "Total", value = statsResult.first.toString())
+                    StatBox(label = "Peak/hr", value = statsResult.second.toString())
+                    StatBox(label = "Avg/hr", value = String.format("%.1f", statsResult.third))
                 } else {
-                    StatBox(label = "Max", value = String.format("%.2f", statsDataInRange.maxOfOrNull { it.severity } ?: 0.0))
-                    StatBox(label = "Avg", value = String.format("%.2f", if (statsDataInRange.isNotEmpty()) statsDataInRange.map { it.severity }.average() else 0.0))
-                    StatBox(label = "Min", value = String.format("%.2f", statsDataInRange.minOfOrNull { it.severity } ?: 0.0))
+                    // ES-09: Memoize severity stats too
+                    val severityStats = remember(filteredData) {
+                        Triple(
+                            filteredData.maxOfOrNull { it.severity } ?: 0.0,
+                            if (filteredData.isNotEmpty()) filteredData.map { it.severity }.average() else 0.0,
+                            filteredData.minOfOrNull { it.severity } ?: 0.0
+                        )
+                    }
+                    StatBox(label = "Max", value = String.format("%.2f", severityStats.first))
+                    StatBox(label = "Avg", value = String.format("%.2f", severityStats.second))
+                    StatBox(label = "Min", value = String.format("%.2f", severityStats.third))
                 }
             }
         }

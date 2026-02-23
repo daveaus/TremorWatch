@@ -68,6 +68,12 @@ class ServiceWatchdogReceiver : BroadcastReceiver() {
                         return@withTimeoutOrNull
                     }
 
+                    // ES-08: Skip restart if service is already healthy and running.
+                    if (TremorService.isRunning) {
+                        Timber.d("Service is already running — watchdog ping skipped")
+                        return@withTimeoutOrNull
+                    }
+
                     // Always try to ping/restart the service to keep it alive (triggers onStartCommand).
                     try {
                         val serviceIntent = Intent(appContext, TremorService::class.java)

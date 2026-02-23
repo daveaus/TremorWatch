@@ -88,7 +88,14 @@ object DataExporter {
         fileName: String,
         pageProvider: suspend (limit: Int, offset: Int) -> List<TremorSample>
     ): ExportResult {
-        val outDir = context.getExternalFilesDir(null) ?: context.filesDir
+        val outDir = File(context.filesDir, "exports").also { it.mkdirs() }
+
+        // ES-06: Clean up exports older than 24 hours to prevent storage bloat
+        val cutoff = System.currentTimeMillis() - 24 * 60 * 60 * 1000L
+        outDir.listFiles()?.filter { it.lastModified() < cutoff }?.forEach { stale ->
+            if (stale.delete()) Log.d(TAG, "Cleaned stale export: ${stale.name}")
+        }
+
         val csvFile = File(outDir, fileName)
         val tempFile = File(csvFile.parentFile, "${csvFile.name}.tmp")
 
