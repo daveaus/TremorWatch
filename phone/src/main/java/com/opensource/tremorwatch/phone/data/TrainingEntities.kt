@@ -6,7 +6,13 @@ import androidx.room.*
  * Room entity for storing training labels received from the watch.
  * Each row represents one user-labeled training sample with its FFT features.
  */
-@Entity(tableName = "training_labels")
+@Entity(
+    tableName = "training_labels",
+    indices = [
+        Index("timestamp"),
+        Index("label")
+    ]
+)
 data class TrainingLabelEntity(
     @PrimaryKey
     val sampleId: String,

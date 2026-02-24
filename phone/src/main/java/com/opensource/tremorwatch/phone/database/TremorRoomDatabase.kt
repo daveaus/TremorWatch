@@ -20,7 +20,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         MedicationIngestionEntity::class,
         TrainingLabelEntity::class
     ],
-    version = 7,
+    version = 8,
     exportSchema = false
 )
 abstract class TremorRoomDatabase : RoomDatabase() {
@@ -164,7 +164,8 @@ abstract class TremorRoomDatabase : RoomDatabase() {
                     MIGRATION_3_4,
                     MIGRATION_4_5,
                     MIGRATION_5_6,
-                    MIGRATION_6_7
+                    MIGRATION_6_7,
+                    MIGRATION_7_8
                 )
                 .build()
                 INSTANCE = instance
@@ -174,6 +175,7 @@ abstract class TremorRoomDatabase : RoomDatabase() {
 
         /**
          * Migration from v6 to v7: adds training_labels table for Active Learning.
+         * No DEFAULT clauses — columns match TrainingLabelEntity's expected schema exactly.
          */
         private val MIGRATION_6_7 = object : Migration(6, 7) {
             override fun migrate(database: SupportSQLiteDatabase) {
@@ -184,26 +186,74 @@ abstract class TremorRoomDatabase : RoomDatabase() {
                         feedback TEXT NOT NULL,
                         feedbackTimestamp INTEGER,
                         responseLatencyMs INTEGER,
-                        dominantFrequency REAL NOT NULL DEFAULT 0,
-                        bandRatio REAL NOT NULL DEFAULT 0,
-                        confidence REAL NOT NULL DEFAULT 0,
-                        calibratedConfidence REAL NOT NULL DEFAULT 0,
-                        totalPower REAL NOT NULL DEFAULT 0,
-                        tremorBandPower REAL NOT NULL DEFAULT 0,
-                        spectralEntropy REAL NOT NULL DEFAULT 0,
-                        harmonicRatio REAL NOT NULL DEFAULT 0,
-                        peakProminence REAL NOT NULL DEFAULT 0,
-                        crossSensorSupport REAL NOT NULL DEFAULT 0,
-                        frequencyStability REAL NOT NULL DEFAULT 0,
-                        magnitude REAL NOT NULL DEFAULT 0,
-                        accelMagnitude REAL NOT NULL DEFAULT 0,
-                        activityType TEXT NOT NULL DEFAULT 'unknown',
-                        activityConfidence REAL NOT NULL DEFAULT 0,
-                        isResting INTEGER NOT NULL DEFAULT 1,
-                        productionIsTremor INTEGER NOT NULL DEFAULT 0,
-                        shadowIsTremor INTEGER NOT NULL DEFAULT 0,
-                        triggerReason TEXT NOT NULL DEFAULT '',
-                        label TEXT NOT NULL DEFAULT ''
+                        dominantFrequency REAL NOT NULL,
+                        bandRatio REAL NOT NULL,
+                        confidence REAL NOT NULL,
+                        calibratedConfidence REAL NOT NULL,
+                        totalPower REAL NOT NULL,
+                        tremorBandPower REAL NOT NULL,
+                        spectralEntropy REAL NOT NULL,
+                        harmonicRatio REAL NOT NULL,
+                        peakProminence REAL NOT NULL,
+                        crossSensorSupport REAL NOT NULL,
+                        frequencyStability REAL NOT NULL,
+                        magnitude REAL NOT NULL,
+                        accelMagnitude REAL NOT NULL,
+                        activityType TEXT NOT NULL,
+                        activityConfidence REAL NOT NULL,
+                        isResting INTEGER NOT NULL,
+                        productionIsTremor INTEGER NOT NULL,
+                        shadowIsTremor INTEGER NOT NULL,
+                        triggerReason TEXT NOT NULL,
+                        label TEXT NOT NULL
+                    )
+                """)
+                database.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_training_labels_timestamp ON training_labels(timestamp)"
+                )
+                database.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_training_labels_label ON training_labels(label)"
+                )
+            }
+        }
+
+        /**
+         * Migration from v7 to v8: fixes training_labels schema mismatch.
+         * v7 MIGRATION_6_7 created columns with DEFAULT clauses (e.g., DEFAULT 0, DEFAULT ''),
+         * but TrainingLabelEntity has no @ColumnInfo(defaultValue=...) annotations, so Room
+         * expects defaultValue='undefined' for all columns. This recreates the table correctly.
+         * Training data is empty at this stage (module just installed), so drop-recreate is safe.
+         */
+        private val MIGRATION_7_8 = object : Migration(7, 8) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL("DROP TABLE IF EXISTS training_labels")
+                database.execSQL("""
+                    CREATE TABLE IF NOT EXISTS training_labels (
+                        sampleId TEXT PRIMARY KEY NOT NULL,
+                        timestamp INTEGER NOT NULL,
+                        feedback TEXT NOT NULL,
+                        feedbackTimestamp INTEGER,
+                        responseLatencyMs INTEGER,
+                        dominantFrequency REAL NOT NULL,
+                        bandRatio REAL NOT NULL,
+                        confidence REAL NOT NULL,
+                        calibratedConfidence REAL NOT NULL,
+                        totalPower REAL NOT NULL,
+                        tremorBandPower REAL NOT NULL,
+                        spectralEntropy REAL NOT NULL,
+                        harmonicRatio REAL NOT NULL,
+                        peakProminence REAL NOT NULL,
+                        crossSensorSupport REAL NOT NULL,
+                        frequencyStability REAL NOT NULL,
+                        magnitude REAL NOT NULL,
+                        accelMagnitude REAL NOT NULL,
+                        activityType TEXT NOT NULL,
+                        activityConfidence REAL NOT NULL,
+                        isResting INTEGER NOT NULL,
+                        productionIsTremor INTEGER NOT NULL,
+                        shadowIsTremor INTEGER NOT NULL,
+                        triggerReason TEXT NOT NULL,
+                        label TEXT NOT NULL
                     )
                 """)
                 database.execSQL(
