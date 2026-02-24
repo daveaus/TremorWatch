@@ -40,12 +40,17 @@ data class StabilityResult(
 )
 
 data class TremorLoadResult(
-    // Primary: tremor bouts per hour of worn time (higher = worse).
+    // Primary (quality-gated: Confirmed + Probable tiers).
     // Null when not enough worn time to show.
     val boutsPerHour: Double?,
     val tremorMinutesPerHour: Double?,
     val totalBouts: Int,
     val tremorMinutes: Double,
+    // Candidate (unfiltered, diagnostic/debug — old behavior).
+    val boutsPerHourCandidate: Double?,
+    val tremorMinutesPerHourCandidate: Double?,
+    val totalBoutsCandidate: Int,
+    val tremorMinutesCandidate: Double,
     val wornMinutes: Double,
     val message: String? = null
 )

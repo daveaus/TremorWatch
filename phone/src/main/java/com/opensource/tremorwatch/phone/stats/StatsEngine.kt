@@ -6,6 +6,36 @@ import kotlin.math.roundToInt
 object StatsEngine {
     const val MAX_SAMPLE_GAP_SEC_DEFAULT = 120.0
 
+    /** Classification tiers for tremor samples by measurement quality. */
+    enum class TremorTier { CONFIRMED, PROBABLE, CANDIDATE }
+
+    /**
+     * Classify a tremor sample into a quality tier.
+     * Returns null if the sample is NOT a tremor detection (tremorCount <= 0).
+     */
+    fun classifyTremorTier(s: StatsSample): TremorTier? {
+        if (s.tremorCount <= 0) return null
+
+        val conf = s.calibratedConfidence ?: s.confidence ?: 0.0
+        val adjConf = s.activityAdjustedConfidence ?: 0.0
+        val excluded = s.excludeFromAnalysis == true
+        val unreliable = s.isReliableMeasurement == false  // null treated as unknown → allowed
+
+        // Confirmed: not excluded, not unreliable, high confidence
+        if (!excluded && !unreliable && conf >= 0.50 && adjConf >= 0.40) {
+            return TremorTier.CONFIRMED
+        }
+
+        // Probable: not excluded, not unreliable, moderate confidence
+        if (!excluded && !unreliable && conf >= 0.30 && adjConf >= 0.20) {
+            return TremorTier.PROBABLE
+        }
+
+        // Everything else with tremorCount > 0
+        return TremorTier.CANDIDATE
+    }
+
+
     private const val USER_CONF_MIN = 0.5
     private const val USER_ADJ_CONF_MIN = 0.4
     private const val USER_RELIABILITY_MIN = 0.35

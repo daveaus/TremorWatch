@@ -189,6 +189,21 @@ fun StatsScreen(
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
 
+                        // Candidate (unfiltered) debug metrics
+                        val candTremorHrStr = load?.tremorMinutesPerHourCandidate
+                            ?.takeIf { it.isFinite() }
+                            ?.let { String.format(Locale.US, "%.1f", it) }
+                            ?: "--"
+                        val candBoutsStr = load?.boutsPerHourCandidate
+                            ?.takeIf { it.isFinite() }
+                            ?.let { String.format(Locale.US, "%.1f", it) }
+                            ?: "--"
+                        Text(
+                            text = "Candidate (unfiltered): ${candTremorHrStr}m/hr  |  ${candBoutsStr} bouts/hr",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+
                         Spacer(modifier = Modifier.height(8.dp))
 
                         Text(
@@ -387,6 +402,15 @@ fun StatsScreen(
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
+                            val candHrStr = load?.tremorMinutesPerHourCandidate
+                                ?.takeIf { it.isFinite() }
+                                ?.let { String.format(Locale.US, "%.1f", it) }
+                                ?: "--"
+                            Text(
+                                text = "Candidate: ${if (candHrStr == "--") "--" else candHrStr + "m"}/hr",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                            )
                         }
 
                         if (idx != history.lastIndex) {
@@ -410,7 +434,7 @@ fun StatsScreen(
                     style = MaterialTheme.typography.titleMedium
                 )
                 Text(
-                    text = "Bouts/hr counts tremor bouts per hour of worn time (higher = worse). Tremor/hr is minutes of tremor per worn hour. These metrics use tremorCount (the watch's tremor flag) and do not depend on activity recognition. Stability is an advanced score computed only during eligible samples and may stay near 100 when tremor is sparse.",
+                    text = "Bouts/hr and Tremor/hr are quality-gated: only Confirmed and Probable tremor detections are counted (filtered by confidence, reliability, and exclusion flags). 'Candidate' shows the old unfiltered count for comparison. Stability is computed from eligible samples and may stay near 100 when tremor is sparse.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )

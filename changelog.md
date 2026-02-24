@@ -60,3 +60,23 @@ Post-deployment log analysis revealed upload queue accumulation when InfluxDB is
 ### Fixed
 - **Upload queue gate**: `WatchDataListenerService.processBatchData()` now checks `PhoneDataConfig.isInfluxDbEnabled()` before writing to `upload_queue/` and triggering `TremorUploadWorker`. When InfluxDB is off, batches are saved to local DB only — no queue files, no WorkManager jobs.
 - **Stale queue cleanup**: Purged accumulated upload queue files from phone via adb.
+
+---
+
+## [0.2.0-rc3] — 2026-02-24
+
+Three-tier tremor metrics: fixes inflated Tremor m/hr caused by post-update detector sensitivity increase.
+
+### Changed
+- **Three-tier tremor classification** (`StatsEngine.kt`): New `TremorTier` enum (Confirmed/Probable/Candidate) and `classifyTremorTier()` function gate samples by confidence, reliability, and exclusion flags.
+  - Confirmed: conf ≥ 0.50, adjConf ≥ 0.40, not excluded, not unreliable.
+  - Probable: conf ≥ 0.30, adjConf ≥ 0.20, not excluded, not unreliable.
+  - Candidate: everything else with tremorCount > 0.
+- **Quality-gated primary metrics** (`StatsRepository.kt`): `computePass1` now accumulates both quality-gated (Confirmed+Probable) and candidate (unfiltered) tremor time and bout counts in parallel. Primary `boutsPerHour`/`tremorMinutesPerHour` fields are now quality-gated.
+- **Expanded TremorLoadResult** (`StatsModels.kt`): Added `boutsPerHourCandidate`, `tremorMinutesPerHourCandidate`, `totalBoutsCandidate`, `tremorMinutesCandidate` fields for diagnostic display.
+- **UI update** (`StatsScreen.kt`): Candidate metrics shown as secondary debug line below primary stats. "About These Numbers" text updated to explain quality gating.
+
+### Why
+- Post-update detector changes (Feb 22) caused headline Tremor m/hr to spike from ~5 to ~28 m/hr — dominated by excluded/low-reliability detections.
+- Quality-gated metrics restore clinically interpretable values while preserving the full signal for diagnostics.
+- No changes to watch detector or stored `tremorCount` semantics.

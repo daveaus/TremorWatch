@@ -201,12 +201,19 @@ class StatsRepository(context: Context) {
         var severityTimeSum = 0.0
         var gaps = 0
 
-        // Tremor load: compute over worn time, without depending on activity metadata.
+        // Quality-gated tremor load (Confirmed + Probable tiers).
         var tremorTimeSec = 0.0
         var boutCount = 0
         var inBout = false
         var boutTremorSamples = 0
         var boutGapSamples = 0
+
+        // Candidate tremor load (all tremorCount > 0 — old unfiltered behavior, for debug).
+        var tremorTimeSecCandidate = 0.0
+        var boutCountCandidate = 0
+        var inBoutCandidate = false
+        var boutTremorSamplesCandidate = 0
+        var boutGapSamplesCandidate = 0
 
         fun flushBout() {
             if (inBout && boutTremorSamples >= MIN_BOUT_TREMOR_SAMPLES) {
@@ -217,15 +224,28 @@ class StatsRepository(context: Context) {
             boutGapSamples = 0
         }
 
+        fun flushBoutCandidate() {
+            if (inBoutCandidate && boutTremorSamplesCandidate >= MIN_BOUT_TREMOR_SAMPLES) {
+                boutCountCandidate++
+            }
+            inBoutCandidate = false
+            boutTremorSamplesCandidate = 0
+            boutGapSamplesCandidate = 0
+        }
+
         fun processBoutSample(s: StatsSample) {
             val worn = s.isWorn == true && s.isCharging != true
             if (!worn) {
                 flushBout()
+                flushBoutCandidate()
                 return
             }
 
-            val isTremor = s.tremorCount > 0
-            if (isTremor) {
+            // Quality-gated bout tracking (Confirmed + Probable)
+            val tier = StatsEngine.classifyTremorTier(s)
+            val isQualityTremor = tier == StatsEngine.TremorTier.CONFIRMED ||
+                tier == StatsEngine.TremorTier.PROBABLE
+            if (isQualityTremor) {
                 if (!inBout) {
                     inBout = true
                     boutTremorSamples = 1
@@ -238,6 +258,24 @@ class StatsRepository(context: Context) {
                 boutGapSamples++
                 if (boutGapSamples > MAX_GAP_SAMPLES_IN_BOUT) {
                     flushBout()
+                }
+            }
+
+            // Candidate bout tracking (all tremorCount > 0)
+            val isCandidateTremor = tier != null  // any tier means tremorCount > 0
+            if (isCandidateTremor) {
+                if (!inBoutCandidate) {
+                    inBoutCandidate = true
+                    boutTremorSamplesCandidate = 1
+                    boutGapSamplesCandidate = 0
+                } else {
+                    boutTremorSamplesCandidate++
+                    boutGapSamplesCandidate = 0
+                }
+            } else if (inBoutCandidate) {
+                boutGapSamplesCandidate++
+                if (boutGapSamplesCandidate > MAX_GAP_SAMPLES_IN_BOUT) {
+                    flushBoutCandidate()
                 }
             }
         }
@@ -274,6 +312,7 @@ class StatsRepository(context: Context) {
                 gaps++
                 // Do not bridge bouts or time accounting across large gaps.
                 flushBout()
+                flushBoutCandidate()
                 processBoutSample(cur)
                 return@forEachStatsSampleInRange
             }
@@ -282,9 +321,18 @@ class StatsRepository(context: Context) {
                 cur.isWorn == true && cur.isCharging != true
             ) {
                 wornTimeSec += dtSec
-                if (p.tremorCount > 0) {
-                    // Left-rectangle integration: tremorCount is the canonical tremor flag.
+
+                // Quality-gated tremor time (Confirmed + Probable).
+                val pTier = StatsEngine.classifyTremorTier(p)
+                val pIsQuality = pTier == StatsEngine.TremorTier.CONFIRMED ||
+                    pTier == StatsEngine.TremorTier.PROBABLE
+                if (pIsQuality) {
                     tremorTimeSec += dtSec
+                }
+
+                // Candidate tremor time (all tremorCount > 0, old behavior).
+                if (p.tremorCount > 0) {
+                    tremorTimeSecCandidate += dtSec
                 }
             }
 
@@ -308,6 +356,7 @@ class StatsRepository(context: Context) {
         }
 
         flushBout()
+        flushBoutCandidate()
 
         val wornMinutes = wornTimeSec / 60.0
         val eligibleMinutes = eligibleTimeSec / 60.0
@@ -348,20 +397,27 @@ class StatsRepository(context: Context) {
 
         val tremorLoad = run {
             val wornHours = wornTimeSec / 3600.0
-            val tremorMinutes = tremorTimeSec / 60.0
+            val tremorMinutesQuality = tremorTimeSec / 60.0
+            val tremorMinutesCand = tremorTimeSecCandidate / 60.0
 
             if (wornMinutes < MIN_WORN_MIN_TO_SHOW_TREMOR_LOAD || wornHours <= 0.0) {
                 TremorLoadResult(
                     boutsPerHour = null,
                     tremorMinutesPerHour = null,
                     totalBouts = boutCount,
-                    tremorMinutes = tremorMinutes,
+                    tremorMinutes = tremorMinutesQuality,
+                    boutsPerHourCandidate = null,
+                    tremorMinutesPerHourCandidate = null,
+                    totalBoutsCandidate = boutCountCandidate,
+                    tremorMinutesCandidate = tremorMinutesCand,
                     wornMinutes = wornMinutes,
                     message = "Not enough data yet"
                 )
             } else {
                 val boutsPerHour = boutCount / wornHours
-                val tremorMinutesPerHour = tremorMinutes / wornHours
+                val tremorMinutesPerHour = tremorMinutesQuality / wornHours
+                val boutsPerHourCand = boutCountCandidate / wornHours
+                val tremorMinutesPerHourCand = tremorMinutesCand / wornHours
                 val message = when {
                     wornMinutes < LIMITED_WORN_MINUTES -> "Limited data - wear longer for accuracy"
                     gaps > 0 -> "Data gaps detected - metrics may be less accurate"
@@ -372,7 +428,11 @@ class StatsRepository(context: Context) {
                     boutsPerHour = boutsPerHour,
                     tremorMinutesPerHour = tremorMinutesPerHour,
                     totalBouts = boutCount,
-                    tremorMinutes = tremorMinutes,
+                    tremorMinutes = tremorMinutesQuality,
+                    boutsPerHourCandidate = boutsPerHourCand,
+                    tremorMinutesPerHourCandidate = tremorMinutesPerHourCand,
+                    totalBoutsCandidate = boutCountCandidate,
+                    tremorMinutesCandidate = tremorMinutesCand,
                     wornMinutes = wornMinutes,
                     message = message
                 )
