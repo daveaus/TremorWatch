@@ -13,6 +13,7 @@ Primary goals:
 2. "Never leave a UI toggle disconnected from its preference logic."
 3. "Before coding, check features.md to avoid duplicating existing logic."
 4. "After every code change, append an entry to `changelog.md` describing what changed and why."
+5. "Check `todo.md` at the start of every session for deferred work items. When you encounter something that needs later attention (follow-up tasks, validation checkpoints, known issues to revisit), add it to `todo.md` with a target date, description, and key file references."
 
 ## Operating Workflow
 1. Read `CLAUDE.md` and this file.

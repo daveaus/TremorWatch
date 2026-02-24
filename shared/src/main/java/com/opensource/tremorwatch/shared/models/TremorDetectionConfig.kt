@@ -139,7 +139,37 @@ data class TremorDetectionConfig(
     val hybridRerankerWHarmonic: Float = 1.0f,
     val hybridRerankerWCrossSensor: Float = 1.4f,
     val hybridRerankerWFreqStability: Float = 0.8f,
-    val hybridRerankerWStepsPerMinute: Float = -0.012f
+    val hybridRerankerWStepsPerMinute: Float = -0.012f,
+
+    // === Active Learning Parameters (v2.0) ===
+    /**
+     * Frequency Stability Index (FSI) threshold.
+     * Measures how consistently the dominant frequency appears across
+     * successive FFT windows. Real tremors show stable frequencies;
+     * motion artifacts vary.
+     * Range: 0.0 (disabled) to 1.0 (maximum stability required)
+     * Recommended training target: 0.25-0.45
+     */
+    val minFrequencyStability: Float = 0.0f,
+
+    /**
+     * Harmonic Energy Ratio (HER) threshold.
+     * Measures the ratio of energy at harmonic frequencies (2f, 3f)
+     * to the fundamental. Parkinsonian tremor often shows harmonics;
+     * random movement noise does not.
+     * Range: 0.0 (disabled) to 2.0 (strong harmonics required)
+     * Recommended training target: 0.10-0.35
+     */
+    val minHarmonicRatio: Float = 0.0f,
+
+    /**
+     * Cross-Sensor Coherence Score (CSCS) threshold.
+     * Measures agreement between gyroscope and accelerometer tremor signals.
+     * Real tremors appear in both sensors; single-sensor artifacts do not.
+     * Range: 0.0 (disabled) to 1.0 (perfect agreement required)
+     * Recommended training target: 0.15-0.40
+     */
+    val minCrossSensorSupport: Float = 0.0f
 ) {
     init {
         // Validate logical consistency of parameters
@@ -264,6 +294,17 @@ data class TremorDetectionConfig(
         require(hybridRerankerBlend in 0.0f..1.0f) {
             "hybridRerankerBlend must be in [0, 1]"
         }
+
+        // Active Learning validation
+        require(minFrequencyStability in 0.0f..1.0f) {
+            "minFrequencyStability must be in [0, 1]"
+        }
+        require(minHarmonicRatio in 0.0f..2.0f) {
+            "minHarmonicRatio must be in [0, 2]"
+        }
+        require(minCrossSensorSupport in 0.0f..1.0f) {
+            "minCrossSensorSupport must be in [0, 1]"
+        }
     }
 
     /**
@@ -276,7 +317,7 @@ data class TremorDetectionConfig(
 
     companion object {
         /** Current schema version - increment when adding/removing fields */
-        const val CURRENT_VERSION = 3
+        const val CURRENT_VERSION = 4
 
         /** JSON serializer with pretty printing */
         private val json = Json {

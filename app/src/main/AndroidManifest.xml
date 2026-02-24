@@ -164,6 +164,18 @@
             </intent-filter>
         </receiver>
 
+        <!-- ===== Training Prompt Activity (Active Learning) ===== -->
+        <activity
+            android:name="com.opensource.tremorwatch.training.TrainingPromptActivity"
+            android:exported="false"
+            android:label="Training Prompt"
+            android:theme="@android:style/Theme.DeviceDefault"
+            android:excludeFromRecents="true"
+            android:launchMode="singleTask"
+            android:taskAffinity="com.opensource.tremorwatch.training"
+            android:showOnLockScreen="true"
+            android:turnScreenOn="true" />
+
     </application>
 
 </manifest>

@@ -30,7 +30,8 @@ class TremorMonitoringEngine(
     private val baselineManager: BaselineManager? = null,
     private val onBatchReady: (List<TremorData>) -> Unit,
     private val onWearStateChanged: (Boolean) -> Unit,
-    private val onSampleReady: ((TremorData) -> Unit)? = null
+    private val onSampleReady: ((TremorData) -> Unit)? = null,
+    private val onTrainingSample: ((TremorData, TremorFFT.FFTResult?) -> Unit)? = null
 ) : SensorEventListener {
 
     /**
@@ -1295,6 +1296,13 @@ class TremorMonitoringEngine(
             onSampleReady?.invoke(tremorData)
         } catch (e: Exception) {
             Timber.w(e, "onSampleReady callback failed")
+        }
+
+        // Active Learning: pass sample + FFT result to TrainingManager for shadow detection.
+        try {
+            onTrainingSample?.invoke(tremorData, lastGyroFFTResult)
+        } catch (e: Exception) {
+            Timber.w(e, "onTrainingSample callback failed")
         }
 
         // Add to ring buffer for watch-side objective context (opus46 Issue 3c)

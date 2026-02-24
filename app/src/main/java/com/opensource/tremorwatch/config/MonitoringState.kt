@@ -57,5 +57,22 @@ object MonitoringState {
         val intent = Intent("com.opensource.tremorwatch.UPLOAD_INTERVAL_CHANGED")
         context.sendBroadcast(intent)
     }
+
+    fun isTrainingMode(context: Context): Boolean {
+        return context.getSharedPreferences("monitoring_state", Context.MODE_PRIVATE)
+            .getBoolean("training_mode_enabled", false)
+    }
+
+    fun setTrainingMode(context: Context, enabled: Boolean) {
+        context.getSharedPreferences("monitoring_state", Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean("training_mode_enabled", enabled)
+            .apply()
+
+        // Notify the service that training mode changed
+        val intent = Intent("com.opensource.tremorwatch.TRAINING_MODE_CHANGED")
+        intent.putExtra("training_enabled", enabled)
+        context.sendBroadcast(intent)
+    }
 }
 

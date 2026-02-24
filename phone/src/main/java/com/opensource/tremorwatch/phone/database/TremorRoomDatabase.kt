@@ -1,6 +1,7 @@
 package com.opensource.tremorwatch.phone.database
 
 import android.content.Context
+import com.opensource.tremorwatch.phone.data.TrainingLabelEntity
 import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
@@ -16,14 +17,16 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         TremorSample::class,
         SubjectiveRatingEntity::class,
         CalibrationDataEntity::class,
-        MedicationIngestionEntity::class
+        MedicationIngestionEntity::class,
+        TrainingLabelEntity::class
     ],
-    version = 6,
+    version = 7,
     exportSchema = false
 )
 abstract class TremorRoomDatabase : RoomDatabase() {
     
     abstract fun tremorDao(): TremorDao
+    abstract fun trainingLabelDao(): com.opensource.tremorwatch.phone.data.TrainingLabelDao
     
     companion object {
         @Volatile
@@ -160,11 +163,55 @@ abstract class TremorRoomDatabase : RoomDatabase() {
                     MIGRATION_2_3,
                     MIGRATION_3_4,
                     MIGRATION_4_5,
-                    MIGRATION_5_6
+                    MIGRATION_5_6,
+                    MIGRATION_6_7
                 )
                 .build()
                 INSTANCE = instance
                 instance
+            }
+        }
+
+        /**
+         * Migration from v6 to v7: adds training_labels table for Active Learning.
+         */
+        private val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL("""
+                    CREATE TABLE IF NOT EXISTS training_labels (
+                        sampleId TEXT PRIMARY KEY NOT NULL,
+                        timestamp INTEGER NOT NULL,
+                        feedback TEXT NOT NULL,
+                        feedbackTimestamp INTEGER,
+                        responseLatencyMs INTEGER,
+                        dominantFrequency REAL NOT NULL DEFAULT 0,
+                        bandRatio REAL NOT NULL DEFAULT 0,
+                        confidence REAL NOT NULL DEFAULT 0,
+                        calibratedConfidence REAL NOT NULL DEFAULT 0,
+                        totalPower REAL NOT NULL DEFAULT 0,
+                        tremorBandPower REAL NOT NULL DEFAULT 0,
+                        spectralEntropy REAL NOT NULL DEFAULT 0,
+                        harmonicRatio REAL NOT NULL DEFAULT 0,
+                        peakProminence REAL NOT NULL DEFAULT 0,
+                        crossSensorSupport REAL NOT NULL DEFAULT 0,
+                        frequencyStability REAL NOT NULL DEFAULT 0,
+                        magnitude REAL NOT NULL DEFAULT 0,
+                        accelMagnitude REAL NOT NULL DEFAULT 0,
+                        activityType TEXT NOT NULL DEFAULT 'unknown',
+                        activityConfidence REAL NOT NULL DEFAULT 0,
+                        isResting INTEGER NOT NULL DEFAULT 1,
+                        productionIsTremor INTEGER NOT NULL DEFAULT 0,
+                        shadowIsTremor INTEGER NOT NULL DEFAULT 0,
+                        triggerReason TEXT NOT NULL DEFAULT '',
+                        label TEXT NOT NULL DEFAULT ''
+                    )
+                """)
+                database.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_training_labels_timestamp ON training_labels(timestamp)"
+                )
+                database.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_training_labels_label ON training_labels(label)"
+                )
             }
         }
     }

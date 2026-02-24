@@ -790,6 +790,50 @@ class WatchDataSender(private val context: Context) {
             }
         }
     }
+
+    /**
+     * Send a labeled training sample to the phone for storage and optimization.
+     *
+     * [P2] Dynamic node resolution — queries connectedNodes at send time
+     * instead of relying on a potentially stale connectedNodeId.
+     * [P1] onSuccess callback — invoked only after the phone confirms receipt.
+     * Caller should use this to delete local backup.
+     */
+    fun sendTrainingSample(
+        sample: com.opensource.tremorwatch.shared.models.TrainingSample,
+        onSuccess: (() -> Unit)? = null
+    ) {
+        scope.launch {
+            try {
+                // [P2] Always resolve fresh connected nodes
+                val nodes = getConnectedNodes()
+                val target = nodes.firstOrNull() ?: run {
+                    Log.w(TAG, "No connected phone — sample ${sample.sampleId} will retry on reconnect")
+                    return@launch
+                }
+
+                val json = kotlinx.serialization.json.Json.encodeToString(
+                    com.opensource.tremorwatch.shared.models.TrainingSample.serializer(),
+                    sample
+                )
+                val payload = json.toByteArray(Charsets.UTF_8)
+
+                messageClient.sendMessage(
+                    target.id,
+                    Constants.MESSAGE_PATH_TRAINING_LABEL,
+                    payload
+                ).addOnSuccessListener {
+                    Log.d(TAG, "Training sample ${sample.sampleId} sent to phone")
+                    onSuccess?.invoke()  // [P1] Delete local backup only on confirmed delivery
+                }.addOnFailureListener { e ->
+                    Log.w(TAG, "Failed to send training sample ${sample.sampleId}", e)
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error sending training sample: ${e.message}", e)
+            }
+        }
+    }
+
     fun shutdown() {
         scope.cancel()
     }

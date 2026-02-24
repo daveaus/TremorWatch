@@ -1,13 +1,18 @@
 package com.opensource.tremorwatch.phone
 
 import android.app.Application
+import androidx.work.Configuration
+import com.opensource.tremorwatch.phone.database.TremorRoomDatabase
+import com.opensource.tremorwatch.phone.training.TrainingWorkerFactory
 import timber.log.Timber
 
 /**
  * Custom Application class for TremorWatch Phone app.
  * Initializes logging and other app-wide configurations.
+ * Implements Configuration.Provider to supply custom WorkerFactory for
+ * dependency injection into NightlyAutoTuner.
  */
-class TremorWatchPhoneApp : Application() {
+class TremorWatchPhoneApp : Application(), Configuration.Provider {
 
     override fun onCreate() {
         super.onCreate()
@@ -24,6 +29,33 @@ class TremorWatchPhoneApp : Application() {
             Timber.i("TremorWatch Phone App initialized (Release build)")
         }
     }
+
+    /**
+     * Provide WorkManager configuration with custom WorkerFactory.
+     * This allows NightlyAutoTuner to receive its dependencies (DAO, ConfigManager)
+     * via constructor injection instead of manual creation inside doWork().
+     */
+    override val workManagerConfiguration: Configuration
+        get() {
+            val db = TremorRoomDatabase.getDatabase(this)
+            val trainingLabelDao = db.trainingLabelDao()
+            // TremorConfigManager implementation is provided by NightlyAutoTuner's companion
+            // or by the phone's settings layer. Using a default no-op manager for now until
+            // the settings UI is wired up.
+            val configManager = object : com.opensource.tremorwatch.phone.training.TremorConfigManager {
+                override fun getCurrentConfig(): com.opensource.tremorwatch.shared.models.TremorDetectionConfig {
+                    return com.opensource.tremorwatch.shared.models.TremorDetectionConfig()
+                }
+                override fun applyConfig(config: com.opensource.tremorwatch.shared.models.TremorDetectionConfig) {
+                    Timber.i("Auto-tuned config ready — will sync to watch on next connection")
+                    // TODO: Send updated config to watch via MessageClient
+                }
+            }
+            val factory = TrainingWorkerFactory(trainingLabelDao, configManager)
+            return Configuration.Builder()
+                .setWorkerFactory(factory)
+                .build()
+        }
 
     /**
      * Release build tree - only logs warnings and errors

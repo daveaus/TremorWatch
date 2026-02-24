@@ -1041,6 +1041,17 @@ class TremorService : LifecycleService(), SensorEventListener {
                     calibrationCaptureManager.recordSample(sample)
                 }
             }
+            ,
+            onTrainingSample = { tremorData, fftResult ->
+                // Active Learning: delegate to TrainingManager for borderline detection.
+                // No-op when training mode is off (trainingManager is null).
+                try {
+                    val app = application as? com.opensource.tremorwatch.training.TrainingAwareApplication
+                    app?.trainingManager?.onEngineSample(tremorData, fftResult)
+                } catch (e: Exception) {
+                    Timber.w(e, "Training sample callback failed")
+                }
+            }
         )
 
         // Initialize config listener to receive detection algorithm updates from phone

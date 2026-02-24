@@ -80,3 +80,49 @@ Three-tier tremor metrics: fixes inflated Tremor m/hr caused by post-update dete
 - Post-update detector changes (Feb 22) caused headline Tremor m/hr to spike from ~5 to ~28 m/hr â€” dominated by excluded/low-reliability detections.
 - Quality-gated metrics restore clinically interpretable values while preserving the full signal for diagnostics.
 - No changes to watch detector or stored `tremorCount` semantics.
+
+---
+
+## [Docs] — 2026-02-24
+
+### Added
+- `workingfolder/codex/training_proposal.md`: comprehensive Active Learning Training Mode technical proposal and Kotlin code draft.
+  - Defines watch experimental-trigger flow (`TremorMonitoringEngine` + `TremorService`), user feedback loop, and phone label persistence plan.
+  - Recommends prioritized auto-tuning targets from current parameter inventory.
+  - Proposes three new personalization parameters (`minFrequencyStability`, `minHarmonicSupportRatio`, `minCrossSensorSupport`).
+  - Includes explicit wiring plan so tuned thresholds (including `minBandRatio`) are consumed in `TremorFFT`/engine decision logic.
+
+### Changed
+- `todo.md`: appended a dated follow-up task (2026-03-01) for Phase 1 implementation of Active Learning Training Mode, with key file references and validation checkpoints.
+
+---
+
+## [Feature] Active Learning Training Module - 2026-02-25
+
+### Added
+- `shared/models/TrainingModels.kt`: shared data models (FeedbackLabel, TrainingState, TrainingSample, FeedbackFeatureSnapshot).
+- `app/training/ShadowDetector.kt`: parallel FFT with relaxed thresholds for borderline event detection.
+- `app/training/TrainingManager.kt`: orchestrator with v2.0 hardening (P1, P3, P4, P13, P14).
+- `app/training/VibrationPromptManager.kt`: haptic feedback with P8 (appContext leak fix).
+- `app/training/TrainingPromptActivity.kt`: watch prompt UI with P5-P7, P9 lifecycle hardening.
+- `phone/data/TrainingEntities.kt`: Room entity + DAO with P12 (@Transaction).
+- `phone/training/TrainingParameterOptimizer.kt`: optimization with P16-P19 math hardening.
+- `phone/training/NightlyAutoTuner.kt`: WorkManager nightly worker with P10, P15.
+- `phone/training/TrainingWorkerFactory.kt`: custom WorkerFactory for dependency injection (P10).
+
+### Changed
+- `shared/models/TremorDetectionConfig.kt`: +3 active learning params, schema v4.
+- `shared/Constants.kt`: +3 training message paths.
+- `app/TremorWatchApplication.kt`: implements TrainingAwareApplication interface.
+- `app/WatchDataSender.kt`: +sendTrainingSample with P1/P2 hardening.
+- `app/engine/TremorMonitoringEngine.kt`: +onTrainingSample callback for shadow detection.
+- `app/AndroidManifest.xml`: +TrainingPromptActivity entry.
+- `phone/WatchDataListenerService.kt`: +handleTrainingLabel handler (P11).
+- `phone/database/TremorRoomDatabase.kt`: v7, MIGRATION_6_7, +trainingLabelDao.
+- `phone/TremorWatchPhoneApp.kt`: Configuration.Provider with TrainingWorkerFactory.
+- `phone/AndroidManifest.xml`: disabled default WorkManager initializer.
+
+### Why
+- Implements Active Learning Training Module (v2.0 hardened blueprint) with 19 patches from Red Team analysis.
+- Enables future one-week personalization learning period via user feedback on borderline tremor events.
+- All 19 files compile successfully; installed on watch + phone.

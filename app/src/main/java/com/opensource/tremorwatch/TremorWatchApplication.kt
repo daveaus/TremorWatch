@@ -1,15 +1,26 @@
 package com.opensource.tremorwatch
 
 import android.app.Application
+import com.opensource.tremorwatch.training.TrainingAwareApplication
+import com.opensource.tremorwatch.training.TrainingManager
 import timber.log.Timber
 
 /**
  * Application class for TremorWatch watch app.
  * 
  * Initializes logging infrastructure and other app-wide components.
+ * Implements TrainingAwareApplication so TrainingPromptActivity can
+ * access the TrainingManager instance.
  */
-class TremorWatchApplication : Application() {
+class TremorWatchApplication : Application(), TrainingAwareApplication {
     
+    /**
+     * TrainingManager is lazily created when training starts.
+     * The activity checks this via the TrainingAwareApplication interface.
+     * Set by the monitoring service when training mode is activated.
+     */
+    override var trainingManager: TrainingManager? = null
+
     override fun onCreate() {
         super.onCreate()
         
@@ -46,4 +57,3 @@ class TremorWatchApplication : Application() {
         }
     }
 }
-

@@ -209,6 +209,11 @@ class WatchDataListenerService : WearableListenerService() {
                 Log.d(TAG, "Processing calibration data message")
                 handleCalibrationData(messageEvent.data)
             }
+            // Active Learning: training label from watch
+            messageEvent.path.startsWith(Constants.MESSAGE_PATH_TRAINING_LABEL) -> {
+                Log.d(TAG, "Processing training label message")
+                handleTrainingLabel(messageEvent)
+            }
             // IG-04: Silently ignore WearOS notification bridge paths (no processing needed)
             messageEvent.path.startsWith("/notification") -> {
                 // No-op: WearOS notification bridge message, not TremorWatch data
@@ -1675,6 +1680,65 @@ class WatchDataListenerService : WearableListenerService() {
             }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to load chunk assemblies: ${e.message}", e)
+        }
+    }
+
+    /**
+     * Handle a training label message from the watch.
+     * [P11] Uses serviceScope (CoroutineScope) instead of GlobalScope to
+     * ensure coroutines are cancelled on service destroy.
+     */
+    private fun handleTrainingLabel(messageEvent: MessageEvent) {
+        serviceScope.launch(Dispatchers.IO) {
+            try {
+                val jsonString = String(messageEvent.data, Charsets.UTF_8)
+                val sample = kotlinx.serialization.json.Json {
+                    ignoreUnknownKeys = true
+                }.decodeFromString(
+                    com.opensource.tremorwatch.shared.models.TrainingSample.serializer(),
+                    jsonString
+                )
+
+                Log.i(TAG, "Received training label: ${sample.sampleId} " +
+                       "feedback=${sample.feedback} freq=${sample.dominantFrequency}Hz")
+
+                // Convert to Room entity
+                val entity = com.opensource.tremorwatch.phone.data.TrainingLabelEntity(
+                    sampleId = sample.sampleId,
+                    timestamp = sample.timestamp,
+                    feedback = sample.feedback.name,
+                    feedbackTimestamp = sample.feedbackTimestamp,
+                    responseLatencyMs = sample.responseLatencyMs,
+                    dominantFrequency = sample.dominantFrequency,
+                    bandRatio = sample.bandRatio,
+                    confidence = sample.confidence,
+                    calibratedConfidence = sample.calibratedConfidence,
+                    totalPower = sample.totalPower,
+                    tremorBandPower = sample.tremorBandPower,
+                    spectralEntropy = sample.spectralEntropy,
+                    harmonicRatio = sample.harmonicRatio,
+                    peakProminence = sample.peakProminence,
+                    crossSensorSupport = sample.crossSensorSupport,
+                    frequencyStability = sample.frequencyStability,
+                    magnitude = sample.magnitude,
+                    accelMagnitude = sample.accelMagnitude,
+                    activityType = sample.activityType,
+                    activityConfidence = sample.activityConfidence,
+                    isResting = sample.isResting,
+                    productionIsTremor = sample.productionIsTremor,
+                    shadowIsTremor = sample.shadowIsTremor,
+                    triggerReason = sample.triggerReason,
+                    label = sample.feedback.name
+                )
+
+                // Insert into Room database
+                val db = TremorRoomDatabase.getDatabase(this@WatchDataListenerService)
+                db.trainingLabelDao().insert(entity)
+
+                Log.i(TAG, "✓ Stored training label ${sample.sampleId}")
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to handle training label: ${e.message}", e)
+            }
         }
     }
 }

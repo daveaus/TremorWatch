@@ -935,6 +935,49 @@ fun ConfigScreen(
                 .padding(vertical = 2.dp)
         )
 
+        // Training Mode Toggle - Active Learning
+        var trainingMode by remember { mutableStateOf(MonitoringState.isTrainingMode(context)) }
+        ToggleChip(
+            checked = trainingMode,
+            onCheckedChange = {
+                trainingMode = it
+                MonitoringState.setTrainingMode(context, it)
+                // Create or destroy TrainingManager in the Application
+                val app = context.applicationContext as? com.opensource.tremorwatch.TremorWatchApplication
+                if (it) {
+                    val sender = com.opensource.tremorwatch.WatchDataSender(context)
+                    val config = com.opensource.tremorwatch.shared.models.TremorDetectionConfig()
+                    val manager = com.opensource.tremorwatch.training.TrainingManager(
+                        context.applicationContext, sender, 20f
+                    )
+                    app?.trainingManager = manager
+                    manager.startTraining(config)
+                } else {
+                    app?.trainingManager?.stopTraining()
+                    app?.trainingManager = null
+                }
+            },
+            label = {
+                Text("Training Mode", fontSize = 14.sp)
+            },
+            secondaryLabel = {
+                Text(
+                    if (trainingMode) "Learning your tremor…"
+                    else "Personalize detection",
+                    fontSize = 10.sp
+                )
+            },
+            toggleControl = {
+                Icon(
+                    imageVector = ToggleChipDefaults.switchIcon(trainingMode),
+                    contentDescription = null
+                )
+            },
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 2.dp)
+        )
+
         // Calibration button - full width chip
         Chip(
             onClick = onShowCalibration,

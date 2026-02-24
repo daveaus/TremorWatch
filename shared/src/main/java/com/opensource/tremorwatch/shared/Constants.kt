@@ -21,6 +21,11 @@ object Constants {
     const val MESSAGE_PATH_CALIBRATION_DATA = "/calibration_data"
     const val MESSAGE_PATH_RATING_CONFIG = "/rating_config"
 
+    // Training data transport paths (Active Learning v2.0)
+    const val MESSAGE_PATH_TRAINING_LABEL = "/training/label"
+    const val MESSAGE_PATH_TRAINING_STATE = "/training/state"
+    const val MESSAGE_PATH_TRAINING_CONFIG_UPDATE = "/training/config_update"
+
     // Capability names for device discovery
     const val CAPABILITY_TREMOR_RECEIVER = "tremor_watch_receiver"
 
