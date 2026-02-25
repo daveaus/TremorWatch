@@ -1,7 +1,13 @@
 package com.opensource.tremorwatch.training
 
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.os.Build
+import android.text.format.DateFormat
+import androidx.core.app.NotificationCompat
 import com.opensource.tremorwatch.TremorFFT
 import com.opensource.tremorwatch.WatchDataSender
 import com.opensource.tremorwatch.shared.models.*
@@ -9,7 +15,10 @@ import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import timber.log.Timber
 import java.io.File
+import java.text.SimpleDateFormat
 import java.time.LocalTime
+import java.util.Date
+import java.util.Locale
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
@@ -33,6 +42,8 @@ class TrainingManager(
     private val sampleRate: Float
 ) {
     companion object {
+        private const val TRAINING_PROMPT_CHANNEL_ID = "training_prompt_channel"
+        private const val TRAINING_PROMPT_CHANNEL_NAME = "Training Prompts"
         const val PROMPT_COOLDOWN_MS = 10 * 60 * 1000L     // 10 minutes
         const val MAX_PROMPTS_PER_HOUR = 4
         const val MAX_PROMPTS_PER_DAY = 20
@@ -195,8 +206,9 @@ class TrainingManager(
         // [P4] Evict stale pending entries before checking capacity
         evictStalePending()
 
-        if (!canPrompt(timestamp)) {
-            Timber.d("Prompt suppressed by guardrails")
+        val promptDecision = evaluatePromptEligibility(timestamp)
+        if (!promptDecision.allowed) {
+            Timber.d("Prompt suppressed by guardrails: ${promptDecision.reason}")
             return
         }
 
@@ -227,23 +239,52 @@ class TrainingManager(
         incrementPromptCounters()
 
         // Launch the prompt activity
-        launchPromptActivity(sample.sampleId)
+        launchPromptActivity(sample.sampleId, sample.timestamp)
     }
 
-    private fun canPrompt(now: Long): Boolean {
+    private data class PromptDecision(
+        val allowed: Boolean,
+        val reason: String
+    )
+
+    private fun evaluatePromptEligibility(now: Long): PromptDecision {
         // Cooldown check
-        if (now - lastPromptTime < PROMPT_COOLDOWN_MS) return false
+        val elapsedSinceLastPrompt = now - lastPromptTime
+        if (elapsedSinceLastPrompt < PROMPT_COOLDOWN_MS) {
+            val remainingMs = PROMPT_COOLDOWN_MS - elapsedSinceLastPrompt
+            return PromptDecision(
+                allowed = false,
+                reason = "cooldown_active remaining_ms=$remainingMs"
+            )
+        }
 
         // Quiet hours check
         val hour = LocalTime.now().hour
-        if (hour >= QUIET_HOUR_START || hour < QUIET_HOUR_END) return false
+        if (hour >= QUIET_HOUR_START || hour < QUIET_HOUR_END) {
+            return PromptDecision(
+                allowed = false,
+                reason = "quiet_hours hour=$hour window=$QUIET_HOUR_START-$QUIET_HOUR_END"
+            )
+        }
 
         // Rate limiting
         resetCountersIfNeeded()
-        if (promptsThisHour.get() >= MAX_PROMPTS_PER_HOUR) return false
-        if (promptsToday.get() >= MAX_PROMPTS_PER_DAY) return false
+        val currentHourPrompts = promptsThisHour.get()
+        if (currentHourPrompts >= MAX_PROMPTS_PER_HOUR) {
+            return PromptDecision(
+                allowed = false,
+                reason = "hourly_cap reached=$currentHourPrompts max=$MAX_PROMPTS_PER_HOUR"
+            )
+        }
+        val currentDayPrompts = promptsToday.get()
+        if (currentDayPrompts >= MAX_PROMPTS_PER_DAY) {
+            return PromptDecision(
+                allowed = false,
+                reason = "daily_cap reached=$currentDayPrompts max=$MAX_PROMPTS_PER_DAY"
+            )
+        }
 
-        return true
+        return PromptDecision(allowed = true, reason = "allowed")
     }
 
     private fun resetCountersIfNeeded() {
@@ -264,17 +305,84 @@ class TrainingManager(
         promptsToday.incrementAndGet()
     }
 
-    private fun launchPromptActivity(sampleId: String) {
-        val intent = Intent(context, TrainingPromptActivity::class.java).apply {
-            putExtra("SAMPLE_ID", sampleId)
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    private fun launchPromptActivity(sampleId: String, eventTimestampMs: Long) {
+        try {
+            val eventTimeText = formatMovementTime(eventTimestampMs)
+            val intent = Intent(context, TrainingPromptActivity::class.java).apply {
+                putExtra(TrainingPromptActivity.EXTRA_SAMPLE_ID, sampleId)
+                putExtra(TrainingPromptActivity.EXTRA_EVENT_TIMESTAMP_MS, eventTimestampMs)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+            }
+
+            val notificationId = notificationIdForSample(sampleId)
+            val pendingIntent = PendingIntent.getActivity(
+                context,
+                notificationId,
+                intent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+
+            val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            ensurePromptChannel(notificationManager)
+
+            val notification = NotificationCompat.Builder(context, TRAINING_PROMPT_CHANNEL_ID)
+                .setSmallIcon(android.R.drawable.ic_dialog_alert)
+                .setContentTitle("Tremor Check")
+                .setContentText("Detected movement at $eventTimeText. Tap to answer.")
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setCategory(NotificationCompat.CATEGORY_REMINDER)
+                .setContentIntent(pendingIntent)
+                .setFullScreenIntent(pendingIntent, true)
+                .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+                .setAutoCancel(true)
+                .setOngoing(true)
+                .setTimeoutAfter(PROMPT_TIMEOUT_MS + 5_000L)
+                .build()
+
+            notificationManager.notify(notificationId, notification)
+            Timber.i("Training prompt notification posted for sample $sampleId at $eventTimeText")
+        } catch (e: Exception) {
+            Timber.e(e, "Failed to post training prompt notification")
         }
-        context.startActivity(intent)
+    }
+
+    private fun formatMovementTime(timestampMs: Long): String {
+        val pattern = if (DateFormat.is24HourFormat(context)) "HH:mm" else "h:mm a"
+        return SimpleDateFormat(pattern, Locale.getDefault()).format(Date(timestampMs))
+    }
+
+    private fun ensurePromptChannel(notificationManager: NotificationManager) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        val existing = notificationManager.getNotificationChannel(TRAINING_PROMPT_CHANNEL_ID)
+        if (existing != null) return
+
+        val channel = NotificationChannel(
+            TRAINING_PROMPT_CHANNEL_ID,
+            TRAINING_PROMPT_CHANNEL_NAME,
+            NotificationManager.IMPORTANCE_HIGH
+        ).apply {
+            description = "Active learning prompts for tremor confirmation"
+            setShowBadge(false)
+            lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC
+        }
+        notificationManager.createNotificationChannel(channel)
+    }
+
+    private fun notificationIdForSample(sampleId: String): Int {
+        val stableHash = sampleId.hashCode() and 0x7fffffff
+        return 0x20000000 or (stableHash and 0x0fffffff)
+    }
+
+    private fun cancelPromptNotification(sampleId: String) {
+        val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        notificationManager.cancel(notificationIdForSample(sampleId))
     }
 
     // ──── Feedback Handling ────
 
     fun onUserFeedback(sampleId: String, label: FeedbackLabel) {
+        cancelPromptNotification(sampleId)
+
         val sample = pendingFeedback.remove(sampleId) ?: run {
             Timber.w("Sample $sampleId not found in pending feedback")
             return

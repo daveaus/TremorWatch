@@ -942,20 +942,6 @@ fun ConfigScreen(
             onCheckedChange = {
                 trainingMode = it
                 MonitoringState.setTrainingMode(context, it)
-                // Create or destroy TrainingManager in the Application
-                val app = context.applicationContext as? com.opensource.tremorwatch.TremorWatchApplication
-                if (it) {
-                    val sender = com.opensource.tremorwatch.WatchDataSender(context)
-                    val config = com.opensource.tremorwatch.shared.models.TremorDetectionConfig()
-                    val manager = com.opensource.tremorwatch.training.TrainingManager(
-                        context.applicationContext, sender, 20f
-                    )
-                    app?.trainingManager = manager
-                    manager.startTraining(config)
-                } else {
-                    app?.trainingManager?.stopTraining()
-                    app?.trainingManager = null
-                }
             },
             label = {
                 Text("Training Mode", fontSize = 14.sp)

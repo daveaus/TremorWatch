@@ -51,6 +51,9 @@ import com.opensource.tremorwatch.data.PreferencesRepository
 import com.opensource.tremorwatch.data.CalibrationCaptureManager
 import com.opensource.tremorwatch.data.CalibrationSample
 import com.opensource.tremorwatch.shared.models.RatingConfig
+import com.opensource.tremorwatch.shared.models.TremorDetectionConfig
+import com.opensource.tremorwatch.training.TrainingAwareApplication
+import com.opensource.tremorwatch.training.TrainingManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -182,6 +185,9 @@ class TremorService : LifecycleService(), SensorEventListener {
 
     // Rating config listener - receives subjective rating settings from phone
     private lateinit var ratingConfigListener: RatingConfigDataListener
+
+    // Latest detection config used to initialize/update Active Learning manager.
+    private var latestDetectionConfig: TremorDetectionConfig = TremorDetectionConfig()
 
     // Preferences repository for state management
     private lateinit var preferencesRepository: PreferencesRepository
@@ -1046,7 +1052,7 @@ class TremorService : LifecycleService(), SensorEventListener {
                 // Active Learning: delegate to TrainingManager for borderline detection.
                 // No-op when training mode is off (trainingManager is null).
                 try {
-                    val app = application as? com.opensource.tremorwatch.training.TrainingAwareApplication
+                    val app = application as? TrainingAwareApplication
                     app?.trainingManager?.onEngineSample(tremorData, fftResult)
                 } catch (e: Exception) {
                     Timber.w(e, "Training sample callback failed")
@@ -1057,7 +1063,9 @@ class TremorService : LifecycleService(), SensorEventListener {
         // Initialize config listener to receive detection algorithm updates from phone
         configListener = ConfigDataListener(this) { newConfig ->
             Timber.i("Received config update from phone: ${newConfig.profileName}")
+            latestDetectionConfig = newConfig
             monitoringEngine.setConfig(newConfig)
+            (application as? TrainingAwareApplication)?.trainingManager?.updateConfig(newConfig)
             activityFilteringEnabled = newConfig.activityFilteringEnabled
             updateActivityRecognitionState(activityFilteringEnabled)
         }
@@ -1134,6 +1142,9 @@ class TremorService : LifecycleService(), SensorEventListener {
 
         // Register broadcast receiver for settings changes
         registerSettingsReceiver()
+
+        // Restore training manager from persisted preference after service restarts.
+        syncTrainingModeState(MonitoringState.isTrainingMode(this))
 
         startTime = System.currentTimeMillis()
 
@@ -2042,6 +2053,14 @@ class TremorService : LifecycleService(), SensorEventListener {
                         Timber.w("EMERGENCY CLEAR triggered - deleting all pending batches")
                         emergencyClearAllBatches()
                     }
+                    "com.opensource.tremorwatch.TRAINING_MODE_CHANGED" -> {
+                        val enabled = intent.getBooleanExtra(
+                            "training_enabled",
+                            MonitoringState.isTrainingMode(this@TremorService)
+                        )
+                        Timber.i("Training mode changed via settings broadcast: enabled=$enabled")
+                        syncTrainingModeState(enabled)
+                    }
                 }
             }
         }
@@ -2052,6 +2071,7 @@ class TremorService : LifecycleService(), SensorEventListener {
             addAction("com.opensource.tremorwatch.TRIGGER_UPLOAD")
             addAction("com.opensource.tremorwatch.EMERGENCY_CLEAR")
             addAction("com.opensource.tremorwatch.REFRESH_CHARGING_STATE")
+            addAction("com.opensource.tremorwatch.TRAINING_MODE_CHANGED")
         }
 
         // Android 13+ requires explicit export flag for registerReceiver
@@ -2071,6 +2091,39 @@ class TremorService : LifecycleService(), SensorEventListener {
             }
         }
         settingsReceiver = null
+    }
+
+    private fun syncTrainingModeState(enabled: Boolean) {
+        val app = application as? TrainingAwareApplication ?: run {
+            Timber.w("Training mode requested but application is not TrainingAwareApplication")
+            return
+        }
+
+        if (enabled) {
+            val manager = app.trainingManager ?: TrainingManager(
+                context = applicationContext,
+                dataSender = WatchDataSender(applicationContext),
+                sampleRate = 20f
+            ).also {
+                app.trainingManager = it
+                Timber.i("Created TrainingManager from persisted training preference")
+            }
+
+            if (!manager.isTrainingActive) {
+                manager.startTraining(latestDetectionConfig)
+                Timber.i("Training manager started")
+            } else {
+                manager.updateConfig(latestDetectionConfig)
+                Timber.d("Training manager already active; config refreshed")
+            }
+            return
+        }
+
+        app.trainingManager?.let {
+            it.stopTraining()
+            Timber.i("Training manager stopped")
+        }
+        app.trainingManager = null
     }
     
 
@@ -2457,6 +2510,12 @@ class TremorService : LifecycleService(), SensorEventListener {
 
         // Clear instance for watch-side objective context (opus46 Issue 3d)
         instance = null
+
+        // Clear Active Learning manager instance owned by the service.
+        (application as? TrainingAwareApplication)?.let { app ->
+            app.trainingManager?.stopTraining()
+            app.trainingManager = null
+        }
 
         super.onDestroy()  // LifecycleService.onDestroy() transitions to DESTROYED state
 
