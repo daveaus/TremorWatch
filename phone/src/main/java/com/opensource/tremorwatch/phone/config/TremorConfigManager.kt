@@ -139,6 +139,47 @@ class TremorConfigManager(private val context: Context) {
     }
 
     /**
+     * Request a fresh runtime training status snapshot from connected watch nodes.
+     * Watch responds on MESSAGE_PATH_TRAINING_STATE.
+     */
+    suspend fun requestTrainingStateFromWatch(): Boolean {
+        return try {
+            val nodes = withContext(Dispatchers.IO) {
+                Tasks.await(nodeClient.connectedNodes)
+            }
+            if (nodes.isEmpty()) {
+                Timber.w("No connected watch nodes for training status request")
+                return false
+            }
+
+            val payload = """{"timestamp":${System.currentTimeMillis()}}"""
+                .toByteArray(Charsets.UTF_8)
+
+            var sentToAnyNode = false
+            for (node in nodes) {
+                try {
+                    withContext(Dispatchers.IO) {
+                        Tasks.await(
+                            messageClient.sendMessage(
+                                node.id,
+                                Constants.MESSAGE_PATH_TRAINING_STATE_REQUEST,
+                                payload
+                            )
+                        )
+                    }
+                    sentToAnyNode = true
+                } catch (e: Exception) {
+                    Timber.w(e, "Failed to request training state from node ${node.displayName}")
+                }
+            }
+            sentToAnyNode
+        } catch (e: Exception) {
+            Timber.w(e, "Unable to request training state from watch")
+            false
+        }
+    }
+
+    /**
      * Force a manual sync of the current active config to watch.
      * Useful when sync previously failed.
      */
@@ -365,6 +406,23 @@ class TremorConfigManager(private val context: Context) {
 
             var sentToAnyNode = false
             for (node in nodes) {
+                var sentToNode = false
+                try {
+                    withContext(Dispatchers.IO) {
+                        Tasks.await(
+                            messageClient.sendMessage(
+                                node.id,
+                                Constants.MESSAGE_PATH_TRAINING_CONFIG_UPDATE,
+                                payload
+                            )
+                        )
+                    }
+                    sentToNode = true
+                } catch (e: Exception) {
+                    Timber.w(e, "Failed to send training mode update (new path) to node ${node.displayName}")
+                }
+
+                // Backward-compatibility path for older watch builds.
                 try {
                     withContext(Dispatchers.IO) {
                         Tasks.await(
@@ -375,9 +433,13 @@ class TremorConfigManager(private val context: Context) {
                             )
                         )
                     }
-                    sentToAnyNode = true
+                    sentToNode = true
                 } catch (e: Exception) {
-                    Timber.w(e, "Failed to send training mode update to node ${node.displayName}")
+                    Timber.w(e, "Failed to send training mode update (legacy path) to node ${node.displayName}")
+                }
+
+                if (sentToNode) {
+                    sentToAnyNode = true
                 }
             }
 

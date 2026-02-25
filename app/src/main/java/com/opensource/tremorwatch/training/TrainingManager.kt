@@ -93,6 +93,7 @@ class TrainingManager(
         private const val KEY_ENGINE_STATE = "engine_state"
         private const val KEY_LOG_JSON = "log_json"
         private const val MAX_LOG_ENTRIES = 32
+        private const val STATUS_SYNC_MIN_INTERVAL_MS = 5_000L
 
         const val PROMPT_COOLDOWN_MS = 10 * 60 * 1000L     // 10 minutes
         const val MAX_PROMPTS_PER_HOUR = 4
@@ -213,6 +214,8 @@ class TrainingManager(
     private var trainingStartTimeMs: Long? = null
     private var lastFeedbackTimeMs: Long? = null
     private var lastFeedbackLabel: FeedbackLabel? = null
+    private var lastStatusSyncFingerprint: String? = null
+    private var lastStatusSyncTimeMs: Long = 0L
 
     // [P3] ConcurrentHashMap — accessed from sensor thread (requestUserFeedback),
     // UI thread (onUserFeedback), and settings thread (stopTraining).
@@ -780,6 +783,50 @@ class TrainingManager(
             .putLong(KEY_TRAINING_START_MS, snapshot.trainingStartTimeMs ?: 0L)
             .putString(KEY_ENGINE_STATE, snapshot.engineState.name)
             .apply()
+        maybeSyncStatusToPhone(snapshot)
+    }
+
+    private fun maybeSyncStatusToPhone(snapshot: TrainingStatusSnapshot) {
+        val fingerprint = buildStatusFingerprint(snapshot)
+        val now = System.currentTimeMillis()
+        val isDuplicate = fingerprint == lastStatusSyncFingerprint
+        val isRateLimited = now - lastStatusSyncTimeMs < STATUS_SYNC_MIN_INTERVAL_MS
+        if (isDuplicate && isRateLimited) return
+
+        dataSender.sendTrainingStateUpdate(
+            enabled = snapshot.modeEnabled,
+            engineState = snapshot.engineState.name,
+            uiState = snapshot.uiState.name,
+            usableLabels = snapshot.usableLabelCount,
+            targetLabels = snapshot.targetUsableLabelCount,
+            yesLabels = snapshot.yesLabelCount,
+            noLabels = snapshot.noLabelCount,
+            ignoredLabels = snapshot.ignoredLabelCount,
+            promptsTotal = snapshot.promptsTotal,
+            promptsToday = snapshot.promptsToday,
+            hasEnoughLabels = snapshot.hasEnoughLabels
+        ) { success ->
+            if (success) {
+                lastStatusSyncFingerprint = fingerprint
+                lastStatusSyncTimeMs = now
+            }
+        }
+    }
+
+    private fun buildStatusFingerprint(snapshot: TrainingStatusSnapshot): String {
+        return listOf(
+            snapshot.modeEnabled,
+            snapshot.engineState.name,
+            snapshot.uiState.name,
+            snapshot.usableLabelCount,
+            snapshot.yesLabelCount,
+            snapshot.noLabelCount,
+            snapshot.ignoredLabelCount,
+            snapshot.promptsTotal,
+            snapshot.promptsToday,
+            snapshot.pendingPromptCount,
+            snapshot.hasEnoughLabels
+        ).joinToString("|")
     }
 
     /**

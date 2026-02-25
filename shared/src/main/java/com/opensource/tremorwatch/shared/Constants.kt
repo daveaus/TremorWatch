@@ -24,6 +24,7 @@ object Constants {
     // Training data transport paths (Active Learning v2.0)
     const val MESSAGE_PATH_TRAINING_LABEL = "/training/label"
     const val MESSAGE_PATH_TRAINING_STATE = "/training/state"
+    const val MESSAGE_PATH_TRAINING_STATE_REQUEST = "/training/state_request"
     const val MESSAGE_PATH_TRAINING_CONFIG_UPDATE = "/training/config_update"
 
     // Capability names for device discovery

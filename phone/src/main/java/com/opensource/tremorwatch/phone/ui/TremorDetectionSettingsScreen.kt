@@ -1,5 +1,7 @@
 package com.opensource.tremorwatch.phone.ui
 
+import android.content.Context
+import android.content.SharedPreferences
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -28,6 +30,8 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.opensource.tremorwatch.phone.config.TremorConfigManager
 import com.opensource.tremorwatch.phone.data.TrainingLabelEntity
+import com.opensource.tremorwatch.phone.data.WatchTrainingStatePrefs
+import com.opensource.tremorwatch.phone.data.WatchTrainingStateSnapshot
 import com.opensource.tremorwatch.phone.database.TremorRoomDatabase
 import com.opensource.tremorwatch.shared.models.TremorDetectionConfig
 import kotlinx.coroutines.launch
@@ -60,24 +64,22 @@ fun TremorDetectionSettingsScreen(
     val trainingDao = remember { TremorRoomDatabase.getDatabase(context).trainingLabelDao() }
     var trainingModeEnabled by remember { mutableStateOf(configManager.isTrainingModeEnabled()) }
     var isSyncingTrainingMode by remember { mutableStateOf(false) }
-    var trainingUsableLabels by remember { mutableStateOf(0) }
-    var trainingPositiveLabels by remember { mutableStateOf(0) }
-    var trainingNegativeLabels by remember { mutableStateOf(0) }
-    var trainingIgnoredLabels by remember { mutableStateOf(0) }
-    var trainingTotalLabels by remember { mutableStateOf(0) }
-    var recentTrainingLabels by remember { mutableStateOf<List<TrainingLabelEntity>>(emptyList()) }
+    val trainingUsableLabels by trainingDao.observeUsableLabelCount().collectAsState(initial = 0)
+    val trainingPositiveLabels by trainingDao.observePositiveLabelCount().collectAsState(initial = 0)
+    val trainingNegativeLabels by trainingDao.observeNegativeLabelCount().collectAsState(initial = 0)
+    val trainingIgnoredLabels by trainingDao.observeIgnoredLabelCount().collectAsState(initial = 0)
+    val trainingTotalLabels by trainingDao.observeTotalLabelCount().collectAsState(initial = 0)
+    val recentTrainingLabels by trainingDao.observeRecentLabels(limit = 8)
+        .collectAsState(initial = emptyList())
     var trainingStatusMessage by remember { mutableStateOf<String?>(null) }
+    val watchTrainingStatePrefs = remember {
+        context.getSharedPreferences(WatchTrainingStatePrefs.PREFS_NAME, Context.MODE_PRIVATE)
+    }
+    var watchTrainingState by remember {
+        mutableStateOf(WatchTrainingStatePrefs.read(watchTrainingStatePrefs))
+    }
 
     val snackbarHostState = remember { SnackbarHostState() }
-
-    suspend fun refreshTrainingInsights() {
-        trainingUsableLabels = trainingDao.getUsableLabelCount()
-        trainingPositiveLabels = trainingDao.getPositiveLabelCount()
-        trainingNegativeLabels = trainingDao.getNegativeLabelCount()
-        trainingIgnoredLabels = trainingDao.getIgnoredLabelCount()
-        trainingTotalLabels = trainingDao.getTotalLabelCount()
-        recentTrainingLabels = trainingDao.getRecentLabels(limit = 8)
-    }
 
     // File export/import launchers
     val exportLauncher = rememberLauncherForActivityResult(
@@ -132,8 +134,21 @@ fun TremorDetectionSettingsScreen(
         }
     }
 
+    DisposableEffect(watchTrainingStatePrefs) {
+        val listener = SharedPreferences.OnSharedPreferenceChangeListener { prefs, _ ->
+            watchTrainingState = WatchTrainingStatePrefs.read(prefs)
+        }
+        watchTrainingStatePrefs.registerOnSharedPreferenceChangeListener(listener)
+        onDispose {
+            watchTrainingStatePrefs.unregisterOnSharedPreferenceChangeListener(listener)
+        }
+    }
+
     LaunchedEffect(Unit) {
-        refreshTrainingInsights()
+        val requested = configManager.requestTrainingStateFromWatch()
+        if (!requested && !watchTrainingState.hasData) {
+            trainingStatusMessage = "Waiting for watch training status..."
+        }
     }
 
     Scaffold(
@@ -254,6 +269,7 @@ fun TremorDetectionSettingsScreen(
                     ignoredLabels = trainingIgnoredLabels,
                     totalLabels = trainingTotalLabels,
                     recentLabels = recentTrainingLabels,
+                    watchTrainingState = watchTrainingState,
                     statusMessage = trainingStatusMessage,
                     onToggleTraining = { enabled ->
                         trainingModeEnabled = enabled
@@ -266,19 +282,15 @@ fun TremorDetectionSettingsScreen(
                             } else {
                                 "Saved locally. Watch sync pending."
                             }
+                            if (synced) {
+                                configManager.requestTrainingStateFromWatch()
+                            }
                             successMessage = if (enabled) {
                                 "Training mode enabled"
                             } else {
                                 "Training mode disabled"
                             }
                             showSuccessSnackbar = true
-                            refreshTrainingInsights()
-                        }
-                    },
-                    onRefresh = {
-                        scope.launch {
-                            refreshTrainingInsights()
-                            trainingStatusMessage = "Training status refreshed"
                         }
                     }
                 )
@@ -420,17 +432,22 @@ private fun TrainingInsightsSection(
     ignoredLabels: Int,
     totalLabels: Int,
     recentLabels: List<TrainingLabelEntity>,
+    watchTrainingState: WatchTrainingStateSnapshot,
     statusMessage: String?,
-    onToggleTraining: (Boolean) -> Unit,
-    onRefresh: () -> Unit
+    onToggleTraining: (Boolean) -> Unit
 ) {
-    val targetLabels = 10
+    val targetLabels = watchTrainingState.targetLabels.coerceAtLeast(1)
+    val watchStateAvailable = watchTrainingState.hasData
+    val toggleChecked = if (watchStateAvailable) watchTrainingState.enabled else trainingModeEnabled
+    val effectiveUsableLabels = if (watchStateAvailable) watchTrainingState.usableLabels else usableLabels
     val stateLabel = when {
-        !trainingModeEnabled -> "OFF"
-        usableLabels >= targetLabels -> "PERSONALIZED"
-        usableLabels == 0 -> "WARMUP"
+        watchStateAvailable -> watchTrainingState.uiState
+        !trainingModeEnabled -> "SYNCING"
+        effectiveUsableLabels >= targetLabels -> "PERSONALIZED"
+        effectiveUsableLabels == 0 -> "WARMUP"
         else -> "ACTIVE"
     }
+    val watchStatusLabel = formatWatchStatusMeta(watchTrainingState)
 
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp)) {
@@ -442,13 +459,20 @@ private fun TrainingInsightsSection(
                 Column(modifier = Modifier.weight(1f)) {
                     Text("Training", style = MaterialTheme.typography.titleSmall)
                     Text(
-                        "State: $stateLabel",
+                        if (watchStateAvailable) "Watch state: $stateLabel" else "State: $stateLabel",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+                    if (watchStatusLabel != null) {
+                        Text(
+                            watchStatusLabel,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 }
                 Switch(
-                    checked = trainingModeEnabled,
+                    checked = toggleChecked,
                     onCheckedChange = onToggleTraining,
                     enabled = !isSyncingTrainingMode
                 )
@@ -456,37 +480,43 @@ private fun TrainingInsightsSection(
 
             Spacer(modifier = Modifier.height(8.dp))
             Text(
-                "Usable labels: $usableLabels/$targetLabels  (Yes: $positiveLabels, No: $negativeLabels)",
+                "Phone labels: $usableLabels/$targetLabels  (Yes: $positiveLabels, No: $negativeLabels)",
                 style = MaterialTheme.typography.bodySmall
             )
             Text(
                 "Ignored: $ignoredLabels  Total prompts: $totalLabels",
                 style = MaterialTheme.typography.bodySmall
             )
+            if (watchStateAvailable) {
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    "Watch labels: ${watchTrainingState.usableLabels}/${watchTrainingState.targetLabels}  " +
+                        "(Yes: ${watchTrainingState.yesLabels}, No: ${watchTrainingState.noLabels}, " +
+                        "Ignored: ${watchTrainingState.ignoredLabels})",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Text(
+                    "Watch prompts: total ${watchTrainingState.promptsTotal}, today ${watchTrainingState.promptsToday}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
 
             Spacer(modifier = Modifier.height(8.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    if (usableLabels >= targetLabels) {
-                        "Training threshold reached"
-                    } else {
-                        "${(targetLabels - usableLabels).coerceAtLeast(0)} more usable labels needed"
-                    },
-                    style = MaterialTheme.typography.bodySmall,
-                    color = if (usableLabels >= targetLabels) {
-                        MaterialTheme.colorScheme.primary
-                    } else {
-                        MaterialTheme.colorScheme.onSurfaceVariant
-                    }
-                )
-                TextButton(onClick = onRefresh) {
-                    Text("Refresh")
+            Text(
+                if (effectiveUsableLabels >= targetLabels) {
+                    "Training threshold reached"
+                } else {
+                    "${(targetLabels - effectiveUsableLabels).coerceAtLeast(0)} more usable labels needed"
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = if (effectiveUsableLabels >= targetLabels) {
+                    MaterialTheme.colorScheme.primary
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
                 }
-            }
+            )
 
             statusMessage?.let { message ->
                 Text(
@@ -526,6 +556,14 @@ private fun formatTrainingLabelRow(label: TrainingLabelEntity): String {
         else -> label.label
     }
     return "$time - $labelText"
+}
+
+private fun formatWatchStatusMeta(state: WatchTrainingStateSnapshot): String? {
+    if (!state.hasData || state.timestampMs <= 0L) return null
+    val time = SimpleDateFormat("h:mm a", Locale.getDefault()).format(Date(state.timestampMs))
+    val ageMs = (System.currentTimeMillis() - state.timestampMs).coerceAtLeast(0L)
+    val freshness = if (ageMs > 15 * 60 * 1000L) "stale" else "live"
+    return "Watch update: $time ($freshness)"
 }
 
 @Composable

@@ -834,6 +834,65 @@ class WatchDataSender(private val context: Context) {
         }
     }
 
+    /**
+     * Send watch training status snapshot to phone for UI visibility.
+     * Lightweight message path used by phone settings "Algorithm & Training".
+     */
+    fun sendTrainingStateUpdate(
+        enabled: Boolean,
+        engineState: String,
+        uiState: String,
+        usableLabels: Int,
+        targetLabels: Int,
+        yesLabels: Int,
+        noLabels: Int,
+        ignoredLabels: Int,
+        promptsTotal: Int,
+        promptsToday: Int,
+        hasEnoughLabels: Boolean,
+        onComplete: ((Boolean) -> Unit)? = null
+    ) {
+        scope.launch {
+            try {
+                val nodes = getConnectedNodes()
+                val target = nodes.firstOrNull() ?: run {
+                    Log.w(TAG, "No connected phone - cannot send training state update")
+                    onComplete?.invoke(false)
+                    return@launch
+                }
+
+                val payload = JSONObject().apply {
+                    put("enabled", enabled)
+                    put("engineState", engineState)
+                    put("uiState", uiState)
+                    put("usableLabels", usableLabels)
+                    put("targetLabels", targetLabels)
+                    put("yesLabels", yesLabels)
+                    put("noLabels", noLabels)
+                    put("ignoredLabels", ignoredLabels)
+                    put("promptsTotal", promptsTotal)
+                    put("promptsToday", promptsToday)
+                    put("hasEnoughLabels", hasEnoughLabels)
+                    put("timestamp", System.currentTimeMillis())
+                }.toString().toByteArray(Charsets.UTF_8)
+
+                messageClient.sendMessage(
+                    target.id,
+                    Constants.MESSAGE_PATH_TRAINING_STATE,
+                    payload
+                ).addOnSuccessListener {
+                    onComplete?.invoke(true)
+                }.addOnFailureListener { e ->
+                    Log.w(TAG, "Failed to send training state update", e)
+                    onComplete?.invoke(false)
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error sending training state update: ${e.message}", e)
+                onComplete?.invoke(false)
+            }
+        }
+    }
+
     fun shutdown() {
         scope.cancel()
     }

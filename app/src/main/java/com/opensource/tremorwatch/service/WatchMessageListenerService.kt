@@ -1,6 +1,8 @@
 package com.opensource.tremorwatch.service
 
 import android.util.Log
+import com.opensource.tremorwatch.training.TrainingAwareApplication
+import com.opensource.tremorwatch.training.TrainingManager
 import com.opensource.tremorwatch.config.MonitoringState
 import com.opensource.tremorwatch.shared.Constants
 import com.google.android.gms.wearable.MessageEvent
@@ -37,8 +39,12 @@ class WatchMessageListenerService : WearableListenerService() {
             Constants.MESSAGE_PATH_LOG_REQUEST -> {
                 handleLogRequest(messageEvent.sourceNodeId)
             }
+            Constants.MESSAGE_PATH_TRAINING_CONFIG_UPDATE,
             Constants.MESSAGE_PATH_TRAINING_STATE -> {
                 handleTrainingStateUpdate(messageEvent.data)
+            }
+            Constants.MESSAGE_PATH_TRAINING_STATE_REQUEST -> {
+                handleTrainingStateRequest(messageEvent.sourceNodeId)
             }
             else -> {
                 Log.w(TAG, "Unknown message path: ${messageEvent.path}")
@@ -112,6 +118,48 @@ class WatchMessageListenerService : WearableListenerService() {
                 Log.i(TAG, "Training mode updated from phone: enabled=$enabled")
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to apply training state update: ${e.message}", e)
+            }
+        }
+    }
+
+    private fun handleTrainingStateRequest(nodeId: String) {
+        scope.launch {
+            try {
+                val app = application as? TrainingAwareApplication
+                val runtimeSnapshot = app?.trainingManager?.getStatusSnapshot()
+                val snapshot = runtimeSnapshot ?: TrainingManager.getPersistedStatusSnapshot(applicationContext)
+
+                val payload = JSONObject().apply {
+                    put("enabled", snapshot.modeEnabled)
+                    put("engineState", snapshot.engineState.name)
+                    put("uiState", snapshot.uiState.name)
+                    put("usableLabels", snapshot.usableLabelCount)
+                    put("targetLabels", snapshot.targetUsableLabelCount)
+                    put("yesLabels", snapshot.yesLabelCount)
+                    put("noLabels", snapshot.noLabelCount)
+                    put("ignoredLabels", snapshot.ignoredLabelCount)
+                    put("promptsTotal", snapshot.promptsTotal)
+                    put("promptsToday", snapshot.promptsToday)
+                    put("hasEnoughLabels", snapshot.hasEnoughLabels)
+                    put("timestamp", System.currentTimeMillis())
+                }.toString().toByteArray(Charsets.UTF_8)
+
+                suspendCancellableCoroutine<Int> { cont ->
+                    messageClient.sendMessage(
+                        nodeId,
+                        Constants.MESSAGE_PATH_TRAINING_STATE,
+                        payload
+                    ).addOnSuccessListener { cont.resume(it) }
+                        .addOnFailureListener { cont.resumeWithException(it) }
+                }
+
+                Log.i(
+                    TAG,
+                    "Training state snapshot sent to phone: " +
+                        "state=${snapshot.uiState} usable=${snapshot.usableLabelCount}/${snapshot.targetUsableLabelCount}"
+                )
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to send training state snapshot: ${e.message}", e)
             }
         }
     }

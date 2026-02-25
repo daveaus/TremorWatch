@@ -1,6 +1,8 @@
 package com.opensource.tremorwatch.phone.data
 
+import android.content.SharedPreferences
 import androidx.room.*
+import kotlinx.coroutines.flow.Flow
 
 /**
  * Room entity for storing training labels received from the watch.
@@ -55,6 +57,81 @@ data class TrainingLabelEntity(
 )
 
 /**
+ * Snapshot of watch-reported training runtime state for phone UI.
+ * Stored in SharedPreferences via WatchDataListenerService.
+ */
+data class WatchTrainingStateSnapshot(
+    val hasData: Boolean = false,
+    val enabled: Boolean = false,
+    val engineState: String = "OFF",
+    val uiState: String = "OFF",
+    val usableLabels: Int = 0,
+    val targetLabels: Int = 10,
+    val yesLabels: Int = 0,
+    val noLabels: Int = 0,
+    val ignoredLabels: Int = 0,
+    val promptsTotal: Int = 0,
+    val promptsToday: Int = 0,
+    val hasEnoughLabels: Boolean = false,
+    val timestampMs: Long = 0L
+)
+
+/**
+ * Shared preference contract for watch -> phone training state echo.
+ */
+object WatchTrainingStatePrefs {
+    const val PREFS_NAME = "training_state"
+    private const val KEY_ENABLED = "watch_enabled"
+    private const val KEY_ENGINE_STATE = "watch_engine_state"
+    private const val KEY_UI_STATE = "watch_ui_state"
+    private const val KEY_USABLE_LABELS = "watch_usable_labels"
+    private const val KEY_TARGET_LABELS = "watch_target_labels"
+    private const val KEY_YES_LABELS = "watch_yes_labels"
+    private const val KEY_NO_LABELS = "watch_no_labels"
+    private const val KEY_IGNORED_LABELS = "watch_ignored_labels"
+    private const val KEY_PROMPTS_TOTAL = "watch_prompts_total"
+    private const val KEY_PROMPTS_TODAY = "watch_prompts_today"
+    private const val KEY_HAS_ENOUGH = "watch_has_enough_labels"
+    private const val KEY_TIMESTAMP_MS = "watch_timestamp_ms"
+
+    fun read(prefs: SharedPreferences): WatchTrainingStateSnapshot {
+        val timestampMs = prefs.getLong(KEY_TIMESTAMP_MS, 0L)
+        return WatchTrainingStateSnapshot(
+            hasData = timestampMs > 0L,
+            enabled = prefs.getBoolean(KEY_ENABLED, false),
+            engineState = prefs.getString(KEY_ENGINE_STATE, "OFF") ?: "OFF",
+            uiState = prefs.getString(KEY_UI_STATE, "OFF") ?: "OFF",
+            usableLabels = prefs.getInt(KEY_USABLE_LABELS, 0),
+            targetLabels = prefs.getInt(KEY_TARGET_LABELS, 10).coerceAtLeast(1),
+            yesLabels = prefs.getInt(KEY_YES_LABELS, 0),
+            noLabels = prefs.getInt(KEY_NO_LABELS, 0),
+            ignoredLabels = prefs.getInt(KEY_IGNORED_LABELS, 0),
+            promptsTotal = prefs.getInt(KEY_PROMPTS_TOTAL, 0),
+            promptsToday = prefs.getInt(KEY_PROMPTS_TODAY, 0),
+            hasEnoughLabels = prefs.getBoolean(KEY_HAS_ENOUGH, false),
+            timestampMs = timestampMs
+        )
+    }
+
+    fun write(prefs: SharedPreferences, snapshot: WatchTrainingStateSnapshot) {
+        prefs.edit()
+            .putBoolean(KEY_ENABLED, snapshot.enabled)
+            .putString(KEY_ENGINE_STATE, snapshot.engineState)
+            .putString(KEY_UI_STATE, snapshot.uiState)
+            .putInt(KEY_USABLE_LABELS, snapshot.usableLabels)
+            .putInt(KEY_TARGET_LABELS, snapshot.targetLabels.coerceAtLeast(1))
+            .putInt(KEY_YES_LABELS, snapshot.yesLabels)
+            .putInt(KEY_NO_LABELS, snapshot.noLabels)
+            .putInt(KEY_IGNORED_LABELS, snapshot.ignoredLabels)
+            .putInt(KEY_PROMPTS_TOTAL, snapshot.promptsTotal)
+            .putInt(KEY_PROMPTS_TODAY, snapshot.promptsToday)
+            .putBoolean(KEY_HAS_ENOUGH, snapshot.hasEnoughLabels)
+            .putLong(KEY_TIMESTAMP_MS, snapshot.timestampMs)
+            .apply()
+    }
+}
+
+/**
  * DAO for training labels.
  * [P12] getUsableLabels uses @Transaction for consistent snapshot during optimization.
  */
@@ -79,20 +156,38 @@ interface TrainingLabelDao {
     @Query("SELECT COUNT(*) FROM training_labels WHERE label != 'IGNORE'")
     suspend fun getUsableLabelCount(): Int
 
+    @Query("SELECT COUNT(*) FROM training_labels WHERE label != 'IGNORE'")
+    fun observeUsableLabelCount(): Flow<Int>
+
     @Query("SELECT COUNT(*) FROM training_labels WHERE label = 'YES_TREMOR'")
     suspend fun getPositiveLabelCount(): Int
+
+    @Query("SELECT COUNT(*) FROM training_labels WHERE label = 'YES_TREMOR'")
+    fun observePositiveLabelCount(): Flow<Int>
 
     @Query("SELECT COUNT(*) FROM training_labels WHERE label = 'NO_ACTIVE'")
     suspend fun getNegativeLabelCount(): Int
 
+    @Query("SELECT COUNT(*) FROM training_labels WHERE label = 'NO_ACTIVE'")
+    fun observeNegativeLabelCount(): Flow<Int>
+
     @Query("SELECT COUNT(*) FROM training_labels WHERE label = 'IGNORE'")
     suspend fun getIgnoredLabelCount(): Int
+
+    @Query("SELECT COUNT(*) FROM training_labels WHERE label = 'IGNORE'")
+    fun observeIgnoredLabelCount(): Flow<Int>
 
     @Query("SELECT COUNT(*) FROM training_labels")
     suspend fun getTotalLabelCount(): Int
 
+    @Query("SELECT COUNT(*) FROM training_labels")
+    fun observeTotalLabelCount(): Flow<Int>
+
     @Query("SELECT * FROM training_labels ORDER BY timestamp DESC LIMIT :limit")
     suspend fun getRecentLabels(limit: Int): List<TrainingLabelEntity>
+
+    @Query("SELECT * FROM training_labels ORDER BY timestamp DESC LIMIT :limit")
+    fun observeRecentLabels(limit: Int): Flow<List<TrainingLabelEntity>>
 
     @Query("DELETE FROM training_labels WHERE timestamp < :cutoffTimestamp")
     suspend fun deleteOlderThan(cutoffTimestamp: Long)

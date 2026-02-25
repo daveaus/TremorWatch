@@ -2,6 +2,8 @@ package com.opensource.tremorwatch.phone
 
 import android.content.Intent
 import android.util.Log
+import com.opensource.tremorwatch.phone.data.WatchTrainingStatePrefs
+import com.opensource.tremorwatch.phone.data.WatchTrainingStateSnapshot
 import com.opensource.tremorwatch.phone.data.TremorDataRepository
 import com.opensource.tremorwatch.phone.database.CalibrationDataEntity
 import com.opensource.tremorwatch.phone.database.MedicationIngestionEntity
@@ -213,6 +215,10 @@ class WatchDataListenerService : WearableListenerService() {
             messageEvent.path.startsWith(Constants.MESSAGE_PATH_TRAINING_LABEL) -> {
                 Log.d(TAG, "Processing training label message")
                 handleTrainingLabel(messageEvent)
+            }
+            messageEvent.path.startsWith(Constants.MESSAGE_PATH_TRAINING_STATE) -> {
+                Log.d(TAG, "Processing training state message")
+                handleTrainingStateMessage(messageEvent.data)
             }
             // IG-04: Silently ignore WearOS notification bridge paths (no processing needed)
             messageEvent.path.startsWith("/notification") -> {
@@ -1738,6 +1744,44 @@ class WatchDataListenerService : WearableListenerService() {
                 Log.i(TAG, "✓ Stored training label ${sample.sampleId}")
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to handle training label: ${e.message}", e)
+            }
+        }
+    }
+
+    /**
+     * Handle lightweight watch runtime training-state snapshots for phone UI.
+     * Stored to SharedPreferences (no DB write) to keep update path inexpensive.
+     */
+    private fun handleTrainingStateMessage(payload: ByteArray) {
+        serviceScope.launch(Dispatchers.IO) {
+            try {
+                val json = JSONObject(String(payload, Charsets.UTF_8))
+                val snapshot = WatchTrainingStateSnapshot(
+                    hasData = true,
+                    enabled = json.optBoolean("enabled", false),
+                    engineState = json.optString("engineState", "OFF"),
+                    uiState = json.optString("uiState", "OFF"),
+                    usableLabels = json.optInt("usableLabels", 0),
+                    targetLabels = json.optInt("targetLabels", 10).coerceAtLeast(1),
+                    yesLabels = json.optInt("yesLabels", 0),
+                    noLabels = json.optInt("noLabels", 0),
+                    ignoredLabels = json.optInt("ignoredLabels", 0),
+                    promptsTotal = json.optInt("promptsTotal", 0),
+                    promptsToday = json.optInt("promptsToday", 0),
+                    hasEnoughLabels = json.optBoolean("hasEnoughLabels", false),
+                    timestampMs = json.optLong("timestamp", System.currentTimeMillis())
+                )
+
+                val prefs = getSharedPreferences(WatchTrainingStatePrefs.PREFS_NAME, MODE_PRIVATE)
+                WatchTrainingStatePrefs.write(prefs, snapshot)
+
+                Log.i(
+                    TAG,
+                    "Stored watch training state: ui=${snapshot.uiState}, " +
+                        "usable=${snapshot.usableLabels}/${snapshot.targetLabels}"
+                )
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to handle training state message: ${e.message}", e)
             }
         }
     }
