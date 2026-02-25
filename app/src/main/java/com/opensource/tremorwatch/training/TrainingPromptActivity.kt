@@ -6,6 +6,9 @@ import android.text.format.DateFormat
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Spacer
@@ -14,8 +17,11 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -25,6 +31,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.wear.compose.foundation.lazy.ScalingLazyColumn
 import androidx.wear.compose.foundation.lazy.rememberScalingLazyListState
+import androidx.wear.compose.material.Button
+import androidx.wear.compose.material.ButtonDefaults
 import androidx.wear.compose.material.Chip
 import androidx.wear.compose.material.ChipColors
 import androidx.wear.compose.material.ChipDefaults
@@ -35,6 +43,7 @@ import androidx.wear.compose.material.TimeText
 import androidx.wear.compose.material.TimeTextDefaults
 import com.opensource.tremorwatch.shared.models.FeedbackLabel
 import com.opensource.tremorwatch.ui.theme.TremorWatchTheme
+import kotlinx.coroutines.delay
 import timber.log.Timber
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -51,6 +60,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  * - [P9] Modern screen wake APIs (setTurnScreenOn/setShowWhenLocked)
  */
 class TrainingPromptActivity : ComponentActivity() {
+
     companion object {
         const val EXTRA_SAMPLE_ID = "SAMPLE_ID"
         const val EXTRA_EVENT_TIMESTAMP_MS = "EVENT_TIMESTAMP_MS"
@@ -61,10 +71,13 @@ class TrainingPromptActivity : ComponentActivity() {
     // [P5] Nullable instead of lateinit - prevents UninitializedPropertyAccessException
     // if onCreate exits early (null SAMPLE_ID) and onDestroy calls cancel()
     private var vibrationManager: VibrationPromptManager? = null
-    // [P6] AtomicBoolean guard - prevents double-fire from button tap racing timer finish.
+    // [P6] AtomicBoolean guard - prevents double-fire from timer vs. button race.
     // Both respond() and onFinish() use compareAndSet to ensure only one executes.
     private val handled = AtomicBoolean(false)
     private var detectedMovementText = "Detected movement"
+    private var pendingSelection: FeedbackLabel? by mutableStateOf(null)
+    private var confirmationToken by mutableIntStateOf(0)
+    private var resumeTimeoutMs: Long = TrainingManager.PROMPT_TIMEOUT_MS
     private var secondsRemaining by mutableIntStateOf((TrainingManager.PROMPT_TIMEOUT_MS / 1000L).toInt())
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -81,6 +94,7 @@ class TrainingPromptActivity : ComponentActivity() {
             finish()
             return
         }
+
         val eventTimestampMs = intent.getLongExtra(EXTRA_EVENT_TIMESTAMP_MS, -1L)
         if (eventTimestampMs > 0L) {
             detectedMovementText = "Detected movement at ${formatMovementTime(eventTimestampMs)}"
@@ -94,14 +108,41 @@ class TrainingPromptActivity : ComponentActivity() {
                 TrainingPromptScreen(
                     detectedMovementText = detectedMovementText,
                     secondsRemaining = secondsRemaining,
-                    onYes = { respond(FeedbackLabel.YES_TREMOR) },
-                    onNo = { respond(FeedbackLabel.NO_ACTIVE) },
-                    onIgnore = { respond(FeedbackLabel.IGNORE) }
+                    pendingSelection = pendingSelection,
+                    confirmationToken = confirmationToken,
+                    onYes = { beginSelection(FeedbackLabel.YES_TREMOR) },
+                    onNo = { beginSelection(FeedbackLabel.NO_ACTIVE) },
+                    onIgnore = { respond(FeedbackLabel.IGNORE) },
+                    onUndoSelection = { undoSelection() },
+                    onConfirmSelection = { commitSelection() }
                 )
             }
         }
 
         startTimeout()
+    }
+
+    private fun beginSelection(label: FeedbackLabel) {
+        if (handled.get()) return
+
+        resumeTimeoutMs = (secondsRemaining * 1000L).coerceAtLeast(1000L)
+        timer?.cancel()
+        timer = null
+        pendingSelection = label
+        confirmationToken += 1
+    }
+
+    private fun undoSelection() {
+        if (handled.get()) return
+
+        pendingSelection = null
+        startTimeout(resumeTimeoutMs)
+    }
+
+    private fun commitSelection() {
+        val label = pendingSelection ?: return
+        pendingSelection = null
+        respond(label)
     }
 
     // [P6] AtomicBoolean ensures only one of respond() or onFinish() executes
@@ -114,8 +155,12 @@ class TrainingPromptActivity : ComponentActivity() {
         finish()
     }
 
-    private fun startTimeout() {
-        timer = object : CountDownTimer(TrainingManager.PROMPT_TIMEOUT_MS, 1000L) {
+    private fun startTimeout(timeoutMs: Long = TrainingManager.PROMPT_TIMEOUT_MS) {
+        timer?.cancel()
+        timer = null
+        secondsRemaining = ((timeoutMs + 999L) / 1000L).toInt()
+
+        timer = object : CountDownTimer(timeoutMs, 1000L) {
             override fun onTick(ms: Long) {
                 secondsRemaining = ((ms + 999L) / 1000L).toInt()
             }
@@ -137,6 +182,7 @@ class TrainingPromptActivity : ComponentActivity() {
             (application as? TrainingAwareApplication)?.trainingManager
                 ?.onPromptTimeout(sampleId!!)
         }
+
         timer?.cancel()
         timer = null
         vibrationManager?.cancel()
@@ -160,10 +206,24 @@ interface TrainingAwareApplication {
 private fun TrainingPromptScreen(
     detectedMovementText: String,
     secondsRemaining: Int,
+    pendingSelection: FeedbackLabel?,
+    confirmationToken: Int,
     onYes: () -> Unit,
     onNo: () -> Unit,
-    onIgnore: () -> Unit
+    onIgnore: () -> Unit,
+    onUndoSelection: () -> Unit,
+    onConfirmSelection: () -> Unit
 ) {
+    if (pendingSelection != null) {
+        TrainingPromptResultScreen(
+            selection = pendingSelection,
+            confirmationToken = confirmationToken,
+            onUndo = onUndoSelection,
+            onTimeout = onConfirmSelection
+        )
+        return
+    }
+
     val listState = rememberScalingLazyListState()
 
     Scaffold(
@@ -216,7 +276,7 @@ private fun TrainingPromptScreen(
 
             item {
                 PromptActionChip(
-                    title = "Yes",
+                    title = "\uD83D\uDC4B Yes",
                     subtitle = "Tremor was present",
                     onClick = onYes,
                     colors = ChipDefaults.chipColors(
@@ -227,7 +287,7 @@ private fun TrainingPromptScreen(
 
             item {
                 PromptActionChip(
-                    title = "No",
+                    title = "\uD83D\uDC4D No",
                     subtitle = "Movement only, no tremor",
                     onClick = onNo,
                     colors = ChipDefaults.chipColors(
@@ -278,4 +338,105 @@ private fun PromptActionChip(
             .fillMaxWidth()
             .padding(vertical = 2.dp)
     )
+}
+
+private data class SelectionUi(
+    val emoji: String,
+    val title: String,
+    val subtitle: String,
+    val backgroundColor: Color
+)
+
+@Composable
+private fun TrainingPromptResultScreen(
+    selection: FeedbackLabel,
+    confirmationToken: Int,
+    onUndo: () -> Unit,
+    onTimeout: () -> Unit
+) {
+    var timeRemaining by remember(confirmationToken) { mutableIntStateOf(5) }
+
+    LaunchedEffect(confirmationToken) {
+        while (timeRemaining > 0) {
+            delay(1000L)
+            timeRemaining--
+        }
+        onTimeout()
+    }
+
+    val ui = when (selection) {
+        FeedbackLabel.YES_TREMOR -> SelectionUi(
+            emoji = "\uD83D\uDC4B",
+            title = "Marked as Tremor",
+            subtitle = "Tap UNDO if this was accidental",
+            backgroundColor = Color(0xFF1B5E20).copy(alpha = 0.2f)
+        )
+        FeedbackLabel.NO_ACTIVE -> SelectionUi(
+            emoji = "\uD83D\uDC4D",
+            title = "Marked as No Tremor",
+            subtitle = "Tap UNDO if this was accidental",
+            backgroundColor = Color(0xFF0D47A1).copy(alpha = 0.2f)
+        )
+        else -> SelectionUi(
+            emoji = "\u23ED",
+            title = "Prompt Skipped",
+            subtitle = "Returning...",
+            backgroundColor = Color(0xFF424242).copy(alpha = 0.2f)
+        )
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(ui.backgroundColor),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(16.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
+        ) {
+            Text(
+                text = ui.emoji,
+                fontSize = 46.sp
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = ui.title,
+                style = MaterialTheme.typography.title1,
+                textAlign = TextAlign.Center
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = ui.subtitle,
+                fontSize = 11.sp,
+                color = MaterialTheme.colors.secondary,
+                textAlign = TextAlign.Center
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = "Saving in ${timeRemaining}s...",
+                fontSize = 10.sp,
+                color = MaterialTheme.colors.secondary
+            )
+            Spacer(modifier = Modifier.height(16.dp))
+            Button(
+                onClick = onUndo,
+                colors = ButtonDefaults.buttonColors(
+                    backgroundColor = Color(0xFFFF5722)
+                ),
+                modifier = Modifier
+                    .fillMaxWidth(0.85f)
+                    .height(48.dp)
+            ) {
+                Text(
+                    text = "UNDO",
+                    fontSize = 18.sp,
+                    color = Color.White
+                )
+            }
+        }
+    }
 }
