@@ -1846,7 +1846,7 @@ fun SettingsScreen(
             )
         }
 
-        // Algorithm Settings Card
+        // Algorithm & Training Card
         Card(
             modifier = Modifier.fillMaxWidth(),
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)
@@ -1861,11 +1861,11 @@ fun SettingsScreen(
             ) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = "Algorithm Settings",
+                        text = "Algorithm & Training",
                         style = MaterialTheme.typography.titleMedium
                     )
                     Text(
-                        text = "Customize tremor detection parameters",
+                        text = "Detection settings, training mode, and label insights",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onPrimaryContainer
                     )

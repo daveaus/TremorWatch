@@ -2,9 +2,12 @@ package com.opensource.tremorwatch.phone.config
 
 import android.content.Context
 import android.content.SharedPreferences
+import com.opensource.tremorwatch.shared.Constants
 import com.opensource.tremorwatch.shared.models.TremorDetectionConfig
 import com.google.android.gms.tasks.Tasks
 import com.google.android.gms.wearable.DataClient
+import com.google.android.gms.wearable.MessageClient
+import com.google.android.gms.wearable.NodeClient
 import com.google.android.gms.wearable.PutDataMapRequest
 import com.google.android.gms.wearable.Wearable
 import kotlinx.coroutines.*
@@ -31,6 +34,8 @@ class TremorConfigManager(private val context: Context) {
         context.getSharedPreferences("tremor_config", Context.MODE_PRIVATE)
 
     private val dataClient: DataClient = Wearable.getDataClient(context)
+    private val messageClient: MessageClient = Wearable.getMessageClient(context)
+    private val nodeClient: NodeClient = Wearable.getNodeClient(context)
 
     private val json = Json {
         prettyPrint = true
@@ -47,6 +52,7 @@ class TremorConfigManager(private val context: Context) {
         private const val KEY_PROFILES = "saved_profiles"
         private const val KEY_SYNC_STATUS = "sync_status"
         private const val KEY_LAST_SYNC_TIME = "last_sync_time"
+        private const val KEY_TRAINING_MODE_ENABLED = "training_mode_enabled"
         private const val DATA_PATH = "/tremor_detection_config"
     }
 
@@ -121,6 +127,15 @@ class TremorConfigManager(private val context: Context) {
      */
     fun getLastSyncTime(): Long {
         return prefs.getLong(KEY_LAST_SYNC_TIME, 0L)
+    }
+
+    fun isTrainingModeEnabled(): Boolean {
+        return prefs.getBoolean(KEY_TRAINING_MODE_ENABLED, false)
+    }
+
+    suspend fun setTrainingModeEnabled(enabled: Boolean): Boolean {
+        prefs.edit().putBoolean(KEY_TRAINING_MODE_ENABLED, enabled).apply()
+        return sendTrainingModeToWatch(enabled)
     }
 
     /**
@@ -333,5 +348,46 @@ class TremorConfigManager(private val context: Context) {
         val configList = profiles.values.toList()
         val jsonArray = json.encodeToString(configList)
         prefs.edit().putString(KEY_PROFILES, jsonArray).apply()
+    }
+
+    private suspend fun sendTrainingModeToWatch(enabled: Boolean): Boolean {
+        return try {
+            val nodes = withContext(Dispatchers.IO) {
+                Tasks.await(nodeClient.connectedNodes)
+            }
+            if (nodes.isEmpty()) {
+                Timber.w("No connected watch nodes for training mode sync")
+                return false
+            }
+
+            val payload = """{"enabled":$enabled,"timestamp":${System.currentTimeMillis()}}"""
+                .toByteArray(Charsets.UTF_8)
+
+            var sentToAnyNode = false
+            for (node in nodes) {
+                try {
+                    withContext(Dispatchers.IO) {
+                        Tasks.await(
+                            messageClient.sendMessage(
+                                node.id,
+                                Constants.MESSAGE_PATH_TRAINING_STATE,
+                                payload
+                            )
+                        )
+                    }
+                    sentToAnyNode = true
+                } catch (e: Exception) {
+                    Timber.w(e, "Failed to send training mode update to node ${node.displayName}")
+                }
+            }
+
+            if (!sentToAnyNode) {
+                Timber.w("Training mode update failed for all connected nodes")
+            }
+            sentToAnyNode
+        } catch (e: Exception) {
+            Timber.w(e, "Unable to sync training mode to watch")
+            false
+        }
     }
 }

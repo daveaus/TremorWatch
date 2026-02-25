@@ -30,6 +30,7 @@ import android.os.Looper
 import android.os.PowerManager
 import android.os.SystemClock
 import android.provider.Settings
+import android.text.format.DateFormat
 import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -49,18 +50,24 @@ import androidx.core.content.ContextCompat
 import androidx.wear.compose.material.*
 import com.opensource.tremorwatch.shared.Constants
 import com.opensource.tremorwatch.shared.models.RatingSource
+import com.opensource.tremorwatch.shared.models.TrainingState
 import com.opensource.tremorwatch.shared.models.TremorBatch
 import com.opensource.tremorwatch.ui.RatingScreen
 import com.opensource.tremorwatch.ui.theme.TremorWatchTheme
 import com.opensource.tremorwatch.config.MonitoringState
 import com.opensource.tremorwatch.config.DataConfig
 import com.opensource.tremorwatch.data.PreferencesRepository
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.first
 import com.opensource.tremorwatch.network.NetworkDetector
 import com.opensource.tremorwatch.receivers.ServiceWatchdogReceiver
 import com.opensource.tremorwatch.receivers.UploadAlarmReceiver
 import com.opensource.tremorwatch.receivers.BatchRetryAlarmReceiver
 import com.opensource.tremorwatch.service.TremorService
+import com.opensource.tremorwatch.training.TrainingAwareApplication
+import com.opensource.tremorwatch.training.TrainingLogEntry
+import com.opensource.tremorwatch.training.TrainingManager
+import com.opensource.tremorwatch.training.TrainingStatusSnapshot
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.*
@@ -461,6 +468,10 @@ fun MainScreen(
     // Battery optimization status
     var isBatteryOptimized by remember { mutableStateOf(false) }
     var medicationLogStatus by remember { mutableStateOf<String?>(null) }
+    val trainingModeEnabled = MonitoringState.isTrainingMode(context)
+    val trainingManager = (context.applicationContext as? TrainingAwareApplication)?.trainingManager
+    var trainingStatus by remember { mutableStateOf(TrainingManager.getPersistedStatusSnapshot(context)) }
+    var trainingLog by remember { mutableStateOf(TrainingManager.getPersistedRecentLog(context, 5)) }
 
     // Check calibration status
     LaunchedEffect(Unit) {
@@ -514,6 +525,19 @@ fun MainScreen(
                 isBatteryOptimized = !powerManager.isIgnoringBatteryOptimizations(context.packageName)
             }
             delay(5000) // Check every 5 seconds
+        }
+    }
+
+    LaunchedEffect(trainingManager, trainingModeEnabled) {
+        if (!trainingModeEnabled || trainingManager == null) {
+            trainingStatus = TrainingManager.getPersistedStatusSnapshot(context)
+            trainingLog = TrainingManager.getPersistedRecentLog(context, 5)
+            return@LaunchedEffect
+        }
+
+        trainingManager.statusUpdates().collect { snapshot ->
+            trainingStatus = snapshot
+            trainingLog = trainingManager.getRecentLogEntries(5)
         }
     }
 
@@ -583,6 +607,56 @@ fun MainScreen(
                     "⚠ Pause when not worn: ON",
                     fontSize = 8.sp,
                     color = MaterialTheme.colors.error,
+                    textAlign = TextAlign.Center
+                )
+            }
+        }
+
+        if (trainingModeEnabled) {
+            Spacer(modifier = Modifier.height(8.dp))
+            Chip(
+                onClick = onShowConfig,
+                label = {
+                    Text(
+                        "Training ${formatTrainingUiState(trainingStatus.uiState)}",
+                        fontSize = 13.sp,
+                        modifier = Modifier.fillMaxWidth(),
+                        textAlign = TextAlign.Center
+                    )
+                },
+                secondaryLabel = {
+                    Text(
+                        "Labels ${trainingStatus.usableLabelCount}/${trainingStatus.targetUsableLabelCount}  Y:${trainingStatus.yesLabelCount} N:${trainingStatus.noLabelCount}",
+                        fontSize = 9.sp,
+                        modifier = Modifier.fillMaxWidth(),
+                        textAlign = TextAlign.Center
+                    )
+                },
+                icon = { Text("🧠", fontSize = 16.sp) },
+                colors = if (trainingStatus.hasEnoughLabels) {
+                    ChipDefaults.primaryChipColors()
+                } else {
+                    ChipDefaults.secondaryChipColors()
+                },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 2.dp)
+            )
+            Text(
+                if (trainingStatus.hasEnoughLabels) {
+                    "Enough labels collected for personalization"
+                } else {
+                    "${(trainingStatus.targetUsableLabelCount - trainingStatus.usableLabelCount).coerceAtLeast(0)} more usable labels needed"
+                },
+                fontSize = 9.sp,
+                color = if (trainingStatus.hasEnoughLabels) MaterialTheme.colors.primary else MaterialTheme.colors.secondary,
+                textAlign = TextAlign.Center
+            )
+            trainingLog.firstOrNull()?.let { latest ->
+                Text(
+                    text = "Latest: ${formatTrainingLogLine(context, latest)}",
+                    fontSize = 9.sp,
+                    color = MaterialTheme.colors.secondary,
                     textAlign = TextAlign.Center
                 )
             }
@@ -763,6 +837,32 @@ fun MainScreen(
     }
 }
 
+private fun formatTrainingUiState(state: TrainingState): String {
+    return when (state) {
+        TrainingState.WARMUP -> "WARMUP"
+        TrainingState.ACTIVE -> "ACTIVE"
+        TrainingState.PERSONALIZED -> "PERSONALIZED"
+        TrainingState.READY_TO_FINALIZE -> "READY"
+        TrainingState.OFF -> "OFF"
+    }
+}
+
+private fun formatTrainingLogLine(context: Context, entry: TrainingLogEntry): String {
+    val time = formatWatchClockTime(context, entry.timestampMs)
+    val emoji = when (entry.label) {
+        com.opensource.tremorwatch.shared.models.FeedbackLabel.YES_TREMOR -> "👋"
+        com.opensource.tremorwatch.shared.models.FeedbackLabel.NO_ACTIVE -> "👍"
+        com.opensource.tremorwatch.shared.models.FeedbackLabel.IGNORE -> "⏭"
+        null -> "•"
+    }
+    return "$time  $emoji ${entry.detail}"
+}
+
+private fun formatWatchClockTime(context: Context, timestampMs: Long): String {
+    val pattern = if (DateFormat.is24HourFormat(context)) "HH:mm" else "h:mm a"
+    return SimpleDateFormat(pattern, Locale.getDefault()).format(Date(timestampMs))
+}
+
 /**
  * Wrapper for CalibrationScreen that manages calibration state with BaselineManager
  */
@@ -856,11 +956,28 @@ fun ConfigScreen(
     val context = androidx.compose.ui.platform.LocalContext.current
     var pauseWhenNotWorn by remember { mutableStateOf(MonitoringState.isPauseWhenNotWorn(context)) }
     var storeLocally by remember { mutableStateOf(DataConfig.isLocalStorageEnabled(context)) }
+    var trainingMode by remember { mutableStateOf(MonitoringState.isTrainingMode(context)) }
+    val trainingManager = (context.applicationContext as? TrainingAwareApplication)?.trainingManager
+    var trainingStatus by remember { mutableStateOf(TrainingManager.getPersistedStatusSnapshot(context)) }
+    var trainingLog by remember { mutableStateOf(TrainingManager.getPersistedRecentLog(context, 8)) }
 
     // Calibration status
     val baselineManager = remember { com.opensource.tremorwatch.engine.BaselineManager(context) }
     var hasCalibrated by remember { mutableStateOf(baselineManager.hasCompletedCalibration()) }
     var hoursSinceCalibration by remember { mutableStateOf(baselineManager.getHoursSinceCalibration()) }
+
+    LaunchedEffect(trainingManager, trainingMode) {
+        if (!trainingMode || trainingManager == null) {
+            trainingStatus = TrainingManager.getPersistedStatusSnapshot(context)
+            trainingLog = TrainingManager.getPersistedRecentLog(context, 8)
+            return@LaunchedEffect
+        }
+
+        trainingManager.statusUpdates().collect { snapshot ->
+            trainingStatus = snapshot
+            trainingLog = trainingManager.getRecentLogEntries(8)
+        }
+    }
 
     Column(
         modifier = Modifier
@@ -936,7 +1053,6 @@ fun ConfigScreen(
         )
 
         // Training Mode Toggle - Active Learning
-        var trainingMode by remember { mutableStateOf(MonitoringState.isTrainingMode(context)) }
         ToggleChip(
             checked = trainingMode,
             onCheckedChange = {
@@ -963,6 +1079,66 @@ fun ConfigScreen(
                 .fillMaxWidth()
                 .padding(vertical = 2.dp)
         )
+
+        if (trainingMode) {
+            Chip(
+                onClick = {},
+                label = {
+                    Text(
+                        "State: ${formatTrainingUiState(trainingStatus.uiState)}",
+                        fontSize = 13.sp,
+                        modifier = Modifier.fillMaxWidth(),
+                        textAlign = TextAlign.Center
+                    )
+                },
+                secondaryLabel = {
+                    Text(
+                        "Usable ${trainingStatus.usableLabelCount}/${trainingStatus.targetUsableLabelCount}  Y:${trainingStatus.yesLabelCount} N:${trainingStatus.noLabelCount}  I:${trainingStatus.ignoredLabelCount}",
+                        fontSize = 9.sp,
+                        modifier = Modifier.fillMaxWidth(),
+                        textAlign = TextAlign.Center
+                    )
+                },
+                icon = { Text("🧠", fontSize = 15.sp) },
+                colors = if (trainingStatus.hasEnoughLabels) {
+                    ChipDefaults.primaryChipColors()
+                } else {
+                    ChipDefaults.secondaryChipColors()
+                },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 2.dp)
+            )
+
+            Text(
+                text = if (trainingStatus.hasEnoughLabels) {
+                    "Enough labels collected"
+                } else {
+                    "${(trainingStatus.targetUsableLabelCount - trainingStatus.usableLabelCount).coerceAtLeast(0)} usable labels remaining"
+                },
+                fontSize = 9.sp,
+                color = if (trainingStatus.hasEnoughLabels) MaterialTheme.colors.primary else MaterialTheme.colors.secondary,
+                textAlign = TextAlign.Center
+            )
+
+            if (trainingLog.isEmpty()) {
+                Text(
+                    text = "No training prompts logged yet",
+                    fontSize = 9.sp,
+                    color = MaterialTheme.colors.secondary,
+                    textAlign = TextAlign.Center
+                )
+            } else {
+                trainingLog.take(5).forEach { entry ->
+                    Text(
+                        text = formatTrainingLogLine(context, entry),
+                        fontSize = 9.sp,
+                        color = MaterialTheme.colors.secondary,
+                        textAlign = TextAlign.Center
+                    )
+                }
+            }
+        }
 
         // Calibration button - full width chip
         Chip(

@@ -85,6 +85,12 @@ interface TrainingLabelDao {
     @Query("SELECT COUNT(*) FROM training_labels WHERE label = 'NO_ACTIVE'")
     suspend fun getNegativeLabelCount(): Int
 
+    @Query("SELECT COUNT(*) FROM training_labels WHERE label = 'IGNORE'")
+    suspend fun getIgnoredLabelCount(): Int
+
+    @Query("SELECT COUNT(*) FROM training_labels")
+    suspend fun getTotalLabelCount(): Int
+
     @Query("SELECT * FROM training_labels ORDER BY timestamp DESC LIMIT :limit")
     suspend fun getRecentLabels(limit: Int): List<TrainingLabelEntity>
 

@@ -11,15 +11,50 @@ import androidx.core.app.NotificationCompat
 import com.opensource.tremorwatch.TremorFFT
 import com.opensource.tremorwatch.WatchDataSender
 import com.opensource.tremorwatch.shared.models.*
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import timber.log.Timber
 import java.io.File
 import java.text.SimpleDateFormat
+import java.time.LocalDate
 import java.time.LocalTime
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicInteger
+
+@Serializable
+data class TrainingLogEntry(
+    val timestampMs: Long,
+    val type: String,
+    val label: FeedbackLabel? = null,
+    val detail: String
+)
+
+data class TrainingStatusSnapshot(
+    val modeEnabled: Boolean,
+    val engineState: TrainingState,
+    val uiState: TrainingState,
+    val usableLabelCount: Int,
+    val yesLabelCount: Int,
+    val noLabelCount: Int,
+    val ignoredLabelCount: Int,
+    val targetUsableLabelCount: Int,
+    val hasEnoughLabels: Boolean,
+    val promptsTotal: Int,
+    val promptsToday: Int,
+    val pendingPromptCount: Int,
+    val trainingStartTimeMs: Long?,
+    val trainingDaysElapsed: Int,
+    val targetTrainingDays: Int,
+    val lastPromptTimeMs: Long?,
+    val lastFeedbackTimeMs: Long?,
+    val lastFeedbackLabel: FeedbackLabel?
+)
 
 /**
  * Orchestrates the Active Learning training process on the watch side.
@@ -44,6 +79,21 @@ class TrainingManager(
     companion object {
         private const val TRAINING_PROMPT_CHANNEL_ID = "training_prompt_channel"
         private const val TRAINING_PROMPT_CHANNEL_NAME = "Training Prompts"
+        private const val TRAINING_INSIGHT_PREFS = "training_insight"
+        private const val KEY_YES_COUNT = "yes_count"
+        private const val KEY_NO_COUNT = "no_count"
+        private const val KEY_IGNORE_COUNT = "ignore_count"
+        private const val KEY_TOTAL_PROMPTS = "total_prompts"
+        private const val KEY_PROMPTS_TODAY = "prompts_today"
+        private const val KEY_PENDING_PROMPTS = "pending_prompts"
+        private const val KEY_LAST_PROMPT_MS = "last_prompt_ms"
+        private const val KEY_LAST_FEEDBACK_MS = "last_feedback_ms"
+        private const val KEY_LAST_FEEDBACK_LABEL = "last_feedback_label"
+        private const val KEY_TRAINING_START_MS = "training_start_ms"
+        private const val KEY_ENGINE_STATE = "engine_state"
+        private const val KEY_LOG_JSON = "log_json"
+        private const val MAX_LOG_ENTRIES = 32
+
         const val PROMPT_COOLDOWN_MS = 10 * 60 * 1000L     // 10 minutes
         const val MAX_PROMPTS_PER_HOUR = 4
         const val MAX_PROMPTS_PER_DAY = 20
@@ -52,6 +102,89 @@ class TrainingManager(
         const val QUIET_HOUR_END = 7                         // 7 AM
         const val MIN_LABELS_FOR_ACTIVE = 10                 // 5Y + 5N minimum
         const val TRAINING_DURATION_DAYS = 7
+
+        private val statusJson = Json { ignoreUnknownKeys = true }
+
+        fun getPersistedStatusSnapshot(context: Context): TrainingStatusSnapshot {
+            val prefs = context.getSharedPreferences(TRAINING_INSIGHT_PREFS, Context.MODE_PRIVATE)
+            val yes = prefs.getInt(KEY_YES_COUNT, 0)
+            val no = prefs.getInt(KEY_NO_COUNT, 0)
+            val ignored = prefs.getInt(KEY_IGNORE_COUNT, 0)
+            val usable = yes + no
+            val target = MIN_LABELS_FOR_ACTIVE
+            val enough = usable >= target
+            val promptsTotal = prefs.getInt(KEY_TOTAL_PROMPTS, 0)
+            val startMsRaw = prefs.getLong(KEY_TRAINING_START_MS, 0L)
+            val startMs = if (startMsRaw > 0L) startMsRaw else null
+            val now = System.currentTimeMillis()
+            val daysElapsed = startMs?.let { ((now - it) / (24L * 60L * 60L * 1000L)).toInt().coerceAtLeast(0) } ?: 0
+
+            val engineState = parseTrainingState(
+                prefs.getString(KEY_ENGINE_STATE, TrainingState.OFF.name),
+                TrainingState.OFF
+            )
+
+            val uiState = when {
+                engineState == TrainingState.OFF -> TrainingState.OFF
+                enough -> TrainingState.PERSONALIZED
+                promptsTotal == 0 -> TrainingState.WARMUP
+                else -> TrainingState.ACTIVE
+            }
+
+            val lastPromptRaw = prefs.getLong(KEY_LAST_PROMPT_MS, 0L)
+            val lastFeedbackRaw = prefs.getLong(KEY_LAST_FEEDBACK_MS, 0L)
+            val lastFeedbackLabel = parseFeedbackLabel(prefs.getString(KEY_LAST_FEEDBACK_LABEL, null))
+
+            return TrainingStatusSnapshot(
+                modeEnabled = engineState != TrainingState.OFF,
+                engineState = engineState,
+                uiState = uiState,
+                usableLabelCount = usable,
+                yesLabelCount = yes,
+                noLabelCount = no,
+                ignoredLabelCount = ignored,
+                targetUsableLabelCount = target,
+                hasEnoughLabels = enough,
+                promptsTotal = promptsTotal,
+                promptsToday = prefs.getInt(KEY_PROMPTS_TODAY, 0),
+                pendingPromptCount = prefs.getInt(KEY_PENDING_PROMPTS, 0),
+                trainingStartTimeMs = startMs,
+                trainingDaysElapsed = daysElapsed,
+                targetTrainingDays = TRAINING_DURATION_DAYS,
+                lastPromptTimeMs = if (lastPromptRaw > 0L) lastPromptRaw else null,
+                lastFeedbackTimeMs = if (lastFeedbackRaw > 0L) lastFeedbackRaw else null,
+                lastFeedbackLabel = lastFeedbackLabel
+            )
+        }
+
+        fun getPersistedRecentLog(context: Context, limit: Int = 8): List<TrainingLogEntry> {
+            val prefs = context.getSharedPreferences(TRAINING_INSIGHT_PREFS, Context.MODE_PRIVATE)
+            val logJson = prefs.getString(KEY_LOG_JSON, null) ?: return emptyList()
+            return try {
+                statusJson.decodeFromString<List<TrainingLogEntry>>(logJson)
+                    .takeLast(limit.coerceAtLeast(0))
+                    .asReversed()
+            } catch (e: Exception) {
+                Timber.w(e, "Failed to parse persisted training log")
+                emptyList()
+            }
+        }
+
+        private fun parseTrainingState(raw: String?, fallback: TrainingState): TrainingState {
+            return try {
+                if (raw.isNullOrBlank()) fallback else TrainingState.valueOf(raw)
+            } catch (_: IllegalArgumentException) {
+                fallback
+            }
+        }
+
+        private fun parseFeedbackLabel(raw: String?): FeedbackLabel? {
+            return try {
+                if (raw.isNullOrBlank()) null else FeedbackLabel.valueOf(raw)
+            } catch (_: IllegalArgumentException) {
+                null
+            }
+        }
     }
 
     private val shadowDetector = ShadowDetector(sampleRate)
@@ -71,12 +204,39 @@ class TrainingManager(
     private var lastPromptTime = 0L
     private val promptsThisHour = AtomicInteger(0)
     private val promptsToday = AtomicInteger(0)
+    private val totalPromptCount = AtomicInteger(0)
+    private val yesLabelCount = AtomicInteger(0)
+    private val noLabelCount = AtomicInteger(0)
+    private val ignoredLabelCount = AtomicInteger(0)
     private var currentHour = -1
     private var currentDay = -1
+    private var trainingStartTimeMs: Long? = null
+    private var lastFeedbackTimeMs: Long? = null
+    private var lastFeedbackLabel: FeedbackLabel? = null
 
     // [P3] ConcurrentHashMap — accessed from sensor thread (requestUserFeedback),
     // UI thread (onUserFeedback), and settings thread (stopTraining).
     private val pendingFeedback = java.util.concurrent.ConcurrentHashMap<String, TrainingSample>()
+
+    private val statusPrefs = context.getSharedPreferences(TRAINING_INSIGHT_PREFS, Context.MODE_PRIVATE)
+    private val trainingLog = ArrayDeque<TrainingLogEntry>()
+    private val statusState = MutableStateFlow(getPersistedStatusSnapshot(context))
+
+    init {
+        hydratePersistedInsight()
+        refreshStatusSnapshot()
+    }
+
+    fun statusUpdates(): StateFlow<TrainingStatusSnapshot> = statusState.asStateFlow()
+
+    fun getStatusSnapshot(): TrainingStatusSnapshot = statusState.value
+
+    fun getRecentLogEntries(limit: Int = 8): List<TrainingLogEntry> {
+        val bounded = limit.coerceAtLeast(0)
+        return synchronized(trainingLog) {
+            trainingLog.takeLast(bounded).asReversed()
+        }
+    }
 
     // ──── State Management ────
 
@@ -85,10 +245,15 @@ class TrainingManager(
         experimentalConfig = shadowDetector.createExperimentalConfig(baseConfig)
         promptsToday.set(0)
         promptsThisHour.set(0)
+        if (trainingStartTimeMs == null) {
+            trainingStartTimeMs = System.currentTimeMillis()
+        }
 
         // [P1] Flush any labels that were orphaned from a previous session
         flushPendingBackups()
 
+        appendLog(type = "TRAINING", detail = "Training mode enabled")
+        refreshStatusSnapshot()
         Timber.i("Training started in WARMUP state")
     }
 
@@ -96,6 +261,8 @@ class TrainingManager(
         state = TrainingState.OFF
         experimentalConfig = null
         pendingFeedback.clear()
+        appendLog(type = "TRAINING", detail = "Training mode disabled")
+        refreshStatusSnapshot()
         Timber.i("Training stopped")
     }
 
@@ -237,6 +404,15 @@ class TrainingManager(
         pendingFeedback[sample.sampleId] = sample
         lastPromptTime = timestamp
         incrementPromptCounters()
+        if (state == TrainingState.WARMUP) {
+            state = TrainingState.ACTIVE
+        }
+        appendLog(
+            type = "PROMPT",
+            detail = "Prompted: ${sample.triggerReason}",
+            timestampMs = timestamp
+        )
+        refreshStatusSnapshot()
 
         // Launch the prompt activity
         launchPromptActivity(sample.sampleId, sample.timestamp)
@@ -289,20 +465,27 @@ class TrainingManager(
 
     private fun resetCountersIfNeeded() {
         val now = LocalTime.now()
+        var changed = false
         if (now.hour != currentHour) {
             currentHour = now.hour
             promptsThisHour.set(0)
+            changed = true
         }
-        val today = java.time.LocalDate.now().dayOfYear
+        val today = LocalDate.now().dayOfYear
         if (today != currentDay) {
             currentDay = today
             promptsToday.set(0)
+            changed = true
+        }
+        if (changed) {
+            refreshStatusSnapshot()
         }
     }
 
     private fun incrementPromptCounters() {
         promptsThisHour.incrementAndGet()
         promptsToday.incrementAndGet()
+        totalPromptCount.incrementAndGet()
     }
 
     private fun launchPromptActivity(sampleId: String, eventTimestampMs: Long) {
@@ -385,6 +568,7 @@ class TrainingManager(
 
         val sample = pendingFeedback.remove(sampleId) ?: run {
             Timber.w("Sample $sampleId not found in pending feedback")
+            refreshStatusSnapshot()
             return
         }
 
@@ -402,6 +586,25 @@ class TrainingManager(
         dataSender.sendTrainingSample(labeled) {
             clearLocalBackup(labeled.sampleId)
         }
+
+        when (label) {
+            FeedbackLabel.YES_TREMOR -> yesLabelCount.incrementAndGet()
+            FeedbackLabel.NO_ACTIVE -> noLabelCount.incrementAndGet()
+            FeedbackLabel.IGNORE -> ignoredLabelCount.incrementAndGet()
+        }
+        lastFeedbackTimeMs = now
+        lastFeedbackLabel = label
+        appendLog(
+            type = "LABEL",
+            label = label,
+            detail = when (label) {
+                FeedbackLabel.YES_TREMOR -> "User marked tremor"
+                FeedbackLabel.NO_ACTIVE -> "User marked no tremor"
+                FeedbackLabel.IGNORE -> "Prompt ignored"
+            },
+            timestampMs = now
+        )
+        refreshStatusSnapshot()
 
         Timber.i("Feedback recorded: $label for sample $sampleId " +
                  "(latency=${labeled.responseLatencyMs}ms)")
@@ -460,6 +663,123 @@ class TrainingManager(
                 file.delete()  // Remove corrupt files to prevent infinite retry
             }
         }
+    }
+
+    private fun hydratePersistedInsight() {
+        val persisted = getPersistedStatusSnapshot(context)
+        yesLabelCount.set(persisted.yesLabelCount)
+        noLabelCount.set(persisted.noLabelCount)
+        ignoredLabelCount.set(persisted.ignoredLabelCount)
+        totalPromptCount.set(persisted.promptsTotal)
+        promptsToday.set(persisted.promptsToday)
+        lastPromptTime = persisted.lastPromptTimeMs ?: 0L
+        trainingStartTimeMs = persisted.trainingStartTimeMs
+        lastFeedbackTimeMs = persisted.lastFeedbackTimeMs
+        lastFeedbackLabel = persisted.lastFeedbackLabel
+
+        val logJson = statusPrefs.getString(KEY_LOG_JSON, null)
+        if (!logJson.isNullOrBlank()) {
+            try {
+                val decoded = statusJson.decodeFromString<List<TrainingLogEntry>>(logJson)
+                synchronized(trainingLog) {
+                    trainingLog.clear()
+                    decoded.takeLast(MAX_LOG_ENTRIES).forEach { trainingLog.addLast(it) }
+                }
+            } catch (e: Exception) {
+                Timber.w(e, "Failed to hydrate persisted training log")
+                synchronized(trainingLog) { trainingLog.clear() }
+            }
+        }
+    }
+
+    private fun appendLog(
+        type: String,
+        detail: String,
+        label: FeedbackLabel? = null,
+        timestampMs: Long = System.currentTimeMillis()
+    ) {
+        synchronized(trainingLog) {
+            if (trainingLog.size >= MAX_LOG_ENTRIES) {
+                trainingLog.removeFirst()
+            }
+            trainingLog.addLast(
+                TrainingLogEntry(
+                    timestampMs = timestampMs,
+                    type = type,
+                    label = label,
+                    detail = detail
+                )
+            )
+            persistLogLocked()
+        }
+    }
+
+    private fun persistLogLocked() {
+        try {
+            val encoded = statusJson.encodeToString(trainingLog.toList())
+            statusPrefs.edit().putString(KEY_LOG_JSON, encoded).apply()
+        } catch (e: Exception) {
+            Timber.w(e, "Failed to persist training log")
+        }
+    }
+
+    private fun buildStatusSnapshot(): TrainingStatusSnapshot {
+        val yes = yesLabelCount.get()
+        val no = noLabelCount.get()
+        val ignored = ignoredLabelCount.get()
+        val usable = yes + no
+        val hasEnough = usable >= MIN_LABELS_FOR_ACTIVE
+        val totalPrompts = totalPromptCount.get()
+        val startMs = trainingStartTimeMs
+        val daysElapsed = startMs?.let {
+            ((System.currentTimeMillis() - it) / (24L * 60L * 60L * 1000L)).toInt().coerceAtLeast(0)
+        } ?: 0
+
+        val uiState = when {
+            state == TrainingState.OFF -> TrainingState.OFF
+            hasEnough -> TrainingState.PERSONALIZED
+            totalPrompts == 0 -> TrainingState.WARMUP
+            else -> TrainingState.ACTIVE
+        }
+
+        return TrainingStatusSnapshot(
+            modeEnabled = state != TrainingState.OFF,
+            engineState = state,
+            uiState = uiState,
+            usableLabelCount = usable,
+            yesLabelCount = yes,
+            noLabelCount = no,
+            ignoredLabelCount = ignored,
+            targetUsableLabelCount = MIN_LABELS_FOR_ACTIVE,
+            hasEnoughLabels = hasEnough,
+            promptsTotal = totalPrompts,
+            promptsToday = promptsToday.get(),
+            pendingPromptCount = pendingFeedback.size,
+            trainingStartTimeMs = startMs,
+            trainingDaysElapsed = daysElapsed,
+            targetTrainingDays = TRAINING_DURATION_DAYS,
+            lastPromptTimeMs = if (lastPromptTime > 0L) lastPromptTime else null,
+            lastFeedbackTimeMs = lastFeedbackTimeMs,
+            lastFeedbackLabel = lastFeedbackLabel
+        )
+    }
+
+    private fun refreshStatusSnapshot() {
+        val snapshot = buildStatusSnapshot()
+        statusState.value = snapshot
+        statusPrefs.edit()
+            .putInt(KEY_YES_COUNT, snapshot.yesLabelCount)
+            .putInt(KEY_NO_COUNT, snapshot.noLabelCount)
+            .putInt(KEY_IGNORE_COUNT, snapshot.ignoredLabelCount)
+            .putInt(KEY_TOTAL_PROMPTS, snapshot.promptsTotal)
+            .putInt(KEY_PROMPTS_TODAY, snapshot.promptsToday)
+            .putInt(KEY_PENDING_PROMPTS, snapshot.pendingPromptCount)
+            .putLong(KEY_LAST_PROMPT_MS, snapshot.lastPromptTimeMs ?: 0L)
+            .putLong(KEY_LAST_FEEDBACK_MS, snapshot.lastFeedbackTimeMs ?: 0L)
+            .putString(KEY_LAST_FEEDBACK_LABEL, snapshot.lastFeedbackLabel?.name)
+            .putLong(KEY_TRAINING_START_MS, snapshot.trainingStartTimeMs ?: 0L)
+            .putString(KEY_ENGINE_STATE, snapshot.engineState.name)
+            .apply()
     }
 
     /**

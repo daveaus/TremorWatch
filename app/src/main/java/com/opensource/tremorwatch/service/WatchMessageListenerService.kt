@@ -1,6 +1,7 @@
 package com.opensource.tremorwatch.service
 
 import android.util.Log
+import com.opensource.tremorwatch.config.MonitoringState
 import com.opensource.tremorwatch.shared.Constants
 import com.google.android.gms.wearable.MessageEvent
 import com.google.android.gms.wearable.Wearable
@@ -14,6 +15,7 @@ import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import java.io.BufferedReader
 import java.io.InputStreamReader
+import org.json.JSONObject
 
 /**
  * Listens for messages from the phone app.
@@ -34,6 +36,9 @@ class WatchMessageListenerService : WearableListenerService() {
         when (messageEvent.path) {
             Constants.MESSAGE_PATH_LOG_REQUEST -> {
                 handleLogRequest(messageEvent.sourceNodeId)
+            }
+            Constants.MESSAGE_PATH_TRAINING_STATE -> {
+                handleTrainingStateUpdate(messageEvent.data)
             }
             else -> {
                 Log.w(TAG, "Unknown message path: ${messageEvent.path}")
@@ -95,6 +100,19 @@ class WatchMessageListenerService : WearableListenerService() {
             }
         } catch (e: Exception) {
             "Failed to get logs: ${e.message}"
+        }
+    }
+
+    private fun handleTrainingStateUpdate(data: ByteArray) {
+        scope.launch {
+            try {
+                val payload = JSONObject(String(data, Charsets.UTF_8))
+                val enabled = payload.optBoolean("enabled", false)
+                MonitoringState.setTrainingMode(applicationContext, enabled)
+                Log.i(TAG, "Training mode updated from phone: enabled=$enabled")
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to apply training state update: ${e.message}", e)
+            }
         }
     }
 

@@ -27,6 +27,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.opensource.tremorwatch.phone.config.TremorConfigManager
+import com.opensource.tremorwatch.phone.data.TrainingLabelEntity
+import com.opensource.tremorwatch.phone.database.TremorRoomDatabase
 import com.opensource.tremorwatch.shared.models.TremorDetectionConfig
 import kotlinx.coroutines.launch
 import timber.log.Timber
@@ -55,8 +57,27 @@ fun TremorDetectionSettingsScreen(
     var showSuccessSnackbar by remember { mutableStateOf(false) }
     var successMessage by remember { mutableStateOf("") }
     var isSyncing by remember { mutableStateOf(false) }
+    val trainingDao = remember { TremorRoomDatabase.getDatabase(context).trainingLabelDao() }
+    var trainingModeEnabled by remember { mutableStateOf(configManager.isTrainingModeEnabled()) }
+    var isSyncingTrainingMode by remember { mutableStateOf(false) }
+    var trainingUsableLabels by remember { mutableStateOf(0) }
+    var trainingPositiveLabels by remember { mutableStateOf(0) }
+    var trainingNegativeLabels by remember { mutableStateOf(0) }
+    var trainingIgnoredLabels by remember { mutableStateOf(0) }
+    var trainingTotalLabels by remember { mutableStateOf(0) }
+    var recentTrainingLabels by remember { mutableStateOf<List<TrainingLabelEntity>>(emptyList()) }
+    var trainingStatusMessage by remember { mutableStateOf<String?>(null) }
 
     val snackbarHostState = remember { SnackbarHostState() }
+
+    suspend fun refreshTrainingInsights() {
+        trainingUsableLabels = trainingDao.getUsableLabelCount()
+        trainingPositiveLabels = trainingDao.getPositiveLabelCount()
+        trainingNegativeLabels = trainingDao.getNegativeLabelCount()
+        trainingIgnoredLabels = trainingDao.getIgnoredLabelCount()
+        trainingTotalLabels = trainingDao.getTotalLabelCount()
+        recentTrainingLabels = trainingDao.getRecentLabels(limit = 8)
+    }
 
     // File export/import launchers
     val exportLauncher = rememberLauncherForActivityResult(
@@ -111,11 +132,15 @@ fun TremorDetectionSettingsScreen(
         }
     }
 
+    LaunchedEffect(Unit) {
+        refreshTrainingInsights()
+    }
+
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
             TopAppBar(
-                title = { Text("Detection Settings") },
+                title = { Text("Algorithm & Training") },
                 navigationIcon = {
                     IconButton(onClick = onNavigateBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back")
@@ -217,6 +242,46 @@ fun TremorDetectionSettingsScreen(
             // Current Profile Info
             item {
                 ProfileInfoCard(config, syncStatus, hasChanges = config != originalConfig)
+            }
+
+            item {
+                TrainingInsightsSection(
+                    trainingModeEnabled = trainingModeEnabled,
+                    isSyncingTrainingMode = isSyncingTrainingMode,
+                    usableLabels = trainingUsableLabels,
+                    positiveLabels = trainingPositiveLabels,
+                    negativeLabels = trainingNegativeLabels,
+                    ignoredLabels = trainingIgnoredLabels,
+                    totalLabels = trainingTotalLabels,
+                    recentLabels = recentTrainingLabels,
+                    statusMessage = trainingStatusMessage,
+                    onToggleTraining = { enabled ->
+                        trainingModeEnabled = enabled
+                        scope.launch {
+                            isSyncingTrainingMode = true
+                            val synced = configManager.setTrainingModeEnabled(enabled)
+                            isSyncingTrainingMode = false
+                            trainingStatusMessage = if (synced) {
+                                "Training mode synced to watch"
+                            } else {
+                                "Saved locally. Watch sync pending."
+                            }
+                            successMessage = if (enabled) {
+                                "Training mode enabled"
+                            } else {
+                                "Training mode disabled"
+                            }
+                            showSuccessSnackbar = true
+                            refreshTrainingInsights()
+                        }
+                    },
+                    onRefresh = {
+                        scope.launch {
+                            refreshTrainingInsights()
+                            trainingStatusMessage = "Training status refreshed"
+                        }
+                    }
+                )
             }
 
             // Presets
@@ -343,6 +408,124 @@ fun TremorDetectionSettingsScreen(
             }
         )
     }
+}
+
+@Composable
+private fun TrainingInsightsSection(
+    trainingModeEnabled: Boolean,
+    isSyncingTrainingMode: Boolean,
+    usableLabels: Int,
+    positiveLabels: Int,
+    negativeLabels: Int,
+    ignoredLabels: Int,
+    totalLabels: Int,
+    recentLabels: List<TrainingLabelEntity>,
+    statusMessage: String?,
+    onToggleTraining: (Boolean) -> Unit,
+    onRefresh: () -> Unit
+) {
+    val targetLabels = 10
+    val stateLabel = when {
+        !trainingModeEnabled -> "OFF"
+        usableLabels >= targetLabels -> "PERSONALIZED"
+        usableLabels == 0 -> "WARMUP"
+        else -> "ACTIVE"
+    }
+
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Training", style = MaterialTheme.typography.titleSmall)
+                    Text(
+                        "State: $stateLabel",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(
+                    checked = trainingModeEnabled,
+                    onCheckedChange = onToggleTraining,
+                    enabled = !isSyncingTrainingMode
+                )
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                "Usable labels: $usableLabels/$targetLabels  (Yes: $positiveLabels, No: $negativeLabels)",
+                style = MaterialTheme.typography.bodySmall
+            )
+            Text(
+                "Ignored: $ignoredLabels  Total prompts: $totalLabels",
+                style = MaterialTheme.typography.bodySmall
+            )
+
+            Spacer(modifier = Modifier.height(8.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    if (usableLabels >= targetLabels) {
+                        "Training threshold reached"
+                    } else {
+                        "${(targetLabels - usableLabels).coerceAtLeast(0)} more usable labels needed"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (usableLabels >= targetLabels) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    }
+                )
+                TextButton(onClick = onRefresh) {
+                    Text("Refresh")
+                }
+            }
+
+            statusMessage?.let { message ->
+                Text(
+                    message,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+            Text("Recent labels", style = MaterialTheme.typography.titleSmall)
+            if (recentLabels.isEmpty()) {
+                Text(
+                    "No training labels received yet.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            } else {
+                recentLabels.take(6).forEach { label ->
+                    Text(
+                        formatTrainingLabelRow(label),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+    }
+}
+
+private fun formatTrainingLabelRow(label: TrainingLabelEntity): String {
+    val time = SimpleDateFormat("MMM d, h:mm a", Locale.getDefault()).format(Date(label.timestamp))
+    val labelText = when (label.label) {
+        "YES_TREMOR" -> "👋 Tremor"
+        "NO_ACTIVE" -> "👍 No Tremor"
+        "IGNORE" -> "⏭ Ignored"
+        else -> label.label
+    }
+    return "$time - $labelText"
 }
 
 @Composable
