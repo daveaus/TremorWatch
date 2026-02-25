@@ -66,6 +66,7 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.core.content.FileProvider
 import androidx.compose.ui.Alignment
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -130,6 +131,10 @@ import com.opensource.tremorwatch.phone.ui.dialogs.DisclaimerDialog
 import com.opensource.tremorwatch.phone.ui.dialogs.DisclaimerManager
 import com.opensource.tremorwatch.phone.ui.TremorDetectionSettingsScreen
 import com.opensource.tremorwatch.phone.ui.RatingConfigScreen
+import com.opensource.tremorwatch.phone.config.TremorConfigManager
+import com.opensource.tremorwatch.phone.data.WatchTrainingStatePrefs
+import com.opensource.tremorwatch.phone.data.WatchTrainingStateSnapshot
+import com.opensource.tremorwatch.phone.database.TremorRoomDatabase
 import com.opensource.tremorwatch.phone.health.HealthConnectContextRepository
 import com.opensource.tremorwatch.phone.health.HealthContextSnapshot
 
@@ -286,6 +291,7 @@ fun TremorWatchApp() {
             "main" -> MainScreen(
                 onNavigateToSettings = { currentScreen = "settings" },
                 onNavigateToStats = { currentScreen = "stats" },
+                onNavigateToAlgorithmSettings = { currentScreen = "algorithm_settings" },
                 locationPermissionLauncher = locationPermissionLauncher
             )
             "settings" -> SettingsScreen(
@@ -312,6 +318,7 @@ fun TremorWatchApp() {
 fun MainScreen(
     onNavigateToSettings: () -> Unit,
     onNavigateToStats: () -> Unit,
+    onNavigateToAlgorithmSettings: () -> Unit,
     locationPermissionLauncher: androidx.activity.result.ActivityResultLauncher<Array<String>>
 ) {
     val context = LocalContext.current
@@ -399,9 +406,36 @@ fun MainScreen(
     var quickStatsLoading by remember { mutableStateOf(false) }
     var quickStatsStatusText by remember { mutableStateOf<String?>(null) }
     var quickStatsStatusIsError by remember { mutableStateOf(false) }
+    val configManager = remember(context) { TremorConfigManager(context) }
+    val trainingDao = remember(context) { TremorRoomDatabase.getDatabase(context).trainingLabelDao() }
+    val phoneTrainingUsableLabels by trainingDao.observeUsableLabelCount().collectAsState(initial = 0)
+    val phoneTrainingPositiveLabels by trainingDao.observePositiveLabelCount().collectAsState(initial = 0)
+    val phoneTrainingNegativeLabels by trainingDao.observeNegativeLabelCount().collectAsState(initial = 0)
+    val phoneTrainingIgnoredLabels by trainingDao.observeIgnoredLabelCount().collectAsState(initial = 0)
+    val phoneTrainingTotalPrompts by trainingDao.observeTotalLabelCount().collectAsState(initial = 0)
+    val watchTrainingPrefs = remember(context) {
+        context.getSharedPreferences(WatchTrainingStatePrefs.PREFS_NAME, Context.MODE_PRIVATE)
+    }
+    var watchTrainingState by remember {
+        mutableStateOf(WatchTrainingStatePrefs.read(watchTrainingPrefs))
+    }
 
     val heartbeatPrefs = remember(context) {
         context.getSharedPreferences("heartbeat_prefs", Context.MODE_PRIVATE)
+    }
+
+    DisposableEffect(watchTrainingPrefs) {
+        val listener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { prefs, _ ->
+            watchTrainingState = WatchTrainingStatePrefs.read(prefs)
+        }
+        watchTrainingPrefs.registerOnSharedPreferenceChangeListener(listener)
+        onDispose {
+            watchTrainingPrefs.unregisterOnSharedPreferenceChangeListener(listener)
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        configManager.requestTrainingStateFromWatch()
     }
 
     // Initial load
@@ -1529,9 +1563,204 @@ fun MainScreen(
                 }
             }
         }
+
+        TrainingHomeCard(
+            watchTrainingState = watchTrainingState,
+            phoneUsableLabels = phoneTrainingUsableLabels,
+            phonePositiveLabels = phoneTrainingPositiveLabels,
+            phoneNegativeLabels = phoneTrainingNegativeLabels,
+            phoneIgnoredLabels = phoneTrainingIgnoredLabels,
+            phoneTotalPrompts = phoneTrainingTotalPrompts,
+            onOpenTraining = onNavigateToAlgorithmSettings
+        )
     }
 }
     }
+
+@Composable
+private fun TrainingHomeCard(
+    watchTrainingState: WatchTrainingStateSnapshot,
+    phoneUsableLabels: Int,
+    phonePositiveLabels: Int,
+    phoneNegativeLabels: Int,
+    phoneIgnoredLabels: Int,
+    phoneTotalPrompts: Int,
+    onOpenTraining: () -> Unit
+) {
+    val targetLabels = if (watchTrainingState.hasData) {
+        watchTrainingState.targetLabels.coerceAtLeast(1)
+    } else {
+        10
+    }
+    val usableLabels = if (watchTrainingState.hasData) watchTrainingState.usableLabels else phoneUsableLabels
+    val positiveLabels = if (watchTrainingState.hasData) watchTrainingState.yesLabels else phonePositiveLabels
+    val negativeLabels = if (watchTrainingState.hasData) watchTrainingState.noLabels else phoneNegativeLabels
+    val ignoredLabels = if (watchTrainingState.hasData) watchTrainingState.ignoredLabels else phoneIgnoredLabels
+    val totalPrompts = if (watchTrainingState.hasData) watchTrainingState.promptsTotal else phoneTotalPrompts
+    val hasEnoughLabels = if (watchTrainingState.hasData) {
+        watchTrainingState.hasEnoughLabels
+    } else {
+        usableLabels >= targetLabels
+    }
+    val hasStarted = if (watchTrainingState.hasData) {
+        watchTrainingState.enabled || watchTrainingState.trainingStartTimeMs > 0L || totalPrompts > 0
+    } else {
+        totalPrompts > 0 || usableLabels > 0
+    }
+    val stateLabel = if (watchTrainingState.hasData) {
+        watchTrainingState.uiState
+    } else if (hasEnoughLabels) {
+        "PERSONALIZED"
+    } else if (hasStarted) {
+        "ACTIVE"
+    } else {
+        "OFF"
+    }
+    val remainingLabels = (targetLabels - usableLabels).coerceAtLeast(0)
+    val runningFor = formatTrainingElapsedDuration(
+        if (watchTrainingState.hasData) watchTrainingState.trainingStartTimeMs else 0L
+    )
+    val completedAt = formatTrainingAbsoluteTime(
+        when {
+            watchTrainingState.trainingCompletedTimeMs > 0L -> watchTrainingState.trainingCompletedTimeMs
+            hasEnoughLabels && watchTrainingState.timestampMs > 0L -> watchTrainingState.timestampMs
+            else -> 0L
+        }
+    )
+    val watchFreshness = formatTrainingWatchFreshness(watchTrainingState.timestampMs)
+    val lastFeedback = watchTrainingState.lastFeedbackLabel.takeIf { it.isNotBlank() }
+    val lastFeedbackTime = formatTrainingAbsoluteTime(watchTrainingState.lastFeedbackTimeMs)
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = if (hasEnoughLabels) {
+                MaterialTheme.colorScheme.primaryContainer
+            } else {
+                MaterialTheme.colorScheme.surfaceVariant
+            }
+        )
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Text(
+                text = "Training",
+                style = MaterialTheme.typography.titleMedium
+            )
+
+            when {
+                !hasStarted -> {
+                    Text(
+                        text = "Not started. Enable training to collect labels and personalize detection.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text(
+                        text = "Goal: $targetLabels usable labels (Yes Tremor + No Active).",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+
+                hasEnoughLabels -> {
+                    Text(
+                        text = "Complete ($stateLabel)",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    if (completedAt != null) {
+                        Text(
+                            text = "Completed: $completedAt",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Text(
+                        text = "Results: $usableLabels/$targetLabels usable (Yes: $positiveLabels, No: $negativeLabels, Ignored: $ignoredLabels).",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text(
+                        text = "Prompts answered: $totalPrompts",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+
+                else -> {
+                    Text(
+                        text = "In progress ($stateLabel)",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    if (runningFor != null) {
+                        Text(
+                            text = "Running for: $runningFor",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Text(
+                        text = "Progress: $usableLabels/$targetLabels usable (Yes: $positiveLabels, No: $negativeLabels).",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text(
+                        text = "$remainingLabels more usable labels needed.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    if (lastFeedback != null && lastFeedbackTime != null) {
+                        Text(
+                            text = "Last label: ${lastFeedback.replace('_', ' ')} at $lastFeedbackTime",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+
+            if (watchFreshness != null) {
+                Text(
+                    text = watchFreshness,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+
+            Button(onClick = onOpenTraining) {
+                Text(if (hasStarted) "View Training Details" else "Start Training")
+            }
+        }
+    }
+}
+
+private fun formatTrainingElapsedDuration(startTimeMs: Long): String? {
+    if (startTimeMs <= 0L) return null
+    val elapsedMs = (System.currentTimeMillis() - startTimeMs).coerceAtLeast(0L)
+    val totalMinutes = elapsedMs / (60L * 1000L)
+    val days = totalMinutes / (24L * 60L)
+    val hours = (totalMinutes % (24L * 60L)) / 60L
+    val minutes = totalMinutes % 60L
+    return when {
+        days > 0L -> "${days}d ${hours}h"
+        hours > 0L -> "${hours}h ${minutes}m"
+        else -> "${minutes}m"
+    }
+}
+
+private fun formatTrainingAbsoluteTime(timestampMs: Long): String? {
+    if (timestampMs <= 0L) return null
+    return SimpleDateFormat("MMM d, h:mm a", Locale.getDefault()).format(Date(timestampMs))
+}
+
+private fun formatTrainingWatchFreshness(timestampMs: Long): String? {
+    if (timestampMs <= 0L) return null
+    val updateTime = SimpleDateFormat("h:mm a", Locale.getDefault()).format(Date(timestampMs))
+    val ageMs = (System.currentTimeMillis() - timestampMs).coerceAtLeast(0L)
+    val freshness = if (ageMs > 15L * 60L * 1000L) "stale" else "live"
+    return "Watch update: $updateTime ($freshness)"
+}
 
 @Composable
 fun SettingsScreen(

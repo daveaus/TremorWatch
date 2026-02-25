@@ -850,6 +850,11 @@ class WatchDataSender(private val context: Context) {
         promptsTotal: Int,
         promptsToday: Int,
         hasEnoughLabels: Boolean,
+        trainingStartTimeMs: Long,
+        trainingCompletedTimeMs: Long,
+        lastPromptTimeMs: Long,
+        lastFeedbackTimeMs: Long,
+        lastFeedbackLabel: String,
         onComplete: ((Boolean) -> Unit)? = null
     ) {
         scope.launch {
@@ -873,6 +878,11 @@ class WatchDataSender(private val context: Context) {
                     put("promptsTotal", promptsTotal)
                     put("promptsToday", promptsToday)
                     put("hasEnoughLabels", hasEnoughLabels)
+                    put("trainingStartTimeMs", trainingStartTimeMs)
+                    put("trainingCompletedTimeMs", trainingCompletedTimeMs)
+                    put("lastPromptTimeMs", lastPromptTimeMs)
+                    put("lastFeedbackTimeMs", lastFeedbackTimeMs)
+                    put("lastFeedbackLabel", lastFeedbackLabel)
                     put("timestamp", System.currentTimeMillis())
                 }.toString().toByteArray(Charsets.UTF_8)
 

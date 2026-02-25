@@ -612,7 +612,7 @@ fun MainScreen(
             }
         }
 
-        if (trainingModeEnabled) {
+        if (false) {
             Spacer(modifier = Modifier.height(8.dp))
             Chip(
                 onClick = onShowConfig,
@@ -827,6 +827,16 @@ fun MainScreen(
                 .padding(vertical = 2.dp)
         )
 
+        // Always-visible training card on home screen (kept as the last card).
+        Spacer(modifier = Modifier.height(8.dp))
+        TrainingHomeCard(
+            context = context,
+            trainingModeEnabled = trainingModeEnabled,
+            trainingStatus = trainingStatus,
+            trainingLog = trainingLog,
+            onOpenTraining = onShowConfig
+        )
+
         Spacer(modifier = Modifier.height(4.dp))
         Text(
             "v${BuildConfig.VERSION_NAME}",
@@ -835,6 +845,149 @@ fun MainScreen(
             textAlign = TextAlign.Center
         )
     }
+}
+
+@Composable
+private fun TrainingHomeCard(
+    context: Context,
+    trainingModeEnabled: Boolean,
+    trainingStatus: TrainingStatusSnapshot,
+    trainingLog: List<TrainingLogEntry>,
+    onOpenTraining: () -> Unit
+) {
+    val hasAnyTrainingData = trainingStatus.promptsTotal > 0 || trainingStatus.usableLabelCount > 0
+    val isComplete = trainingStatus.hasEnoughLabels
+    val isInProgress = trainingModeEnabled && !isComplete
+    val isNotStarted = !trainingModeEnabled && !hasAnyTrainingData
+
+    val title = when {
+        isNotStarted -> "Training: Not Started"
+        isComplete -> "Training: Complete"
+        isInProgress -> "Training: In Progress"
+        else -> "Training: Paused"
+    }
+
+    val subtitle = when {
+        isNotStarted -> "Personalize tremor detection with quick labels"
+        isComplete -> "Results ready for personalized tracking"
+        isInProgress -> "Running ${formatElapsedSince(trainingStatus.trainingStartTimeMs)}"
+        else -> "Resume training to keep improving"
+    }
+
+    val actionText = when {
+        isNotStarted -> "Start Training"
+        isComplete -> "View Results"
+        isInProgress -> "Open Training"
+        else -> "Resume Training"
+    }
+
+    Chip(
+        onClick = onOpenTraining,
+        label = {
+            Text(
+                title,
+                fontSize = 13.sp,
+                modifier = Modifier.fillMaxWidth(),
+                textAlign = TextAlign.Center
+            )
+        },
+        secondaryLabel = {
+            Text(
+                subtitle,
+                fontSize = 9.sp,
+                modifier = Modifier.fillMaxWidth(),
+                textAlign = TextAlign.Center
+            )
+        },
+        icon = { Text("T", fontSize = 14.sp) },
+        colors = if (isComplete) ChipDefaults.primaryChipColors() else ChipDefaults.secondaryChipColors(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 2.dp)
+    )
+
+    when {
+        isNotStarted -> {
+            Text(
+                text = "Goal: ${trainingStatus.targetUsableLabelCount} usable labels",
+                fontSize = 9.sp,
+                color = MaterialTheme.colors.secondary,
+                textAlign = TextAlign.Center
+            )
+        }
+        isInProgress -> {
+            Text(
+                text = "Labels ${trainingStatus.usableLabelCount}/${trainingStatus.targetUsableLabelCount}  " +
+                    "Y:${trainingStatus.yesLabelCount} N:${trainingStatus.noLabelCount} I:${trainingStatus.ignoredLabelCount}",
+                fontSize = 9.sp,
+                color = MaterialTheme.colors.secondary,
+                textAlign = TextAlign.Center
+            )
+            Text(
+                text = "${(trainingStatus.targetUsableLabelCount - trainingStatus.usableLabelCount).coerceAtLeast(0)} more usable labels needed",
+                fontSize = 9.sp,
+                color = MaterialTheme.colors.secondary,
+                textAlign = TextAlign.Center
+            )
+            trainingLog.firstOrNull()?.let { latest ->
+                Text(
+                    text = "Latest: ${formatTrainingLogLine(context, latest)}",
+                    fontSize = 9.sp,
+                    color = MaterialTheme.colors.secondary,
+                    textAlign = TextAlign.Center
+                )
+            }
+        }
+        isComplete -> {
+            Text(
+                text = "Completed ${formatCompletedAt(context, trainingStatus)}",
+                fontSize = 9.sp,
+                color = MaterialTheme.colors.primary,
+                textAlign = TextAlign.Center
+            )
+            Text(
+                text = "Results: Y:${trainingStatus.yesLabelCount} N:${trainingStatus.noLabelCount}  " +
+                    "Prompts:${trainingStatus.promptsTotal}",
+                fontSize = 9.sp,
+                color = MaterialTheme.colors.secondary,
+                textAlign = TextAlign.Center
+            )
+        }
+        else -> {
+            Text(
+                text = "Current: ${formatTrainingUiState(trainingStatus.uiState)}  " +
+                    "Labels ${trainingStatus.usableLabelCount}/${trainingStatus.targetUsableLabelCount}",
+                fontSize = 9.sp,
+                color = MaterialTheme.colors.secondary,
+                textAlign = TextAlign.Center
+            )
+            trainingLog.firstOrNull()?.let { latest ->
+                Text(
+                    text = "Latest: ${formatTrainingLogLine(context, latest)}",
+                    fontSize = 9.sp,
+                    color = MaterialTheme.colors.secondary,
+                    textAlign = TextAlign.Center
+                )
+            }
+        }
+    }
+
+    Chip(
+        onClick = onOpenTraining,
+        label = {
+            Text(
+                actionText,
+                fontSize = 12.sp,
+                modifier = Modifier.fillMaxWidth(),
+                textAlign = TextAlign.Center
+            )
+        },
+        icon = { Text("Go", fontSize = 10.sp) },
+        colors = ChipDefaults.secondaryChipColors(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 2.dp)
+    )
 }
 
 private fun formatTrainingUiState(state: TrainingState): String {
@@ -856,6 +1009,21 @@ private fun formatTrainingLogLine(context: Context, entry: TrainingLogEntry): St
         null -> "•"
     }
     return "$time  $emoji ${entry.detail}"
+}
+
+private fun formatElapsedSince(startTimestampMs: Long?): String {
+    if (startTimestampMs == null || startTimestampMs <= 0L) return "not started"
+    val elapsedMs = (System.currentTimeMillis() - startTimestampMs).coerceAtLeast(0L)
+    val totalHours = elapsedMs / (60L * 60L * 1000L)
+    val days = totalHours / 24L
+    val hours = totalHours % 24L
+    return if (days > 0L) "${days}d ${hours}h" else "${hours}h"
+}
+
+private fun formatCompletedAt(context: Context, status: TrainingStatusSnapshot): String {
+    val completionTimestamp =
+        status.lastFeedbackTimeMs ?: status.lastPromptTimeMs ?: status.trainingStartTimeMs
+    return completionTimestamp?.let { formatWatchClockTime(context, it) } ?: "recently"
 }
 
 private fun formatWatchClockTime(context: Context, timestampMs: Long): String {

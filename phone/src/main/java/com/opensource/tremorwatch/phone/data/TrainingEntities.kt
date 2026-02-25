@@ -73,7 +73,12 @@ data class WatchTrainingStateSnapshot(
     val promptsTotal: Int = 0,
     val promptsToday: Int = 0,
     val hasEnoughLabels: Boolean = false,
-    val timestampMs: Long = 0L
+    val timestampMs: Long = 0L,
+    val trainingStartTimeMs: Long = 0L,
+    val trainingCompletedTimeMs: Long = 0L,
+    val lastPromptTimeMs: Long = 0L,
+    val lastFeedbackTimeMs: Long = 0L,
+    val lastFeedbackLabel: String = ""
 )
 
 /**
@@ -93,6 +98,11 @@ object WatchTrainingStatePrefs {
     private const val KEY_PROMPTS_TODAY = "watch_prompts_today"
     private const val KEY_HAS_ENOUGH = "watch_has_enough_labels"
     private const val KEY_TIMESTAMP_MS = "watch_timestamp_ms"
+    private const val KEY_TRAINING_START_MS = "watch_training_start_ms"
+    private const val KEY_TRAINING_COMPLETED_MS = "watch_training_completed_ms"
+    private const val KEY_LAST_PROMPT_MS = "watch_last_prompt_ms"
+    private const val KEY_LAST_FEEDBACK_MS = "watch_last_feedback_ms"
+    private const val KEY_LAST_FEEDBACK_LABEL = "watch_last_feedback_label"
 
     fun read(prefs: SharedPreferences): WatchTrainingStateSnapshot {
         val timestampMs = prefs.getLong(KEY_TIMESTAMP_MS, 0L)
@@ -109,7 +119,12 @@ object WatchTrainingStatePrefs {
             promptsTotal = prefs.getInt(KEY_PROMPTS_TOTAL, 0),
             promptsToday = prefs.getInt(KEY_PROMPTS_TODAY, 0),
             hasEnoughLabels = prefs.getBoolean(KEY_HAS_ENOUGH, false),
-            timestampMs = timestampMs
+            timestampMs = timestampMs,
+            trainingStartTimeMs = prefs.getLong(KEY_TRAINING_START_MS, 0L),
+            trainingCompletedTimeMs = prefs.getLong(KEY_TRAINING_COMPLETED_MS, 0L),
+            lastPromptTimeMs = prefs.getLong(KEY_LAST_PROMPT_MS, 0L),
+            lastFeedbackTimeMs = prefs.getLong(KEY_LAST_FEEDBACK_MS, 0L),
+            lastFeedbackLabel = prefs.getString(KEY_LAST_FEEDBACK_LABEL, "") ?: ""
         )
     }
 
@@ -127,6 +142,11 @@ object WatchTrainingStatePrefs {
             .putInt(KEY_PROMPTS_TODAY, snapshot.promptsToday)
             .putBoolean(KEY_HAS_ENOUGH, snapshot.hasEnoughLabels)
             .putLong(KEY_TIMESTAMP_MS, snapshot.timestampMs)
+            .putLong(KEY_TRAINING_START_MS, snapshot.trainingStartTimeMs)
+            .putLong(KEY_TRAINING_COMPLETED_MS, snapshot.trainingCompletedTimeMs)
+            .putLong(KEY_LAST_PROMPT_MS, snapshot.lastPromptTimeMs)
+            .putLong(KEY_LAST_FEEDBACK_MS, snapshot.lastFeedbackTimeMs)
+            .putString(KEY_LAST_FEEDBACK_LABEL, snapshot.lastFeedbackLabel)
             .apply()
     }
 }

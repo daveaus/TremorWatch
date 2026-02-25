@@ -1769,7 +1769,12 @@ class WatchDataListenerService : WearableListenerService() {
                     promptsTotal = json.optInt("promptsTotal", 0),
                     promptsToday = json.optInt("promptsToday", 0),
                     hasEnoughLabels = json.optBoolean("hasEnoughLabels", false),
-                    timestampMs = json.optLong("timestamp", System.currentTimeMillis())
+                    timestampMs = json.optLong("timestamp", System.currentTimeMillis()),
+                    trainingStartTimeMs = json.optLong("trainingStartTimeMs", 0L),
+                    trainingCompletedTimeMs = json.optLong("trainingCompletedTimeMs", 0L),
+                    lastPromptTimeMs = json.optLong("lastPromptTimeMs", 0L),
+                    lastFeedbackTimeMs = json.optLong("lastFeedbackTimeMs", 0L),
+                    lastFeedbackLabel = json.optString("lastFeedbackLabel", "")
                 )
 
                 val prefs = getSharedPreferences(WatchTrainingStatePrefs.PREFS_NAME, MODE_PRIVATE)

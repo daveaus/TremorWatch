@@ -49,6 +49,7 @@ data class TrainingStatusSnapshot(
     val promptsToday: Int,
     val pendingPromptCount: Int,
     val trainingStartTimeMs: Long?,
+    val trainingCompletedTimeMs: Long?,
     val trainingDaysElapsed: Int,
     val targetTrainingDays: Int,
     val lastPromptTimeMs: Long?,
@@ -90,6 +91,7 @@ class TrainingManager(
         private const val KEY_LAST_FEEDBACK_MS = "last_feedback_ms"
         private const val KEY_LAST_FEEDBACK_LABEL = "last_feedback_label"
         private const val KEY_TRAINING_START_MS = "training_start_ms"
+        private const val KEY_TRAINING_COMPLETED_MS = "training_completed_ms"
         private const val KEY_ENGINE_STATE = "engine_state"
         private const val KEY_LOG_JSON = "log_json"
         private const val MAX_LOG_ENTRIES = 32
@@ -117,6 +119,8 @@ class TrainingManager(
             val promptsTotal = prefs.getInt(KEY_TOTAL_PROMPTS, 0)
             val startMsRaw = prefs.getLong(KEY_TRAINING_START_MS, 0L)
             val startMs = if (startMsRaw > 0L) startMsRaw else null
+            val completedMsRaw = prefs.getLong(KEY_TRAINING_COMPLETED_MS, 0L)
+            val completedMs = if (completedMsRaw > 0L) completedMsRaw else null
             val now = System.currentTimeMillis()
             val daysElapsed = startMs?.let { ((now - it) / (24L * 60L * 60L * 1000L)).toInt().coerceAtLeast(0) } ?: 0
 
@@ -150,6 +154,7 @@ class TrainingManager(
                 promptsToday = prefs.getInt(KEY_PROMPTS_TODAY, 0),
                 pendingPromptCount = prefs.getInt(KEY_PENDING_PROMPTS, 0),
                 trainingStartTimeMs = startMs,
+                trainingCompletedTimeMs = completedMs,
                 trainingDaysElapsed = daysElapsed,
                 targetTrainingDays = TRAINING_DURATION_DAYS,
                 lastPromptTimeMs = if (lastPromptRaw > 0L) lastPromptRaw else null,
@@ -212,6 +217,7 @@ class TrainingManager(
     private var currentHour = -1
     private var currentDay = -1
     private var trainingStartTimeMs: Long? = null
+    private var trainingCompletedTimeMs: Long? = null
     private var lastFeedbackTimeMs: Long? = null
     private var lastFeedbackLabel: FeedbackLabel? = null
     private var lastStatusSyncFingerprint: String? = null
@@ -677,6 +683,7 @@ class TrainingManager(
         promptsToday.set(persisted.promptsToday)
         lastPromptTime = persisted.lastPromptTimeMs ?: 0L
         trainingStartTimeMs = persisted.trainingStartTimeMs
+        trainingCompletedTimeMs = persisted.trainingCompletedTimeMs
         lastFeedbackTimeMs = persisted.lastFeedbackTimeMs
         lastFeedbackLabel = persisted.lastFeedbackLabel
 
@@ -732,8 +739,15 @@ class TrainingManager(
         val ignored = ignoredLabelCount.get()
         val usable = yes + no
         val hasEnough = usable >= MIN_LABELS_FOR_ACTIVE
+        if (hasEnough && trainingCompletedTimeMs == null) {
+            trainingCompletedTimeMs = System.currentTimeMillis()
+            appendLog(type = "TRAINING", detail = "Training threshold reached")
+        } else if (!hasEnough) {
+            trainingCompletedTimeMs = null
+        }
         val totalPrompts = totalPromptCount.get()
         val startMs = trainingStartTimeMs
+        val completedMs = trainingCompletedTimeMs
         val daysElapsed = startMs?.let {
             ((System.currentTimeMillis() - it) / (24L * 60L * 60L * 1000L)).toInt().coerceAtLeast(0)
         } ?: 0
@@ -759,6 +773,7 @@ class TrainingManager(
             promptsToday = promptsToday.get(),
             pendingPromptCount = pendingFeedback.size,
             trainingStartTimeMs = startMs,
+            trainingCompletedTimeMs = completedMs,
             trainingDaysElapsed = daysElapsed,
             targetTrainingDays = TRAINING_DURATION_DAYS,
             lastPromptTimeMs = if (lastPromptTime > 0L) lastPromptTime else null,
@@ -781,6 +796,7 @@ class TrainingManager(
             .putLong(KEY_LAST_FEEDBACK_MS, snapshot.lastFeedbackTimeMs ?: 0L)
             .putString(KEY_LAST_FEEDBACK_LABEL, snapshot.lastFeedbackLabel?.name)
             .putLong(KEY_TRAINING_START_MS, snapshot.trainingStartTimeMs ?: 0L)
+            .putLong(KEY_TRAINING_COMPLETED_MS, snapshot.trainingCompletedTimeMs ?: 0L)
             .putString(KEY_ENGINE_STATE, snapshot.engineState.name)
             .apply()
         maybeSyncStatusToPhone(snapshot)
@@ -804,7 +820,12 @@ class TrainingManager(
             ignoredLabels = snapshot.ignoredLabelCount,
             promptsTotal = snapshot.promptsTotal,
             promptsToday = snapshot.promptsToday,
-            hasEnoughLabels = snapshot.hasEnoughLabels
+            hasEnoughLabels = snapshot.hasEnoughLabels,
+            trainingStartTimeMs = snapshot.trainingStartTimeMs ?: 0L,
+            trainingCompletedTimeMs = snapshot.trainingCompletedTimeMs ?: 0L,
+            lastPromptTimeMs = snapshot.lastPromptTimeMs ?: 0L,
+            lastFeedbackTimeMs = snapshot.lastFeedbackTimeMs ?: 0L,
+            lastFeedbackLabel = snapshot.lastFeedbackLabel?.name ?: ""
         ) { success ->
             if (success) {
                 lastStatusSyncFingerprint = fingerprint
@@ -825,7 +846,12 @@ class TrainingManager(
             snapshot.promptsTotal,
             snapshot.promptsToday,
             snapshot.pendingPromptCount,
-            snapshot.hasEnoughLabels
+            snapshot.hasEnoughLabels,
+            snapshot.trainingStartTimeMs ?: 0L,
+            snapshot.trainingCompletedTimeMs ?: 0L,
+            snapshot.lastPromptTimeMs ?: 0L,
+            snapshot.lastFeedbackTimeMs ?: 0L,
+            snapshot.lastFeedbackLabel?.name ?: ""
         ).joinToString("|")
     }
 

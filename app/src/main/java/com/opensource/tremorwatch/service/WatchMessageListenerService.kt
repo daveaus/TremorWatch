@@ -5,6 +5,7 @@ import com.opensource.tremorwatch.training.TrainingAwareApplication
 import com.opensource.tremorwatch.training.TrainingManager
 import com.opensource.tremorwatch.config.MonitoringState
 import com.opensource.tremorwatch.shared.Constants
+import com.opensource.tremorwatch.shared.models.TrainingState
 import com.google.android.gms.wearable.MessageEvent
 import com.google.android.gms.wearable.Wearable
 import com.google.android.gms.wearable.WearableListenerService
@@ -127,7 +128,24 @@ class WatchMessageListenerService : WearableListenerService() {
             try {
                 val app = application as? TrainingAwareApplication
                 val runtimeSnapshot = app?.trainingManager?.getStatusSnapshot()
-                val snapshot = runtimeSnapshot ?: TrainingManager.getPersistedStatusSnapshot(applicationContext)
+                val persistedSnapshot = TrainingManager.getPersistedStatusSnapshot(applicationContext)
+                val trainingModeEnabled = MonitoringState.isTrainingMode(applicationContext)
+                val snapshot = when {
+                    runtimeSnapshot != null -> runtimeSnapshot
+                    trainingModeEnabled && persistedSnapshot.engineState == TrainingState.OFF -> {
+                        val inferredState = when {
+                            persistedSnapshot.hasEnoughLabels -> TrainingState.PERSONALIZED
+                            persistedSnapshot.promptsTotal == 0 -> TrainingState.WARMUP
+                            else -> TrainingState.ACTIVE
+                        }
+                        persistedSnapshot.copy(
+                            modeEnabled = true,
+                            engineState = inferredState,
+                            uiState = inferredState
+                        )
+                    }
+                    else -> persistedSnapshot
+                }
 
                 val payload = JSONObject().apply {
                     put("enabled", snapshot.modeEnabled)
@@ -141,6 +159,11 @@ class WatchMessageListenerService : WearableListenerService() {
                     put("promptsTotal", snapshot.promptsTotal)
                     put("promptsToday", snapshot.promptsToday)
                     put("hasEnoughLabels", snapshot.hasEnoughLabels)
+                    put("trainingStartTimeMs", snapshot.trainingStartTimeMs ?: 0L)
+                    put("trainingCompletedTimeMs", snapshot.trainingCompletedTimeMs ?: 0L)
+                    put("lastPromptTimeMs", snapshot.lastPromptTimeMs ?: 0L)
+                    put("lastFeedbackTimeMs", snapshot.lastFeedbackTimeMs ?: 0L)
+                    put("lastFeedbackLabel", snapshot.lastFeedbackLabel?.name ?: "")
                     put("timestamp", System.currentTimeMillis())
                 }.toString().toByteArray(Charsets.UTF_8)
 
