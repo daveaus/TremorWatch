@@ -88,9 +88,13 @@ class TrainingParameterOptimizer {
         "minBandRatio",
         "restingMinBandRatio",
         "activeMinBandRatio",
-        "minFrequencyStability",
+        // [F1] minFrequencyStability and minCrossSensorSupport intentionally excluded:
+        // onEngineSample() hardcodes both to 0f in training samples (cross-sensor and
+        // multi-window features unavailable in the single-FFT collection path).
+        // Zero-variance inputs hit findOptimalThreshold()'s early exit every run — wasted
+        // cycles, and any non-zero starting threshold would silently block all samples.
+        // Re-include here only when the features are populated in the training label path.
         "minHarmonicRatio",
-        "minCrossSensorSupport",
         "minTremorPower"
     )
 
@@ -214,8 +218,12 @@ class TrainingParameterOptimizer {
         currentConfig: TremorDetectionConfig,
         labels: List<TrainingLabelEntity>
     ): TremorDetectionConfig {
+        // [H1] Shuffle once so every crossValidate() call in this search uses identical
+        // fold assignments. Re-shuffling per call adds ±0.05–0.10 J noise that swamps
+        // the 1e-4 improvement threshold and makes the search statistically meaningless.
+        val shuffledLabels = labels.shuffled()
         var bestConfig = currentConfig
-        var bestJ = crossValidate(currentConfig, labels, includePowerGate = false)
+        var bestJ = crossValidate(currentConfig, shuffledLabels, includePowerGate = false)
 
         val restingLowCandidates = listOf(3f, 4f, 5f, 6f)
         val restingHighCandidates = listOf(5f, 6f, 7f, 8f, 9f)
@@ -240,7 +248,7 @@ class TrainingParameterOptimizer {
                             )
                         )
 
-                        val score = crossValidate(candidate, labels, includePowerGate = false)
+                        val score = crossValidate(candidate, shuffledLabels, includePowerGate = false)
                         if (score > bestJ + 1e-4f) {
                             bestJ = score
                             bestConfig = candidate
@@ -282,23 +290,17 @@ class TrainingParameterOptimizer {
                 config.minBandRatio,
                 thresholdBounds.getValue("minBandRatio")
             ),
-            minFrequencyStability = findOptimalThreshold(
-                positives.map { it.frequencyStability },
-                negatives.map { it.frequencyStability },
-                config.minFrequencyStability,
-                thresholdBounds.getValue("minFrequencyStability")
-            ),
+            // [F1] minFrequencyStability and minCrossSensorSupport skipped: both are
+            // always 0f in training labels collected via onEngineSample() (cross-sensor
+            // and multi-window features not computed in that path). Tuning them against
+            // zero-variance data is a no-op at best and a gate blocker at worst.
+            minFrequencyStability = config.minFrequencyStability,   // preserved, not tuned
+            minCrossSensorSupport = config.minCrossSensorSupport,   // preserved, not tuned
             minHarmonicRatio = findOptimalThreshold(
                 positives.map { it.harmonicRatio },
                 negatives.map { it.harmonicRatio },
                 config.minHarmonicRatio,
                 thresholdBounds.getValue("minHarmonicRatio")
-            ),
-            minCrossSensorSupport = findOptimalThreshold(
-                positives.map { it.crossSensorSupport },
-                negatives.map { it.crossSensorSupport },
-                config.minCrossSensorSupport,
-                thresholdBounds.getValue("minCrossSensorSupport")
             )
         )
 
@@ -395,13 +397,26 @@ class TrainingParameterOptimizer {
         val stateBR = if (label.isResting) config.restingMinBandRatio else config.activeMinBandRatio
         val effectiveBR = max(config.minBandRatio, stateBR)
 
+        // [H2] Mirror all gates from TremorFFT.isTremor so the optimizer's J score
+        // matches real watch behaviour. Previously missing: entropyCompatible,
+        // dominantFreq >= bandLow, and isHighEnergyLowBandRatio.
+        val bandLow = if (label.isResting) config.restingBandLowHz else config.activeBandLowHz
+        val entropyCompatible = label.spectralEntropy <= 0.85f || label.harmonicRatio >= 0.20f
+        val estimatedSeverity = if (label.totalPower > 50f)
+            (label.totalPower / 50f).coerceAtMost(5f) else 0f
+        val isHighEnergyLow = estimatedSeverity > config.highEnergySeverityThreshold &&
+            dynamicBandRatio < config.highEnergyBandRatioThreshold
+
         val meetsPowerGate = !includePowerGate || dynamicBandPower >= config.minTremorPower
         return dynamicBandRatio >= effectiveBR &&
             label.confidence >= config.confidenceThreshold &&
             label.dominantFrequency >= config.minFrequencyHz &&
+            label.dominantFrequency >= bandLow &&
             label.frequencyStability >= config.minFrequencyStability &&
             label.harmonicRatio >= config.minHarmonicRatio &&
             label.crossSensorSupport >= config.minCrossSensorSupport &&
+            entropyCompatible &&
+            !isHighEnergyLow &&
             meetsPowerGate
     }
 
@@ -477,8 +492,10 @@ class TrainingParameterOptimizer {
         labels: List<TrainingLabelEntity>,
         includePowerGate: Boolean
     ): Float {
-        val positives = labels.filter { it.label == "YES_TREMOR" }.shuffled()
-        val negatives = labels.filter { it.label == "NO_ACTIVE" }.shuffled()
+        // [H1] Do NOT re-shuffle here — caller pre-shuffles once so fold assignments
+        // are stable across all crossValidate() calls within a single optimize pass.
+        val positives = labels.filter { it.label == "YES_TREMOR" }
+        val negatives = labels.filter { it.label == "NO_ACTIVE" }
 
         var totalJ = 0f
         var foldsWithData = 0

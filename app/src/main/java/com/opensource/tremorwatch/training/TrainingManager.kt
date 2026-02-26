@@ -105,6 +105,10 @@ class TrainingManager(
         const val QUIET_HOUR_END = 7                         // 7 AM
         const val MIN_LABELS_FOR_ACTIVE = TrainingThresholds.MIN_USABLE_LABELS_FOR_PERSONALIZATION
         const val TRAINING_DURATION_DAYS = 7
+        // [F5] Every Nth clearly-non-tremor sample is eligible for a baseline prompt.
+        // Gives the optimizer genuine true-negatives from quiet periods, not just
+        // ambiguous boundary-zone negatives. Still subject to all prompt guardrails.
+        private const val BASELINE_SAMPLE_RATE = 50
 
         private val statusJson = Json { ignoreUnknownKeys = true }
 
@@ -214,6 +218,9 @@ class TrainingManager(
     private val yesLabelCount = AtomicInteger(0)
     private val noLabelCount = AtomicInteger(0)
     private val ignoredLabelCount = AtomicInteger(0)
+    // [F5] Counts every onEngineSample() call (not just prompted ones) to pace
+    // sparse baseline negative collection independently of the prompt counters.
+    private val baselineSampleCounter = AtomicInteger(0)
     private var currentHour = -1
     private var currentDay = -1
     private var trainingStartTimeMs: Long? = null
@@ -329,14 +336,40 @@ class TrainingManager(
         // Borderline detection: production said NO, but the signal is close to the threshold.
         // We relax confidence by 30% and check if that would flip the decision.
         val productionIsTremor = result.isTremor
-        val relaxedConfidenceThreshold = 0.35f * 0.70f   // 30% lower than default
-        val relaxedBandRatio = 0.04f * 0.70f
+        // [H5] Derive relaxed thresholds from the current experimental config so the
+        // near-boundary probe zone tracks the optimizer's tuned values. Hardcoding to
+        // the default (0.35 / 0.04) meant the probe fired in the wrong zone after
+        // personalization and collected off-target labels.
+        val activeConfig = experimentalConfig
+        val baseConfidence = activeConfig?.confidenceThreshold ?: 0.35f
+        val baseBandRatio = if (tremorData.isRestingState)
+            activeConfig?.restingMinBandRatio ?: 0.04f
+        else
+            activeConfig?.activeMinBandRatio ?: 0.04f
+        val relaxedConfidenceThreshold = baseConfidence * 0.70f
+        val relaxedBandRatio = baseBandRatio * 0.70f
+        // [F2] Track minFrequencyHz from the active config so the probe zone stays aligned
+        // with whatever the optimizer has tuned. Previously hardcoded to 4.0f, meaning
+        // post-personalization probes could fire below the production detection floor.
+        val relaxedFrequencyHz = activeConfig?.minFrequencyHz ?: 4.0f
         val nearBoundary = !productionIsTremor &&
             result.confidence >= relaxedConfidenceThreshold &&
             result.bandRatio >= relaxedBandRatio &&
-            result.dominantFrequency >= 4.0f
+            result.dominantFrequency >= relaxedFrequencyHz
 
-        if (!nearBoundary && !productionIsTremor) return
+        if (!nearBoundary && !productionIsTremor) {
+            // [F5] Sparse baseline negative sampling: every BASELINE_SAMPLE_RATE calls,
+            // if the signal is clearly non-tremor (confidence < 25% of threshold), allow
+            // the sample through as a genuine true-negative for the optimizer.
+            // All normal prompt guardrails (cooldown, rate caps, quiet hours) still apply —
+            // this only widens the eligibility gate, it does not bypass any safety limits.
+            val callN = baselineSampleCounter.incrementAndGet()
+            val isClearlyNonTremor = result.confidence < baseConfidence * 0.25f
+            val isDue = callN % BASELINE_SAMPLE_RATE == 0
+            if (!isClearlyNonTremor || !isDue) return
+            // Fall through: baseline sample eligible — guard rails in requestUserFeedback()
+            // will still gate on cooldown, daily cap, quiet hours, etc.
+        }
 
         // Build a shadow result from the already-computed features
         val features = FeedbackFeatureSnapshot(
@@ -584,6 +617,10 @@ class TrainingManager(
 
     // ──── Feedback Handling ────
 
+    // [M2] @Synchronized ensures counter increments, SharedPreferences batch writes,
+    // and the pendingFeedback.remove() are atomic with respect to requestUserFeedback()
+    // on the sensor thread, preventing stale values in any concurrent apply() batch.
+    @Synchronized
     fun onUserFeedback(sampleId: String, label: FeedbackLabel) {
         cancelPromptNotification(sampleId)
 
@@ -712,6 +749,20 @@ class TrainingManager(
                 synchronized(trainingLog) { trainingLog.clear() }
             }
         }
+
+        // [H4] Restore live state field from persisted value so training survives
+        // process death + restart. Without this, isTrainingActive returns false and
+        // onEngineSample() is a silent no-op after every service restart.
+        // Restore conservatively as WARMUP (re-validates prompt guardrails) rather
+        // than directly re-entering ACTIVE.
+        val savedState = parseTrainingState(
+            statusPrefs.getString(KEY_ENGINE_STATE, TrainingState.OFF.name),
+            TrainingState.OFF
+        )
+        if (savedState == TrainingState.WARMUP || savedState == TrainingState.ACTIVE) {
+            state = TrainingState.WARMUP
+            Timber.i("[H4] Restored training state to WARMUP from persisted: $savedState")
+        }
     }
 
     private fun appendLog(
@@ -746,17 +797,14 @@ class TrainingManager(
     }
 
     private fun buildStatusSnapshot(): TrainingStatusSnapshot {
+        // [M1] Pure snapshot builder — no side effects. State mutations (setting
+        // trainingCompletedTimeMs, logging) have been moved to refreshStatusSnapshot()
+        // so this method can be called safely without unintended writes.
         val yes = yesLabelCount.get()
         val no = noLabelCount.get()
         val ignored = ignoredLabelCount.get()
         val usable = yes + no
         val hasEnough = usable >= MIN_LABELS_FOR_ACTIVE
-        if (hasEnough && trainingCompletedTimeMs == null) {
-            trainingCompletedTimeMs = System.currentTimeMillis()
-            appendLog(type = "TRAINING", detail = "Training threshold reached")
-        } else if (!hasEnough) {
-            trainingCompletedTimeMs = null
-        }
         val totalPrompts = totalPromptCount.get()
         val startMs = trainingStartTimeMs
         val completedMs = trainingCompletedTimeMs
@@ -795,6 +843,18 @@ class TrainingManager(
     }
 
     private fun refreshStatusSnapshot() {
+        // [M1] Threshold-crossing transition logic lives here, not in buildStatusSnapshot(),
+        // so the builder is side-effect-free. A brief dip below the label count threshold
+        // (e.g. a race with phone-side delete) no longer resets trainingCompletedTimeMs
+        // on every snapshot build.
+        val usable = yesLabelCount.get() + noLabelCount.get()
+        val hasEnough = usable >= MIN_LABELS_FOR_ACTIVE
+        if (hasEnough && trainingCompletedTimeMs == null) {
+            trainingCompletedTimeMs = System.currentTimeMillis()
+            appendLog(type = "TRAINING", detail = "Training threshold reached")
+        } else if (!hasEnough) {
+            trainingCompletedTimeMs = null
+        }
         val snapshot = buildStatusSnapshot()
         statusState.value = snapshot
         statusPrefs.edit()
@@ -871,13 +931,21 @@ class TrainingManager(
      * [P4] Evict pending feedback entries older than PROMPT_TIMEOUT + 5s.
      * Treats stale entries as IGNORE so they still get sent to the phone.
      * Prevents unbounded memory growth if activities are killed without response.
+     *
+     * [M5] Only collects stale IDs here (fast ConcurrentHashMap read, safe inside the
+     * @Synchronized requestUserFeedback() block). The actual onUserFeedback() calls —
+     * which do disk I/O (saveLocalBackup) and IPC (dataSender) — are posted to the
+     * main looper so they execute after the sensor-thread lock is released.
      */
     private fun evictStalePending() {
         val cutoff = System.currentTimeMillis() - (PROMPT_TIMEOUT_MS + 5000L)
-        val stale = pendingFeedback.filter { it.value.timestamp < cutoff }
-        for ((id, _) in stale) {
-            Timber.d("Evicting stale pending feedback: $id")
-            onUserFeedback(id, FeedbackLabel.IGNORE)
+        val staleIds = pendingFeedback.filter { it.value.timestamp < cutoff }.keys.toList()
+        if (staleIds.isEmpty()) return
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
+            staleIds.forEach { id ->
+                Timber.d("Evicting stale pending feedback: $id")
+                onUserFeedback(id, FeedbackLabel.IGNORE)
+            }
         }
     }
 }

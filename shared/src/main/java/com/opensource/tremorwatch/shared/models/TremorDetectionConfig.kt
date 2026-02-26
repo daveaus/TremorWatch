@@ -54,6 +54,14 @@ data class TremorDetectionConfig(
     val highEnergySeverityThreshold: Float = 1.0f,
     /** Band ratio threshold for high-energy tremor classification */
     val highEnergyBandRatioThreshold: Float = 0.04f,
+    /**
+     * totalPower crossover above which the high-energy movement filter activates.
+     * [F3] Previously hardcoded to 50f — patients with high baseline muscle tone
+     * (dystonia, Parkinson's rigidity) may exceed 50f at rest, suppressing valid
+     * tremor detections. Make configurable per-patient profile. Default preserves
+     * existing behaviour; raise for high-tone patients.
+     */
+    val highEnergyTotalPowerThreshold: Float = 50f,
 
     // === Temporal Smoothing ===
     /** Minimum consecutive samples needed to confirm tremor episode (reduces false positives) */

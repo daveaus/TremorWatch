@@ -178,9 +178,11 @@ class TremorFFT(private val sampleRate: Float = 20f) {
             val binPower = powerSpectrum[i]
 
             // Single pass: accumulate 2Hz buckets used by phone-side training simulation.
-            val bucketIndex = ((freq - 2f) / 2f).toInt()
-            if (bucketIndex in 0..5) {
-                fixedBandPowers[bucketIndex] += binPower
+            if (freq >= 2f) {
+                val bucketIndex = ((freq - 2f) / 2f).toInt()
+                if (bucketIndex in 0..5) {
+                    fixedBandPowers[bucketIndex] += binPower
+                }
             }
 
             if (freq >= bandLow && freq <= bandHigh) {
@@ -275,9 +277,13 @@ class TremorFFT(private val sampleRate: Float = 20f) {
         // Estimate severity from magnitude (will be refined in TremorMonitoringEngine)
         // For now, use totalPower as proxy - if very high power but low band ratio, likely movement
         val adaptiveSeverityFloor = adaptiveThresholds?.severityFloor ?: config.severityFloor
-        val estimatedSeverity = if (totalPower > 50f) {
+        // [F3] Use config-derived power threshold so high-tone patients (dystonia,
+        // Parkinson's rigidity) can raise the crossover above the 50f default without
+        // a code change. Default preserves existing behaviour.
+        val highEnergyPowerThreshold = config.highEnergyTotalPowerThreshold
+        val estimatedSeverity = if (totalPower > highEnergyPowerThreshold) {
             // High total power suggests high-energy movement
-            (totalPower / 50f).coerceAtMost(5f)  // Cap at 5.0
+            (totalPower / highEnergyPowerThreshold).coerceAtMost(5f)  // Cap at 5.0
         } else {
             0f
         }

@@ -7,6 +7,7 @@ import androidx.room.Room
 import androidx.room.RoomDatabase
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
+import timber.log.Timber
 
 /**
  * Room database for tremor data.
@@ -223,40 +224,138 @@ abstract class TremorRoomDatabase : RoomDatabase() {
          * v7 MIGRATION_6_7 created columns with DEFAULT clauses (e.g., DEFAULT 0, DEFAULT ''),
          * but TrainingLabelEntity has no @ColumnInfo(defaultValue=...) annotations, so Room
          * expects defaultValue='undefined' for all columns. This recreates the table correctly.
-         * Training data is empty at this stage (module just installed), so drop-recreate is safe.
+         * Preserve existing training data by copying to temp table and restoring.
          */
         private val MIGRATION_7_8 = object : Migration(7, 8) {
             override fun migrate(database: SupportSQLiteDatabase) {
-                database.execSQL("DROP TABLE IF EXISTS training_labels")
-                database.execSQL("""
-                    CREATE TABLE IF NOT EXISTS training_labels (
-                        sampleId TEXT PRIMARY KEY NOT NULL,
-                        timestamp INTEGER NOT NULL,
-                        feedback TEXT NOT NULL,
-                        feedbackTimestamp INTEGER,
-                        responseLatencyMs INTEGER,
-                        dominantFrequency REAL NOT NULL,
-                        bandRatio REAL NOT NULL,
-                        confidence REAL NOT NULL,
-                        calibratedConfidence REAL NOT NULL,
-                        totalPower REAL NOT NULL,
-                        tremorBandPower REAL NOT NULL,
-                        spectralEntropy REAL NOT NULL,
-                        harmonicRatio REAL NOT NULL,
-                        peakProminence REAL NOT NULL,
-                        crossSensorSupport REAL NOT NULL,
-                        frequencyStability REAL NOT NULL,
-                        magnitude REAL NOT NULL,
-                        accelMagnitude REAL NOT NULL,
-                        activityType TEXT NOT NULL,
-                        activityConfidence REAL NOT NULL,
-                        isResting INTEGER NOT NULL,
-                        productionIsTremor INTEGER NOT NULL,
-                        shadowIsTremor INTEGER NOT NULL,
-                        triggerReason TEXT NOT NULL,
-                        label TEXT NOT NULL
-                    )
-                """)
+                // Check if table exists and has data before dropping
+                val cursor = database.query("SELECT COUNT(*) as count FROM sqlite_master WHERE type='table' AND name='training_labels'")
+                val tableExists = cursor.use {
+                    it.moveToFirst() && it.getInt(0) > 0
+                }
+                
+                if (tableExists) {
+                    // Check if table has data
+                    val dataCursor = database.query("SELECT COUNT(*) FROM training_labels")
+                    val hasData = dataCursor.use {
+                        it.moveToFirst() && it.getInt(0) > 0
+                    }
+                    
+                    if (hasData) {
+                        Timber.w("MIGRATION_7_8: training_labels table has ${dataCursor.getInt(0)} rows - preserving data")
+                        // Create temp table with new schema
+                        database.execSQL("""
+                            CREATE TABLE training_labels_new (
+                                sampleId TEXT PRIMARY KEY NOT NULL,
+                                timestamp INTEGER NOT NULL,
+                                feedback TEXT NOT NULL,
+                                feedbackTimestamp INTEGER,
+                                responseLatencyMs INTEGER,
+                                dominantFrequency REAL NOT NULL,
+                                bandRatio REAL NOT NULL,
+                                confidence REAL NOT NULL,
+                                calibratedConfidence REAL NOT NULL,
+                                totalPower REAL NOT NULL,
+                                tremorBandPower REAL NOT NULL,
+                                spectralEntropy REAL NOT NULL,
+                                harmonicRatio REAL NOT NULL,
+                                peakProminence REAL NOT NULL,
+                                crossSensorSupport REAL NOT NULL,
+                                frequencyStability REAL NOT NULL,
+                                magnitude REAL NOT NULL,
+                                accelMagnitude REAL NOT NULL,
+                                activityType TEXT NOT NULL,
+                                activityConfidence REAL NOT NULL,
+                                isResting INTEGER NOT NULL,
+                                productionIsTremor INTEGER NOT NULL,
+                                shadowIsTremor INTEGER NOT NULL,
+                                triggerReason TEXT NOT NULL,
+                                label TEXT NOT NULL
+                            )
+                        """)
+                        
+                        // Copy data from old table (all columns match except DEFAULT clauses)
+                        database.execSQL("""
+                            INSERT INTO training_labels_new 
+                            SELECT sampleId, timestamp, feedback, feedbackTimestamp, responseLatencyMs,
+                                   dominantFrequency, bandRatio, confidence, calibratedConfidence,
+                                   totalPower, tremorBandPower, spectralEntropy, harmonicRatio,
+                                   peakProminence, crossSensorSupport, frequencyStability,
+                                   magnitude, accelMagnitude, activityType, activityConfidence,
+                                   isResting, productionIsTremor, shadowIsTremor, triggerReason, label
+                            FROM training_labels
+                        """)
+                        
+                        // Drop old table and rename new one
+                        database.execSQL("DROP TABLE training_labels")
+                        database.execSQL("ALTER TABLE training_labels_new RENAME TO training_labels")
+                    } else {
+                        // No data, safe to drop and recreate
+                        database.execSQL("DROP TABLE training_labels")
+                        database.execSQL("""
+                            CREATE TABLE training_labels (
+                                sampleId TEXT PRIMARY KEY NOT NULL,
+                                timestamp INTEGER NOT NULL,
+                                feedback TEXT NOT NULL,
+                                feedbackTimestamp INTEGER,
+                                responseLatencyMs INTEGER,
+                                dominantFrequency REAL NOT NULL,
+                                bandRatio REAL NOT NULL,
+                                confidence REAL NOT NULL,
+                                calibratedConfidence REAL NOT NULL,
+                                totalPower REAL NOT NULL,
+                                tremorBandPower REAL NOT NULL,
+                                spectralEntropy REAL NOT NULL,
+                                harmonicRatio REAL NOT NULL,
+                                peakProminence REAL NOT NULL,
+                                crossSensorSupport REAL NOT NULL,
+                                frequencyStability REAL NOT NULL,
+                                magnitude REAL NOT NULL,
+                                accelMagnitude REAL NOT NULL,
+                                activityType TEXT NOT NULL,
+                                activityConfidence REAL NOT NULL,
+                                isResting INTEGER NOT NULL,
+                                productionIsTremor INTEGER NOT NULL,
+                                shadowIsTremor INTEGER NOT NULL,
+                                triggerReason TEXT NOT NULL,
+                                label TEXT NOT NULL
+                            )
+                        """)
+                    }
+                } else {
+                    // Table doesn't exist, create it fresh
+                    database.execSQL("""
+                        CREATE TABLE training_labels (
+                            sampleId TEXT PRIMARY KEY NOT NULL,
+                            timestamp INTEGER NOT NULL,
+                            feedback TEXT NOT NULL,
+                            feedbackTimestamp INTEGER,
+                            responseLatencyMs INTEGER,
+                            dominantFrequency REAL NOT NULL,
+                            bandRatio REAL NOT NULL,
+                            confidence REAL NOT NULL,
+                            calibratedConfidence REAL NOT NULL,
+                            totalPower REAL NOT NULL,
+                            tremorBandPower REAL NOT NULL,
+                            spectralEntropy REAL NOT NULL,
+                            harmonicRatio REAL NOT NULL,
+                            peakProminence REAL NOT NULL,
+                            crossSensorSupport REAL NOT NULL,
+                            frequencyStability REAL NOT NULL,
+                            magnitude REAL NOT NULL,
+                            accelMagnitude REAL NOT NULL,
+                            activityType TEXT NOT NULL,
+                            activityConfidence REAL NOT NULL,
+                            isResting INTEGER NOT NULL,
+                            productionIsTremor INTEGER NOT NULL,
+                            shadowIsTremor INTEGER NOT NULL,
+                            triggerReason TEXT NOT NULL,
+                            label TEXT NOT NULL
+                        )
+                    """)
+                }
+                
+                // Create indexes (they will be dropped if table was recreated)
                 database.execSQL(
                     "CREATE INDEX IF NOT EXISTS index_training_labels_timestamp ON training_labels(timestamp)"
                 )
