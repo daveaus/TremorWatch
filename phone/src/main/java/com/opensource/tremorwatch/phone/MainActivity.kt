@@ -1718,6 +1718,16 @@ private fun TrainingHomeCard(
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+                    if (tuneSnapshot.lastRunTimeMs > 0L) {
+                        val lastRun = formatTrainingAbsoluteTime(tuneSnapshot.lastRunTimeMs)
+                        if (lastRun != null) {
+                            Text(
+                                text = "Last auto-tune run: $lastRun",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
                     Text(
                         text = "Using personalized profile: ${if (personalizedInUse) "YES" else "NO"}",
                         style = MaterialTheme.typography.bodySmall,
@@ -1727,6 +1737,16 @@ private fun TrainingHomeCard(
                             MaterialTheme.colorScheme.onSurfaceVariant
                         }
                     )
+                    if (tuneSnapshot.autoApplyBlockedUntilMs > System.currentTimeMillis()) {
+                        val blockedUntil = formatTrainingAbsoluteTime(tuneSnapshot.autoApplyBlockedUntilMs)
+                        if (blockedUntil != null) {
+                            Text(
+                                text = "Auto-apply paused until: $blockedUntil",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error
+                            )
+                        }
+                    }
                 }
 
                 else -> {

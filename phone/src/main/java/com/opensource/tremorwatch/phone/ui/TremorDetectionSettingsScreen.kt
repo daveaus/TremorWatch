@@ -76,6 +76,9 @@ fun TremorDetectionSettingsScreen(
         .collectAsState(initial = emptyList())
     var trainingStatusMessage by remember { mutableStateOf<String?>(null) }
     var showHowTrainingWorks by remember { mutableStateOf(false) }
+    var isRunningAutoTune by remember { mutableStateOf(false) }
+    var isRollingBackAutoTune by remember { mutableStateOf(false) }
+    var showRollbackConfirmDialog by remember { mutableStateOf(false) }
     val watchTrainingStatePrefs = remember {
         context.getSharedPreferences(WatchTrainingStatePrefs.PREFS_NAME, Context.MODE_PRIVATE)
     }
@@ -97,6 +100,13 @@ fun TremorDetectionSettingsScreen(
         SharedPreferences.OnSharedPreferenceChangeListener { prefs, _ ->
             tuneSnapshot = TrainingTuneStateStore.read(prefs)
         }
+    }
+    val trainedPreset = remember(
+        tuneSnapshot.lastAppliedTimeMs,
+        tuneSnapshot.lastOutcome,
+        tuneSnapshot.trainedProfileActive
+    ) {
+        configManager.loadProfile("Trained")
     }
 
     val snackbarHostState = remember { SnackbarHostState() }
@@ -287,6 +297,8 @@ fun TremorDetectionSettingsScreen(
                 TrainingInsightsSection(
                     trainingModeEnabled = trainingModeEnabled,
                     isSyncingTrainingMode = isSyncingTrainingMode,
+                    isRunningAutoTune = isRunningAutoTune,
+                    isRollingBackAutoTune = isRollingBackAutoTune,
                     tuneSnapshot = tuneSnapshot,
                     usableLabels = trainingUsableLabels,
                     positiveLabels = trainingPositiveLabels,
@@ -297,6 +309,27 @@ fun TremorDetectionSettingsScreen(
                     watchTrainingState = watchTrainingState,
                     statusMessage = trainingStatusMessage,
                     onShowHowTrainingWorks = { showHowTrainingWorks = true },
+                    onRunAutoTuneNow = {
+                        scope.launch {
+                            isRunningAutoTune = true
+                            val enqueued = configManager.runTrainingAutoTuneNow("manual_user_request")
+                            isRunningAutoTune = false
+                            trainingStatusMessage = if (enqueued) {
+                                "Auto-tune queued. This may take a few minutes."
+                            } else {
+                                "Auto-tune already queued or ran recently."
+                            }
+                            successMessage = if (enqueued) {
+                                "Auto-tune queued"
+                            } else {
+                                "Auto-tune not queued"
+                            }
+                            showSuccessSnackbar = true
+                        }
+                    },
+                    onRollbackAutoTune = {
+                        showRollbackConfirmDialog = true
+                    },
                     onToggleTraining = { enabled ->
                         trainingModeEnabled = enabled
                         scope.launch {
@@ -332,7 +365,10 @@ fun TremorDetectionSettingsScreen(
 
             // Presets
             item {
-                PresetsSection(config) { selectedPreset ->
+                PresetsSection(
+                    config = config,
+                    trainedPreset = trainedPreset
+                ) { selectedPreset ->
                     config = selectedPreset
                     // Don't update originalConfig - let user apply changes
                 }
@@ -455,6 +491,55 @@ fun TremorDetectionSettingsScreen(
         )
     }
 
+    if (showRollbackConfirmDialog) {
+        AlertDialog(
+            onDismissRequest = { showRollbackConfirmDialog = false },
+            title = { Text("Rollback Personalized Config") },
+            text = {
+                Text("This will restore your previous pre-trained profile. Training labels are kept.")
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showRollbackConfirmDialog = false
+                        scope.launch {
+                            isRollingBackAutoTune = true
+                            val rollbackStatus = configManager.rollbackAutoTunedConfig()
+                            isRollingBackAutoTune = false
+                            config = configManager.getActiveConfig()
+                            originalConfig = config
+                            syncStatus = configManager.getSyncStatus()
+                            trainingStatusMessage = when (rollbackStatus) {
+                                TremorConfigManager.SyncStatus.SYNCED ->
+                                    "Rollback applied and synced to watch."
+                                TremorConfigManager.SyncStatus.PENDING ->
+                                    "Rollback applied locally; watch sync pending."
+                                TremorConfigManager.SyncStatus.NOT_CONNECTED ->
+                                    "Rollback applied locally; watch not connected."
+                                TremorConfigManager.SyncStatus.FAILED ->
+                                    "Rollback failed. Check connectivity and try again."
+                            }
+                            if (rollbackStatus != TremorConfigManager.SyncStatus.FAILED) {
+                                successMessage = "Rollback completed"
+                                showSuccessSnackbar = true
+                            } else {
+                                errorMessage = "Rollback failed"
+                                showErrorDialog = true
+                            }
+                        }
+                    }
+                ) {
+                    Text("Rollback")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showRollbackConfirmDialog = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
     if (showHowTrainingWorks) {
         TrainingHowItWorksDialog(onDismiss = { showHowTrainingWorks = false })
     }
@@ -464,6 +549,8 @@ fun TremorDetectionSettingsScreen(
 private fun TrainingInsightsSection(
     trainingModeEnabled: Boolean,
     isSyncingTrainingMode: Boolean,
+    isRunningAutoTune: Boolean,
+    isRollingBackAutoTune: Boolean,
     tuneSnapshot: TrainingTuneSnapshot,
     usableLabels: Int,
     positiveLabels: Int,
@@ -474,12 +561,18 @@ private fun TrainingInsightsSection(
     watchTrainingState: WatchTrainingStateSnapshot,
     statusMessage: String?,
     onShowHowTrainingWorks: () -> Unit,
+    onRunAutoTuneNow: () -> Unit,
+    onRollbackAutoTune: () -> Unit,
     onToggleTraining: (Boolean) -> Unit
 ) {
     val targetLabels = watchTrainingState.targetLabels.coerceAtLeast(1)
     val watchStateAvailable = watchTrainingState.hasData
     val toggleChecked = trainingModeEnabled
     val effectiveUsableLabels = if (watchStateAvailable) watchTrainingState.usableLabels else usableLabels
+    val effectiveYesLabels = if (watchStateAvailable) watchTrainingState.yesLabels else positiveLabels
+    val effectiveNoLabels = if (watchStateAvailable) watchTrainingState.noLabels else negativeLabels
+    val effectiveIgnoredLabels = if (watchStateAvailable) watchTrainingState.ignoredLabels else ignoredLabels
+    val effectiveTotalPrompts = if (watchStateAvailable) watchTrainingState.promptsTotal else totalLabels
     val hasMinimumLabels = effectiveUsableLabels >= targetLabels
     val stateLabel = when {
         watchStateAvailable -> watchTrainingState.uiState
@@ -497,6 +590,23 @@ private fun TrainingInsightsSection(
         tuneSnapshot.lastOutcome == TrainingTuneOutcome.APPLIED && tuneSnapshot.trainedProfileActive
     val personalizationStatus = formatPersonalizationStatus(tuneSnapshot)
     val watchStatusLabel = formatWatchStatusMeta(watchTrainingState)
+    val nowMs = System.currentTimeMillis()
+    val autoApplyBlocked = tuneSnapshot.autoApplyBlockedUntilMs > nowMs
+    val autoApplyBlockedUntilText = if (autoApplyBlocked) {
+        formatAbsoluteTime(tuneSnapshot.autoApplyBlockedUntilMs)
+    } else {
+        null
+    }
+    val canRunAutoTune =
+        trainingModeEnabled &&
+            hasMinimumLabels &&
+            !isRunningAutoTune &&
+            !isRollingBackAutoTune &&
+            !autoApplyBlocked
+    val canRollback =
+        tuneSnapshot.hasRollbackSnapshot &&
+            !isRunningAutoTune &&
+            !isRollingBackAutoTune
 
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp)) {
@@ -576,6 +686,18 @@ private fun TrainingInsightsSection(
             }
 
             Spacer(modifier = Modifier.height(8.dp))
+            TrainingProgressSection(
+                trainingModeEnabled = trainingModeEnabled,
+                usableLabels = effectiveUsableLabels,
+                targetLabels = targetLabels,
+                yesLabels = effectiveYesLabels,
+                noLabels = effectiveNoLabels,
+                ignoredLabels = effectiveIgnoredLabels,
+                totalPrompts = effectiveTotalPrompts,
+                hasMinimumLabels = hasMinimumLabels
+            )
+
+            Spacer(modifier = Modifier.height(8.dp))
             Text(
                 if (hasMinimumLabels) {
                     "Minimum labels reached. Personalization starts after auto-tune is applied."
@@ -609,12 +731,31 @@ private fun TrainingInsightsSection(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+                if (tuneSnapshot.lastRunReason.isNotBlank()) {
+                    Text(
+                        "Last run reason: ${tuneSnapshot.lastRunReason.replace('_', ' ')}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
             }
             if (tuneSnapshot.samplesUsed > 0) {
                 Text(
                     "Last tune used ${tuneSnapshot.samplesUsed} labels",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Text(
+                    "Tune score: ${"%.3f".format(tuneSnapshot.beforeJ)} -> ${"%.3f".format(tuneSnapshot.afterJ)}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            if (autoApplyBlockedUntilText != null) {
+                Text(
+                    "Auto-apply pause active until $autoApplyBlockedUntilText",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error
                 )
             }
 
@@ -627,8 +768,38 @@ private fun TrainingInsightsSection(
             }
 
             Spacer(modifier = Modifier.height(8.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                OutlinedButton(
+                    onClick = onRunAutoTuneNow,
+                    enabled = canRunAutoTune,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text(
+                        if (isRunningAutoTune) "Queueing..." else "Run Auto-Tune Now"
+                    )
+                }
+                OutlinedButton(
+                    onClick = onRollbackAutoTune,
+                    enabled = canRollback,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text(
+                        if (isRollingBackAutoTune) "Rolling back..." else "Rollback"
+                    )
+                }
+            }
+            Text(
+                "Run Now requires training ON and minimum labels. Rollback requires a saved pre-trained snapshot.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            Spacer(modifier = Modifier.height(8.dp))
             TextButton(onClick = onShowHowTrainingWorks) {
-                Text("How training works")
+                Text("How training works (clear guide)")
             }
 
             Spacer(modifier = Modifier.height(8.dp))
@@ -650,6 +821,89 @@ private fun TrainingInsightsSection(
             }
         }
     }
+}
+
+@Composable
+private fun TrainingProgressSection(
+    trainingModeEnabled: Boolean,
+    usableLabels: Int,
+    targetLabels: Int,
+    yesLabels: Int,
+    noLabels: Int,
+    ignoredLabels: Int,
+    totalPrompts: Int,
+    hasMinimumLabels: Boolean
+) {
+    val progress = (usableLabels.toFloat() / targetLabels.toFloat()).coerceIn(0f, 1f)
+    val remaining = (targetLabels - usableLabels).coerceAtLeast(0)
+    val safeTotal = maxOf(totalPrompts, yesLabels + noLabels + ignoredLabels, 1)
+
+    Text(
+        "Training progress",
+        style = MaterialTheme.typography.titleSmall
+    )
+    Text(
+        "$usableLabels of $targetLabels usable labels",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant
+    )
+    LinearProgressIndicator(
+        progress = { progress },
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 4.dp)
+    )
+    Text(
+        when {
+            !trainingModeEnabled -> "Training is off. Turn it on to continue collecting labels."
+            hasMinimumLabels -> "Minimum reached. Waiting for phone auto-tune to apply personalization."
+            else -> "$remaining more usable labels needed before auto-tune can use your data."
+        },
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant
+    )
+
+    Spacer(modifier = Modifier.height(8.dp))
+    Text(
+        "Prompt label mix",
+        style = MaterialTheme.typography.bodySmall,
+        fontWeight = FontWeight.Medium
+    )
+    LabelMixBar(
+        label = "Yes (Tremor)",
+        value = yesLabels,
+        total = safeTotal
+    )
+    LabelMixBar(
+        label = "No (Not Tremor)",
+        value = noLabels,
+        total = safeTotal
+    )
+    LabelMixBar(
+        label = "Unsure/Ignore",
+        value = ignoredLabels,
+        total = safeTotal
+    )
+}
+
+@Composable
+private fun LabelMixBar(
+    label: String,
+    value: Int,
+    total: Int
+) {
+    val ratio = (value.toFloat() / total.toFloat()).coerceIn(0f, 1f)
+    Text(
+        "$label: $value",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant
+    )
+    LinearProgressIndicator(
+        progress = { ratio },
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(bottom = 4.dp)
+    )
 }
 
 private fun formatTrainingLabelRow(label: TrainingLabelEntity): String {
@@ -686,14 +940,17 @@ private fun formatAbsoluteTime(timestampMs: Long): String {
 private fun TrainingHowItWorksDialog(onDismiss: () -> Unit) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("How Training Works") },
+        title = { Text("Training Guide") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("1. Watch prompts collect Yes/No/Unsure labels.")
-                Text("2. Minimum labels make personalization eligible.")
-                Text("3. Phone evaluates label quality and applies tuning when safe.")
-                Text("4. Personalized profile is used only after status shows Active.")
-                Text("5. Training can continue to improve over time.")
+                Text("1. Turn training ON to collect labels from watch prompts.")
+                Text("2. Usable labels are Yes + No. Unsure/Ignore is stored but not used for personalization.")
+                Text("3. When the progress bar reaches the minimum target, your data is eligible for auto-tune.")
+                Text("4. The phone runs auto-tune and only applies changes if quality checks pass.")
+                Text("5. Personalization is active only when you see:")
+                Text("   - Using personalized profile: YES")
+                Text("   - Personalization: Active")
+                Text("6. If status says Needs more data, keep labeling over different times of day.")
             }
         },
         confirmButton = {
@@ -766,6 +1023,7 @@ private fun ProfileInfoCard(config: TremorDetectionConfig, syncStatus: TremorCon
 @Composable
 private fun PresetsSection(
     config: TremorDetectionConfig,
+    trainedPreset: TremorDetectionConfig?,
     onPresetSelected: (TremorDetectionConfig) -> Unit
 ) {
     Card(modifier = Modifier.fillMaxWidth()) {
@@ -786,6 +1044,22 @@ private fun PresetsSection(
                     }
                 }
                 Spacer(modifier = Modifier.height(4.dp))
+            }
+
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilterChip(
+                    selected = config.profileName == "Trained",
+                    onClick = {
+                        trainedPreset?.let { onPresetSelected(it) }
+                    },
+                    enabled = trainedPreset != null,
+                    label = {
+                        Text(
+                            if (trainedPreset != null) "Trained" else "Trained (not ready)"
+                        )
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                )
             }
         }
     }

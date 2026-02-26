@@ -610,58 +610,7 @@ fun MainScreen(
                     textAlign = TextAlign.Center
                 )
             }
-        }
-
-        if (false) {
-            Spacer(modifier = Modifier.height(8.dp))
-            Chip(
-                onClick = onShowConfig,
-                label = {
-                    Text(
-                        "Training ${formatTrainingUiState(trainingStatus.uiState)}",
-                        fontSize = 13.sp,
-                        modifier = Modifier.fillMaxWidth(),
-                        textAlign = TextAlign.Center
-                    )
-                },
-                secondaryLabel = {
-                    Text(
-                        "Labels ${trainingStatus.usableLabelCount}/${trainingStatus.targetUsableLabelCount}  Y:${trainingStatus.yesLabelCount} N:${trainingStatus.noLabelCount}",
-                        fontSize = 9.sp,
-                        modifier = Modifier.fillMaxWidth(),
-                        textAlign = TextAlign.Center
-                    )
-                },
-                icon = { Text("🧠", fontSize = 16.sp) },
-                colors = if (trainingStatus.hasEnoughLabels) {
-                    ChipDefaults.primaryChipColors()
-                } else {
-                    ChipDefaults.secondaryChipColors()
-                },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 2.dp)
-            )
-            Text(
-                if (trainingStatus.hasEnoughLabels) {
-                    "Enough labels collected for personalization"
-                } else {
-                    "${(trainingStatus.targetUsableLabelCount - trainingStatus.usableLabelCount).coerceAtLeast(0)} more usable labels needed"
-                },
-                fontSize = 9.sp,
-                color = if (trainingStatus.hasEnoughLabels) MaterialTheme.colors.primary else MaterialTheme.colors.secondary,
-                textAlign = TextAlign.Center
-            )
-            trainingLog.firstOrNull()?.let { latest ->
-                Text(
-                    text = "Latest: ${formatTrainingLogLine(context, latest)}",
-                    fontSize = 9.sp,
-                    color = MaterialTheme.colors.secondary,
-                    textAlign = TextAlign.Center
-                )
-            }
-        }
-
+        }
         Spacer(modifier = Modifier.height(8.dp))
 
         // Rate Tremor button - full width chip, topmost action
