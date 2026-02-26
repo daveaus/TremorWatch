@@ -2,6 +2,12 @@ package com.opensource.tremorwatch.phone.config
 
 import android.content.Context
 import android.content.SharedPreferences
+import com.opensource.tremorwatch.phone.data.WatchTrainingStatePrefs
+import com.opensource.tremorwatch.phone.training.ApplyConfigResult
+import com.opensource.tremorwatch.phone.training.NightlyAutoTuner
+import com.opensource.tremorwatch.phone.training.TrainingTuneOutcome
+import com.opensource.tremorwatch.phone.training.TrainingTuneSnapshot
+import com.opensource.tremorwatch.phone.training.TrainingTuneStateStore
 import com.opensource.tremorwatch.shared.Constants
 import com.opensource.tremorwatch.shared.models.TremorDetectionConfig
 import com.google.android.gms.tasks.Tasks
@@ -11,6 +17,8 @@ import com.google.android.gms.wearable.NodeClient
 import com.google.android.gms.wearable.PutDataMapRequest
 import com.google.android.gms.wearable.Wearable
 import kotlinx.coroutines.*
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -46,6 +54,7 @@ class TremorConfigManager(private val context: Context) {
     private val maxRetries = 3
     private val retryDelayMs = 1000L
     private val exponentialBackoffMultiplier = 2.0
+    private val configMutationMutex = Mutex()
 
     companion object {
         private const val KEY_ACTIVE_PROFILE = "active_profile"
@@ -53,6 +62,9 @@ class TremorConfigManager(private val context: Context) {
         private const val KEY_SYNC_STATUS = "sync_status"
         private const val KEY_LAST_SYNC_TIME = "last_sync_time"
         private const val KEY_TRAINING_MODE_ENABLED = "training_mode_enabled"
+        private const val KEY_AUTO_TUNE_PREVIOUS_CONFIG = "auto_tune_previous_config"
+        private const val KEY_AUTO_TUNE_LAST_APPLIED_CONFIG = "auto_tune_last_applied_config"
+        private const val ROLLBACK_AUTO_APPLY_BLOCK_MS = 7L * 24L * 60L * 60L * 1000L
         private const val DATA_PATH = "/tremor_detection_config"
     }
 
@@ -99,6 +111,10 @@ class TremorConfigManager(private val context: Context) {
         // Save to local storage first (always succeeds)
         prefs.edit().putString(KEY_ACTIVE_PROFILE, config.toJson()).apply()
         Timber.i("Active config saved: ${config.profileName}")
+        val trainedActive = config.profileName.equals("Trained", ignoreCase = true)
+        TrainingTuneStateStore.update(context) {
+            it.copy(trainedProfileActive = trainedActive)
+        }
 
         // Attempt to sync to watch
         return if (forceSync) {
@@ -135,7 +151,35 @@ class TremorConfigManager(private val context: Context) {
 
     suspend fun setTrainingModeEnabled(enabled: Boolean): Boolean {
         prefs.edit().putBoolean(KEY_TRAINING_MODE_ENABLED, enabled).apply()
+        TrainingTuneStateStore.markTrainingMode(context, enabled)
+        if (enabled) {
+            NightlyAutoTuner.schedulePeriodic(context)
+            // If watch already reached threshold before phone-side mode was enabled,
+            // trigger a one-time immediate run so personalization is not delayed to nightly.
+            val watchStatePrefs = context.getSharedPreferences(
+                WatchTrainingStatePrefs.PREFS_NAME,
+                Context.MODE_PRIVATE
+            )
+            val watchState = WatchTrainingStatePrefs.read(watchStatePrefs)
+            if (watchState.hasData && watchState.hasEnoughLabels) {
+                val enqueued = NightlyAutoTuner.enqueueImmediate(
+                    context,
+                    reason = "phone_training_enabled_threshold_ready"
+                )
+                Timber.i("Immediate auto-tune enqueue on phone enable: $enqueued")
+            }
+        } else {
+            NightlyAutoTuner.cancel(context)
+        }
         return sendTrainingModeToWatch(enabled)
+    }
+
+    fun getTrainingTuneSnapshot(): TrainingTuneSnapshot {
+        return TrainingTuneStateStore.read(context)
+    }
+
+    fun runTrainingAutoTuneNow(reason: String = "manual_run"): Boolean {
+        return NightlyAutoTuner.enqueueImmediate(context, reason)
     }
 
     /**
@@ -298,6 +342,105 @@ class TremorConfigManager(private val context: Context) {
             Timber.e(e, "Failed to import config from string")
             throw IllegalArgumentException("Invalid config format: ${e.message}", e)
         }
+    }
+
+    suspend fun applyAutoTunedConfig(config: TremorDetectionConfig): ApplyConfigResult {
+        return configMutationMutex.withLock {
+            try {
+                val previous = getActiveConfig()
+                recordAutoTuneSnapshots(previous, config)
+                saveProfile(config)
+                val syncStatus = setActiveConfig(config, forceSync = true)
+                val synced = syncStatus == SyncStatus.SYNCED
+                ApplyConfigResult(
+                    appliedLocally = true,
+                    syncedToWatch = synced,
+                    hasRollbackSnapshot = hasAutoTuneRollbackSnapshot(),
+                    detail = "Applied locally; sync status=${syncStatus.name}",
+                    retriableFailure = false
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Timber.e(e, "Failed to apply auto-tuned config")
+                ApplyConfigResult(
+                    appliedLocally = false,
+                    syncedToWatch = false,
+                    hasRollbackSnapshot = hasAutoTuneRollbackSnapshot(),
+                    detail = "Apply failed: ${e.message}",
+                    retriableFailure = e is java.io.IOException
+                )
+            }
+        }
+    }
+
+    fun recordAutoTuneSnapshots(
+        previousConfig: TremorDetectionConfig,
+        appliedConfig: TremorDetectionConfig
+    ) {
+        // Keep first pre-trained baseline unless there is no snapshot yet.
+        val existingPrevious = prefs.getString(KEY_AUTO_TUNE_PREVIOUS_CONFIG, null)
+        val shouldRefreshPrevious = existingPrevious == null || previousConfig.profileName != "Trained"
+        prefs.edit().apply {
+            if (shouldRefreshPrevious) {
+                putString(KEY_AUTO_TUNE_PREVIOUS_CONFIG, previousConfig.toJson())
+            }
+            putString(KEY_AUTO_TUNE_LAST_APPLIED_CONFIG, appliedConfig.toJson())
+        }.apply()
+        TrainingTuneStateStore.update(context) { snapshot ->
+            snapshot.copy(hasRollbackSnapshot = true)
+        }
+    }
+
+    fun hasAutoTuneRollbackSnapshot(): Boolean {
+        return prefs.getString(KEY_AUTO_TUNE_PREVIOUS_CONFIG, null) != null
+    }
+
+    suspend fun rollbackAutoTunedConfig(disableTrainingMode: Boolean = false): SyncStatus {
+        val previousJson = prefs.getString(KEY_AUTO_TUNE_PREVIOUS_CONFIG, null)
+        if (previousJson.isNullOrBlank()) {
+            Timber.w("Rollback requested but no snapshot exists")
+            return SyncStatus.FAILED
+        }
+
+        val previousConfig = try {
+            TremorDetectionConfig.fromJson(previousJson)
+        } catch (e: Exception) {
+            Timber.e(e, "Failed to parse rollback snapshot")
+            prefs.edit().remove(KEY_AUTO_TUNE_PREVIOUS_CONFIG).apply()
+            TrainingTuneStateStore.update(context) { it.copy(hasRollbackSnapshot = false) }
+            return SyncStatus.FAILED
+        }
+
+        val syncStatus = try {
+            setActiveConfig(previousConfig, forceSync = true)
+        } catch (e: Exception) {
+            Timber.e(e, "Rollback apply failed")
+            return SyncStatus.FAILED
+        }
+
+        if (disableTrainingMode) {
+            setTrainingModeEnabled(false)
+        }
+
+        val now = System.currentTimeMillis()
+        TrainingTuneStateStore.setAutoApplyBlockedUntil(context, now + ROLLBACK_AUTO_APPLY_BLOCK_MS)
+        TrainingTuneStateStore.markRunResult(
+            context = context,
+            reason = "rollback",
+            outcome = TrainingTuneOutcome.ROLLED_BACK,
+            message = "Rollback applied; sync status=${syncStatus.name}",
+            samplesUsed = 0,
+            beforeJ = 0f,
+            afterJ = 0f,
+            trainedProfileActive = false,
+            syncedToWatch = syncStatus == SyncStatus.SYNCED,
+            hasRollbackSnapshot = hasAutoTuneRollbackSnapshot(),
+            appliedNow = false,
+            runTimestampMs = now
+        )
+
+        return syncStatus
     }
 
     /**

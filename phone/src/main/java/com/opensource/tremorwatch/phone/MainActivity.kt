@@ -135,6 +135,9 @@ import com.opensource.tremorwatch.phone.config.TremorConfigManager
 import com.opensource.tremorwatch.phone.data.WatchTrainingStatePrefs
 import com.opensource.tremorwatch.phone.data.WatchTrainingStateSnapshot
 import com.opensource.tremorwatch.phone.database.TremorRoomDatabase
+import com.opensource.tremorwatch.phone.training.TrainingTuneOutcome
+import com.opensource.tremorwatch.phone.training.TrainingTuneSnapshot
+import com.opensource.tremorwatch.phone.training.TrainingTuneStateStore
 import com.opensource.tremorwatch.phone.health.HealthConnectContextRepository
 import com.opensource.tremorwatch.phone.health.HealthContextSnapshot
 
@@ -419,18 +422,38 @@ fun MainScreen(
     var watchTrainingState by remember {
         mutableStateOf(WatchTrainingStatePrefs.read(watchTrainingPrefs))
     }
+    val watchTrainingStateListener = remember {
+        android.content.SharedPreferences.OnSharedPreferenceChangeListener { prefs, _ ->
+            watchTrainingState = WatchTrainingStatePrefs.read(prefs)
+        }
+    }
+    val tuneStatePrefs = remember(context) {
+        context.getSharedPreferences(TrainingTuneStateStore.PREFS_NAME, Context.MODE_PRIVATE)
+    }
+    var tuneSnapshot by remember {
+        mutableStateOf(TrainingTuneStateStore.read(tuneStatePrefs))
+    }
+    val tuneStateListener = remember {
+        android.content.SharedPreferences.OnSharedPreferenceChangeListener { prefs, _ ->
+            tuneSnapshot = TrainingTuneStateStore.read(prefs)
+        }
+    }
 
     val heartbeatPrefs = remember(context) {
         context.getSharedPreferences("heartbeat_prefs", Context.MODE_PRIVATE)
     }
 
-    DisposableEffect(watchTrainingPrefs) {
-        val listener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { prefs, _ ->
-            watchTrainingState = WatchTrainingStatePrefs.read(prefs)
-        }
-        watchTrainingPrefs.registerOnSharedPreferenceChangeListener(listener)
+    DisposableEffect(watchTrainingPrefs, watchTrainingStateListener) {
+        watchTrainingPrefs.registerOnSharedPreferenceChangeListener(watchTrainingStateListener)
         onDispose {
-            watchTrainingPrefs.unregisterOnSharedPreferenceChangeListener(listener)
+            watchTrainingPrefs.unregisterOnSharedPreferenceChangeListener(watchTrainingStateListener)
+        }
+    }
+
+    DisposableEffect(tuneStatePrefs, tuneStateListener) {
+        tuneStatePrefs.registerOnSharedPreferenceChangeListener(tuneStateListener)
+        onDispose {
+            tuneStatePrefs.unregisterOnSharedPreferenceChangeListener(tuneStateListener)
         }
     }
 
@@ -1566,6 +1589,7 @@ fun MainScreen(
 
         TrainingHomeCard(
             watchTrainingState = watchTrainingState,
+            tuneSnapshot = tuneSnapshot,
             phoneUsableLabels = phoneTrainingUsableLabels,
             phonePositiveLabels = phoneTrainingPositiveLabels,
             phoneNegativeLabels = phoneTrainingNegativeLabels,
@@ -1580,6 +1604,7 @@ fun MainScreen(
 @Composable
 private fun TrainingHomeCard(
     watchTrainingState: WatchTrainingStateSnapshot,
+    tuneSnapshot: TrainingTuneSnapshot,
     phoneUsableLabels: Int,
     phonePositiveLabels: Int,
     phoneNegativeLabels: Int,
@@ -1597,11 +1622,13 @@ private fun TrainingHomeCard(
     val negativeLabels = if (watchTrainingState.hasData) watchTrainingState.noLabels else phoneNegativeLabels
     val ignoredLabels = if (watchTrainingState.hasData) watchTrainingState.ignoredLabels else phoneIgnoredLabels
     val totalPrompts = if (watchTrainingState.hasData) watchTrainingState.promptsTotal else phoneTotalPrompts
-    val hasEnoughLabels = if (watchTrainingState.hasData) {
+    val hasMinimumLabels = if (watchTrainingState.hasData) {
         watchTrainingState.hasEnoughLabels
     } else {
         usableLabels >= targetLabels
     }
+    val personalizedInUse =
+        tuneSnapshot.lastOutcome == TrainingTuneOutcome.APPLIED && tuneSnapshot.trainedProfileActive
     val hasStarted = if (watchTrainingState.hasData) {
         watchTrainingState.enabled || watchTrainingState.trainingStartTimeMs > 0L || totalPrompts > 0
     } else {
@@ -1609,7 +1636,7 @@ private fun TrainingHomeCard(
     }
     val stateLabel = if (watchTrainingState.hasData) {
         watchTrainingState.uiState
-    } else if (hasEnoughLabels) {
+    } else if (hasMinimumLabels) {
         "PERSONALIZED"
     } else if (hasStarted) {
         "ACTIVE"
@@ -1623,7 +1650,7 @@ private fun TrainingHomeCard(
     val completedAt = formatTrainingAbsoluteTime(
         when {
             watchTrainingState.trainingCompletedTimeMs > 0L -> watchTrainingState.trainingCompletedTimeMs
-            hasEnoughLabels && watchTrainingState.timestampMs > 0L -> watchTrainingState.timestampMs
+            hasMinimumLabels && watchTrainingState.timestampMs > 0L -> watchTrainingState.timestampMs
             else -> 0L
         }
     )
@@ -1634,7 +1661,7 @@ private fun TrainingHomeCard(
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
-            containerColor = if (hasEnoughLabels) {
+            containerColor = if (hasMinimumLabels) {
                 MaterialTheme.colorScheme.primaryContainer
             } else {
                 MaterialTheme.colorScheme.surfaceVariant
@@ -1664,9 +1691,9 @@ private fun TrainingHomeCard(
                     )
                 }
 
-                hasEnoughLabels -> {
+                hasMinimumLabels -> {
                     Text(
-                        text = "Complete ($stateLabel)",
+                        text = "Minimum labels reached ($stateLabel)",
                         style = MaterialTheme.typography.bodyMedium
                     )
                     if (completedAt != null) {
@@ -1685,6 +1712,20 @@ private fun TrainingHomeCard(
                         text = "Prompts answered: $totalPrompts",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text(
+                        text = "Personalization: ${formatPersonalizationStatusHome(tuneSnapshot)}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text(
+                        text = "Using personalized profile: ${if (personalizedInUse) "YES" else "NO"}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (personalizedInUse) {
+                            MaterialTheme.colorScheme.primary
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        }
                     )
                 }
 
@@ -1760,6 +1801,21 @@ private fun formatTrainingWatchFreshness(timestampMs: Long): String? {
     val ageMs = (System.currentTimeMillis() - timestampMs).coerceAtLeast(0L)
     val freshness = if (ageMs > 15L * 60L * 1000L) "stale" else "live"
     return "Watch update: $updateTime ($freshness)"
+}
+
+private fun formatPersonalizationStatusHome(snapshot: TrainingTuneSnapshot): String {
+    return when (snapshot.lastOutcome) {
+        TrainingTuneOutcome.NEVER -> "Not started"
+        TrainingTuneOutcome.SKIPPED -> "Scheduled / skipped this run"
+        TrainingTuneOutcome.REJECTED -> "Needs more data"
+        TrainingTuneOutcome.APPLIED -> if (snapshot.trainedProfileActive) {
+            "Active"
+        } else {
+            "Applied (not active)"
+        }
+        TrainingTuneOutcome.APPLY_FAILED -> "Failed"
+        TrainingTuneOutcome.ROLLED_BACK -> "Rolled back"
+    }
 }
 
 @Composable

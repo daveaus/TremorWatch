@@ -856,27 +856,27 @@ private fun TrainingHomeCard(
     onOpenTraining: () -> Unit
 ) {
     val hasAnyTrainingData = trainingStatus.promptsTotal > 0 || trainingStatus.usableLabelCount > 0
-    val isComplete = trainingStatus.hasEnoughLabels
-    val isInProgress = trainingModeEnabled && !isComplete
+    val hasMinimumLabels = trainingStatus.hasEnoughLabels
+    val isInProgress = trainingModeEnabled && !hasMinimumLabels
     val isNotStarted = !trainingModeEnabled && !hasAnyTrainingData
 
     val title = when {
         isNotStarted -> "Training: Not Started"
-        isComplete -> "Training: Complete"
+        hasMinimumLabels -> "Training: Minimum Reached"
         isInProgress -> "Training: In Progress"
         else -> "Training: Paused"
     }
 
     val subtitle = when {
         isNotStarted -> "Personalize tremor detection with quick labels"
-        isComplete -> "Results ready for personalized tracking"
+        hasMinimumLabels -> "Ready for phone personalization"
         isInProgress -> "Running ${formatElapsedSince(trainingStatus.trainingStartTimeMs)}"
         else -> "Resume training to keep improving"
     }
 
     val actionText = when {
         isNotStarted -> "Start Training"
-        isComplete -> "View Results"
+        hasMinimumLabels -> "View Status"
         isInProgress -> "Open Training"
         else -> "Resume Training"
     }
@@ -900,7 +900,7 @@ private fun TrainingHomeCard(
             )
         },
         icon = { Text("T", fontSize = 14.sp) },
-        colors = if (isComplete) ChipDefaults.primaryChipColors() else ChipDefaults.secondaryChipColors(),
+        colors = if (hasMinimumLabels) ChipDefaults.primaryChipColors() else ChipDefaults.secondaryChipColors(),
         modifier = Modifier
             .fillMaxWidth()
             .padding(vertical = 2.dp)
@@ -938,9 +938,9 @@ private fun TrainingHomeCard(
                 )
             }
         }
-        isComplete -> {
+        hasMinimumLabels -> {
             Text(
-                text = "Completed ${formatCompletedAt(context, trainingStatus)}",
+                text = "Minimum reached ${formatCompletedAt(context, trainingStatus)}",
                 fontSize = 9.sp,
                 color = MaterialTheme.colors.primary,
                 textAlign = TextAlign.Center
@@ -948,6 +948,12 @@ private fun TrainingHomeCard(
             Text(
                 text = "Results: Y:${trainingStatus.yesLabelCount} N:${trainingStatus.noLabelCount}  " +
                     "Prompts:${trainingStatus.promptsTotal}",
+                fontSize = 9.sp,
+                color = MaterialTheme.colors.secondary,
+                textAlign = TextAlign.Center
+            )
+            Text(
+                text = "Personalization happens automatically on your phone.",
                 fontSize = 9.sp,
                 color = MaterialTheme.colors.secondary,
                 textAlign = TextAlign.Center

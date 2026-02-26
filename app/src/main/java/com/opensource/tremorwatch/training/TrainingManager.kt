@@ -103,7 +103,7 @@ class TrainingManager(
         const val PROMPT_TIMEOUT_MS = 30_000L               // 30 seconds
         const val QUIET_HOUR_START = 22                      // 10 PM
         const val QUIET_HOUR_END = 7                         // 7 AM
-        const val MIN_LABELS_FOR_ACTIVE = 10                 // 5Y + 5N minimum
+        const val MIN_LABELS_FOR_ACTIVE = TrainingThresholds.MIN_USABLE_LABELS_FOR_PERSONALIZATION
         const val TRAINING_DURATION_DAYS = 7
 
         private val statusJson = Json { ignoreUnknownKeys = true }

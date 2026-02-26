@@ -2,6 +2,7 @@ package com.opensource.tremorwatch.phone
 
 import android.content.Intent
 import android.util.Log
+import com.opensource.tremorwatch.phone.config.TremorConfigManager
 import com.opensource.tremorwatch.phone.data.WatchTrainingStatePrefs
 import com.opensource.tremorwatch.phone.data.WatchTrainingStateSnapshot
 import com.opensource.tremorwatch.phone.data.TremorDataRepository
@@ -10,6 +11,8 @@ import com.opensource.tremorwatch.phone.database.MedicationIngestionEntity
 import com.opensource.tremorwatch.phone.database.SubjectiveRatingEntity
 import com.opensource.tremorwatch.phone.database.TremorDao
 import com.opensource.tremorwatch.phone.database.TremorRoomDatabase
+import com.opensource.tremorwatch.phone.training.NightlyAutoTuner
+import com.opensource.tremorwatch.phone.training.TrainingTuneStateStore
 import androidx.room.withTransaction
 import com.opensource.tremorwatch.shared.Constants
 import com.opensource.tremorwatch.shared.models.TremorBatch
@@ -1756,29 +1759,73 @@ class WatchDataListenerService : WearableListenerService() {
         serviceScope.launch(Dispatchers.IO) {
             try {
                 val json = JSONObject(String(payload, Charsets.UTF_8))
+                val hasMinimalSchema = json.has("enabled") || json.has("uiState") || json.has("timestamp")
+                if (!hasMinimalSchema) {
+                    Log.w(TAG, "Ignoring malformed training state payload: missing required keys")
+                    return@launch
+                }
+
+                val prefs = getSharedPreferences(WatchTrainingStatePrefs.PREFS_NAME, MODE_PRIVATE)
+                val previous = WatchTrainingStatePrefs.read(prefs)
+
+                val incomingTimestamp = json.optLong("timestamp", System.currentTimeMillis())
+                if (previous.hasData && incomingTimestamp > 0L && incomingTimestamp < previous.timestampMs) {
+                    Log.w(TAG, "Ignoring out-of-order training state payload (timestamp older than cached)")
+                    return@launch
+                }
+
+                val targetLabels = json.optInt("targetLabels", 10).coerceAtLeast(1)
+                val usableLabels = json.optInt("usableLabels", 0).coerceAtLeast(0)
+                val yesLabels = json.optInt("yesLabels", 0).coerceAtLeast(0)
+                val noLabels = json.optInt("noLabels", 0).coerceAtLeast(0)
+                val ignoredLabels = json.optInt("ignoredLabels", 0).coerceAtLeast(0)
+                val promptsTotal = json.optInt("promptsTotal", 0).coerceAtLeast(0)
+                val promptsToday = json.optInt("promptsToday", 0).coerceAtLeast(0)
+                val payloadHasEnough = json.optBoolean("hasEnoughLabels", false)
+                val effectiveHasEnough = payloadHasEnough && usableLabels >= targetLabels
+
                 val snapshot = WatchTrainingStateSnapshot(
                     hasData = true,
                     enabled = json.optBoolean("enabled", false),
                     engineState = json.optString("engineState", "OFF"),
                     uiState = json.optString("uiState", "OFF"),
-                    usableLabels = json.optInt("usableLabels", 0),
-                    targetLabels = json.optInt("targetLabels", 10).coerceAtLeast(1),
-                    yesLabels = json.optInt("yesLabels", 0),
-                    noLabels = json.optInt("noLabels", 0),
-                    ignoredLabels = json.optInt("ignoredLabels", 0),
-                    promptsTotal = json.optInt("promptsTotal", 0),
-                    promptsToday = json.optInt("promptsToday", 0),
-                    hasEnoughLabels = json.optBoolean("hasEnoughLabels", false),
-                    timestampMs = json.optLong("timestamp", System.currentTimeMillis()),
-                    trainingStartTimeMs = json.optLong("trainingStartTimeMs", 0L),
-                    trainingCompletedTimeMs = json.optLong("trainingCompletedTimeMs", 0L),
-                    lastPromptTimeMs = json.optLong("lastPromptTimeMs", 0L),
-                    lastFeedbackTimeMs = json.optLong("lastFeedbackTimeMs", 0L),
+                    usableLabels = usableLabels,
+                    targetLabels = targetLabels,
+                    yesLabels = yesLabels,
+                    noLabels = noLabels,
+                    ignoredLabels = ignoredLabels,
+                    promptsTotal = promptsTotal,
+                    promptsToday = promptsToday,
+                    hasEnoughLabels = effectiveHasEnough,
+                    timestampMs = incomingTimestamp,
+                    trainingStartTimeMs = json.optLong("trainingStartTimeMs", 0L).coerceAtLeast(0L),
+                    trainingCompletedTimeMs = json.optLong("trainingCompletedTimeMs", 0L).coerceAtLeast(0L),
+                    lastPromptTimeMs = json.optLong("lastPromptTimeMs", 0L).coerceAtLeast(0L),
+                    lastFeedbackTimeMs = json.optLong("lastFeedbackTimeMs", 0L).coerceAtLeast(0L),
                     lastFeedbackLabel = json.optString("lastFeedbackLabel", "")
                 )
 
-                val prefs = getSharedPreferences(WatchTrainingStatePrefs.PREFS_NAME, MODE_PRIVATE)
                 WatchTrainingStatePrefs.write(prefs, snapshot)
+
+                val crossedThreshold = !previous.hasEnoughLabels && snapshot.hasEnoughLabels
+                if (crossedThreshold) {
+                    val tuneSnapshot = TrainingTuneStateStore.read(applicationContext)
+                    val now = System.currentTimeMillis()
+                    val autoApplyBlocked = tuneSnapshot.autoApplyBlockedUntilMs > now
+                    val configManager = TremorConfigManager(applicationContext)
+                    if (!autoApplyBlocked && configManager.isTrainingModeEnabled()) {
+                        val enqueued = NightlyAutoTuner.enqueueImmediate(
+                            context = applicationContext,
+                            reason = "watch_threshold_reached"
+                        )
+                        Log.i(TAG, "Immediate auto-tune enqueue on threshold-cross: enqueued=$enqueued")
+                    } else {
+                        Log.i(
+                            TAG,
+                            "Skipped immediate auto-tune enqueue: blocked=$autoApplyBlocked training=${configManager.isTrainingModeEnabled()}"
+                        )
+                    }
+                }
 
                 Log.i(
                     TAG,

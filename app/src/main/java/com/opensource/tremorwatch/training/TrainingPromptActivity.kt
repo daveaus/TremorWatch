@@ -298,8 +298,8 @@ private fun TrainingPromptScreen(
 
             item {
                 PromptActionChip(
-                    title = "Ignore",
-                    subtitle = "Skip this prompt",
+                    title = "Unsure / Ignore",
+                    subtitle = "Not clear enough to label",
                     onClick = onIgnore,
                     colors = ChipDefaults.secondaryChipColors()
                 )
@@ -378,9 +378,9 @@ private fun TrainingPromptResultScreen(
             backgroundColor = Color(0xFF0D47A1).copy(alpha = 0.2f)
         )
         else -> SelectionUi(
-            emoji = "\u23ED",
-            title = "Prompt Skipped",
-            subtitle = "Returning...",
+            emoji = "\uD83E\uDD14",
+            title = "Marked Unsure",
+            subtitle = "Sample skipped",
             backgroundColor = Color(0xFF424242).copy(alpha = 0.2f)
         )
     }

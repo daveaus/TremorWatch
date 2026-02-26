@@ -104,3 +104,10 @@ data class TrainingSample(
     val shadowIsTremor: Boolean = false,
     val triggerReason: String = ""
 )
+
+/**
+ * Shared training thresholds used across watch + phone to keep behavior aligned.
+ */
+object TrainingThresholds {
+    const val MIN_USABLE_LABELS_FOR_PERSONALIZATION = 10
+}

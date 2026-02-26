@@ -7,21 +7,11 @@ import androidx.work.WorkerParameters
 import com.opensource.tremorwatch.phone.data.TrainingLabelDao
 
 /**
- * [P10] Custom WorkerFactory for NightlyAutoTuner.
- *
- * WorkManager's default reflection-based instantiation cannot construct
- * NightlyAutoTuner because it requires extra constructor parameters
- * (labelDao, configManager) that aren't part of the standard Worker signature.
- *
- * Register in Application.onCreate():
- *   val config = Configuration.Builder()
- *       .setWorkerFactory(TrainingWorkerFactory(labelDao, configManager))
- *       .build()
- *   WorkManager.initialize(this, config)
+ * Custom WorkerFactory for NightlyAutoTuner.
  */
 class TrainingWorkerFactory(
     private val labelDao: TrainingLabelDao,
-    private val configManager: TremorConfigManager
+    private val configBridge: TrainingConfigBridge
 ) : WorkerFactory() {
 
     override fun createWorker(
@@ -31,8 +21,8 @@ class TrainingWorkerFactory(
     ): ListenableWorker? {
         return when (workerClassName) {
             NightlyAutoTuner::class.java.name ->
-                NightlyAutoTuner(appContext, workerParameters, labelDao, configManager)
-            else -> null  // Delegate to default factory for other workers
+                NightlyAutoTuner(appContext, workerParameters, labelDao, configBridge)
+            else -> null
         }
     }
 }
