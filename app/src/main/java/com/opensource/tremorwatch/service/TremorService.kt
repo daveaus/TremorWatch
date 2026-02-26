@@ -117,6 +117,8 @@ class TremorService : LifecycleService(), SensorEventListener {
 
         /** WakeLock auto-release timeout. Monitor renews every 10 min, so 15 min gives safety margin. */
         private const val WAKELOCK_TIMEOUT_MS = 15 * 60 * 1000L // 15 minutes
+        private const val WATCHDOG_INTERVAL_ACTIVE_MS = 5 * 60 * 1000L
+        private const val WATCHDOG_INTERVAL_PAUSED_MS = 15 * 60 * 1000L
 
         // Instance tracking for watch-side objective context computation (opus46 Issue 3d)
         @Volatile
@@ -1302,9 +1304,13 @@ class TremorService : LifecycleService(), SensorEventListener {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-            // Schedule alarm - 30 minutes standard
-            val watchdogInterval = 30 * 60 * 1000L
-            val triggerAtMillis = SystemClock.elapsedRealtime() + watchdogInterval
+        val watchdogInterval = if (isPausedDueToWearState) {
+            WATCHDOG_INTERVAL_PAUSED_MS
+        } else {
+            WATCHDOG_INTERVAL_ACTIVE_MS
+        }
+        val triggerAtMillis = SystemClock.elapsedRealtime() + watchdogInterval
+        val intervalMinutes = watchdogInterval / 60_000L
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             // Android 12+ - check if we can schedule exact alarms
@@ -1314,7 +1320,7 @@ class TremorService : LifecycleService(), SensorEventListener {
                     triggerAtMillis,
                     pendingIntent
                 )
-                Timber.d("Watchdog alarm scheduled (exact) for 30 minutes from now (battery optimized)")
+                Timber.d("Watchdog alarm scheduled (exact) for ${intervalMinutes}m from now")
             } else {
                 // Fall back to inexact alarm
                 alarmManager.setAndAllowWhileIdle(
@@ -1322,7 +1328,7 @@ class TremorService : LifecycleService(), SensorEventListener {
                     triggerAtMillis,
                     pendingIntent
                 )
-                Timber.w("Watchdog alarm scheduled (inexact) - exact alarm permission not granted")
+                Timber.w("Watchdog alarm scheduled (inexact) for ~${intervalMinutes}m from now - exact alarm permission not granted")
             }
         } else {
             alarmManager.setExactAndAllowWhileIdle(
@@ -1330,7 +1336,7 @@ class TremorService : LifecycleService(), SensorEventListener {
                 triggerAtMillis,
                 pendingIntent
             )
-            Timber.d("Watchdog alarm scheduled (exact) for 2 minutes from now")
+            Timber.d("Watchdog alarm scheduled (exact) for ${intervalMinutes}m from now")
         }
     }
 
