@@ -28,7 +28,9 @@ data class TrainingTuneSnapshot(
     val syncedToWatch: Boolean = false,
     val hasRollbackSnapshot: Boolean = false,
     val lastImmediateEnqueueMs: Long = 0L,
-    val autoApplyBlockedUntilMs: Long = 0L
+    val autoApplyBlockedUntilMs: Long = 0L,
+    val lastChangedParamsSummary: String = "",
+    val lastTunePhase: String = ""
 )
 
 object TrainingTuneStateStore {
@@ -49,6 +51,8 @@ object TrainingTuneStateStore {
     private const val KEY_HAS_ROLLBACK_SNAPSHOT = "has_rollback_snapshot"
     private const val KEY_LAST_IMMEDIATE_ENQUEUE_MS = "last_immediate_enqueue_ms"
     private const val KEY_AUTO_APPLY_BLOCKED_UNTIL_MS = "auto_apply_blocked_until_ms"
+    private const val KEY_LAST_CHANGED_PARAMS_SUMMARY = "last_changed_params_summary"
+    private const val KEY_LAST_TUNE_PHASE = "last_tune_phase"
 
     private val lock = Any()
 
@@ -80,7 +84,9 @@ object TrainingTuneStateStore {
             syncedToWatch = prefs.getBoolean(KEY_SYNCED_TO_WATCH, false),
             hasRollbackSnapshot = prefs.getBoolean(KEY_HAS_ROLLBACK_SNAPSHOT, false),
             lastImmediateEnqueueMs = prefs.getLong(KEY_LAST_IMMEDIATE_ENQUEUE_MS, 0L),
-            autoApplyBlockedUntilMs = prefs.getLong(KEY_AUTO_APPLY_BLOCKED_UNTIL_MS, 0L)
+            autoApplyBlockedUntilMs = prefs.getLong(KEY_AUTO_APPLY_BLOCKED_UNTIL_MS, 0L),
+            lastChangedParamsSummary = prefs.getString(KEY_LAST_CHANGED_PARAMS_SUMMARY, "") ?: "",
+            lastTunePhase = prefs.getString(KEY_LAST_TUNE_PHASE, "") ?: ""
         )
     }
 
@@ -101,6 +107,8 @@ object TrainingTuneStateStore {
             .putBoolean(KEY_HAS_ROLLBACK_SNAPSHOT, snapshot.hasRollbackSnapshot)
             .putLong(KEY_LAST_IMMEDIATE_ENQUEUE_MS, snapshot.lastImmediateEnqueueMs)
             .putLong(KEY_AUTO_APPLY_BLOCKED_UNTIL_MS, snapshot.autoApplyBlockedUntilMs)
+            .putString(KEY_LAST_CHANGED_PARAMS_SUMMARY, snapshot.lastChangedParamsSummary)
+            .putString(KEY_LAST_TUNE_PHASE, snapshot.lastTunePhase)
             .apply()
     }
 
@@ -140,6 +148,8 @@ object TrainingTuneStateStore {
         syncedToWatch: Boolean,
         hasRollbackSnapshot: Boolean,
         appliedNow: Boolean,
+        changedParamsSummary: String = "",
+        tunePhase: String = "",
         runTimestampMs: Long = System.currentTimeMillis()
     ) {
         val safeSamplesUsed = max(0, samplesUsed)
@@ -159,7 +169,9 @@ object TrainingTuneStateStore {
                 lastAppliedTimeMs = if (appliedNow) safeRunTimestamp else it.lastAppliedTimeMs,
                 trainedProfileActive = trainedProfileActive,
                 syncedToWatch = syncedToWatch,
-                hasRollbackSnapshot = hasRollbackSnapshot
+                hasRollbackSnapshot = hasRollbackSnapshot,
+                lastChangedParamsSummary = changedParamsSummary,
+                lastTunePhase = tunePhase
             )
         }
     }

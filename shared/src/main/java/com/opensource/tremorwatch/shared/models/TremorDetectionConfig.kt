@@ -186,6 +186,12 @@ data class TremorDetectionConfig(
             "Active band low ($activeBandLowHz Hz) must be less than high ($activeBandHighHz Hz)"
         }
         require(minFrequencyHz > 0) { "Minimum frequency must be positive" }
+        require(minFrequencyHz <= restingBandLowHz) {
+            "Minimum frequency ($minFrequencyHz Hz) must be <= resting band low ($restingBandLowHz Hz)"
+        }
+        require(minFrequencyHz <= activeBandLowHz) {
+            "Minimum frequency ($minFrequencyHz Hz) must be <= active band low ($activeBandLowHz Hz)"
+        }
         require(restingBandHighHz <= 20) { "Frequency bands should be <= 20 Hz (Nyquist limit ~25Hz)" }
         require(activeBandHighHz <= 20) { "Frequency bands should be <= 20 Hz (Nyquist limit ~25Hz)" }
 

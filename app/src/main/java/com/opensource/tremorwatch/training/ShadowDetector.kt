@@ -110,7 +110,13 @@ class ShadowDetector(private val sampleRate: Float) {
             accelMagnitude = accelMagnitude,
             activityType = activityType,
             activityConfidence = activityConfidence,
-            isResting = isResting
+            isResting = isResting,
+            bandPower2to4Hz = shadowResult.bandPower2to4Hz,
+            bandPower4to6Hz = shadowResult.bandPower4to6Hz,
+            bandPower6to8Hz = shadowResult.bandPower6to8Hz,
+            bandPower8to10Hz = shadowResult.bandPower8to10Hz,
+            bandPower10to12Hz = shadowResult.bandPower10to12Hz,
+            bandPower12to14Hz = shadowResult.bandPower12to14Hz
         )
 
         if (shouldPrompt) {

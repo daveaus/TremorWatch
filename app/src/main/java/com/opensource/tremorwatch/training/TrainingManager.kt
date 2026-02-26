@@ -354,7 +354,13 @@ class TrainingManager(
             magnitude = tremorData.magnitude,
             accelMagnitude = tremorData.accelMagnitude,
             activityType = tremorData.activityType,
-            activityConfidence = tremorData.activityConfidence
+            activityConfidence = tremorData.activityConfidence,
+            bandPower2to4Hz = result.bandPower2to4Hz,
+            bandPower4to6Hz = result.bandPower4to6Hz,
+            bandPower6to8Hz = result.bandPower6to8Hz,
+            bandPower8to10Hz = result.bandPower8to10Hz,
+            bandPower10to12Hz = result.bandPower10to12Hz,
+            bandPower12to14Hz = result.bandPower12to14Hz
         )
 
         val shadowResult = ShadowDetector.ShadowResult(
@@ -405,6 +411,12 @@ class TrainingManager(
             accelMagnitude = shadowResult.features.accelMagnitude,
             activityType = shadowResult.features.activityType,
             activityConfidence = shadowResult.features.activityConfidence,
+            bandPower2to4Hz = shadowResult.features.bandPower2to4Hz,
+            bandPower4to6Hz = shadowResult.features.bandPower4to6Hz,
+            bandPower6to8Hz = shadowResult.features.bandPower6to8Hz,
+            bandPower8to10Hz = shadowResult.features.bandPower8to10Hz,
+            bandPower10to12Hz = shadowResult.features.bandPower10to12Hz,
+            bandPower12to14Hz = shadowResult.features.bandPower12to14Hz,
             productionIsTremor = shadowResult.productionIsTremor,
             shadowIsTremor = shadowResult.experimentalIsTremor,
             triggerReason = shadowResult.triggerReason

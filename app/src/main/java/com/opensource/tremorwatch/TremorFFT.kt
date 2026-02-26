@@ -94,7 +94,13 @@ class TremorFFT(private val sampleRate: Float = 20f) {
         val spectralEntropy: Float,      // Normalized spectral entropy [0..1]
         val harmonicRatio: Float,        // 2f harmonic support ratio [0..1+]
         val isTremor: Boolean,           // Whether tremor was detected
-        val confidence: Float            // 0-1 confidence score
+        val confidence: Float,           // 0-1 confidence score
+        val bandPower2to4Hz: Float = 0f,
+        val bandPower4to6Hz: Float = 0f,
+        val bandPower6to8Hz: Float = 0f,
+        val bandPower8to10Hz: Float = 0f,
+        val bandPower10to12Hz: Float = 0f,
+        val bandPower12to14Hz: Float = 0f
     )
     
     /**
@@ -165,15 +171,23 @@ class TremorFFT(private val sampleRate: Float = 20f) {
         var maxPower = 0f
         var dominantFreq = 0f
         var dominantBin = -1
+        val fixedBandPowers = FloatArray(6) // 2-4, 4-6, ..., 12-14
 
         for (i in 0 until n / 2) {
             val freq = i * freqResolution
+            val binPower = powerSpectrum[i]
+
+            // Single pass: accumulate 2Hz buckets used by phone-side training simulation.
+            val bucketIndex = ((freq - 2f) / 2f).toInt()
+            if (bucketIndex in 0..5) {
+                fixedBandPowers[bucketIndex] += binPower
+            }
 
             if (freq >= bandLow && freq <= bandHigh) {
-                tremorBandPower += powerSpectrum[i]
+                tremorBandPower += binPower
 
-                if (powerSpectrum[i] > maxPower) {
-                    maxPower = powerSpectrum[i]
+                if (binPower > maxPower) {
+                    maxPower = binPower
                     dominantFreq = freq
                     dominantBin = i
                 }
@@ -294,7 +308,13 @@ class TremorFFT(private val sampleRate: Float = 20f) {
             spectralEntropy = spectralEntropy,
             harmonicRatio = harmonicRatio,
             isTremor = isTremor,
-            confidence = confidence.coerceIn(0f, 1f)
+            confidence = confidence.coerceIn(0f, 1f),
+            bandPower2to4Hz = fixedBandPowers[0],
+            bandPower4to6Hz = fixedBandPowers[1],
+            bandPower6to8Hz = fixedBandPowers[2],
+            bandPower8to10Hz = fixedBandPowers[3],
+            bandPower10to12Hz = fixedBandPowers[4],
+            bandPower12to14Hz = fixedBandPowers[5]
         )
     }
 

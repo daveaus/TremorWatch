@@ -731,6 +731,13 @@ private fun TrainingInsightsSection(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+                if (tuneSnapshot.lastTunePhase.isNotBlank()) {
+                    Text(
+                        "Last run phase: ${tuneSnapshot.lastTunePhase.replace('_', ' ')}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
                 if (tuneSnapshot.lastRunReason.isNotBlank()) {
                     Text(
                         "Last run reason: ${tuneSnapshot.lastRunReason.replace('_', ' ')}",
@@ -747,6 +754,13 @@ private fun TrainingInsightsSection(
                 )
                 Text(
                     "Tune score: ${"%.3f".format(tuneSnapshot.beforeJ)} -> ${"%.3f".format(tuneSnapshot.afterJ)}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            if (tuneSnapshot.lastChangedParamsSummary.isNotBlank()) {
+                Text(
+                    "Last auto-tune changes: ${tuneSnapshot.lastChangedParamsSummary}",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -1078,7 +1092,15 @@ private fun FrequencySettingsSection(
             unit = "Hz",
             help = "Lower bound for resting tremor (Parkinsonian: 4-6Hz)",
             isModified = config.restingBandLowHz != TremorDetectionConfig().restingBandLowHz
-        ) { onConfigChange(config.copy(restingBandLowHz = it)) }
+        ) {
+            val nextMinFrequency = minOf(config.minFrequencyHz, it, config.activeBandLowHz)
+            onConfigChange(
+                config.copy(
+                    restingBandLowHz = it,
+                    minFrequencyHz = nextMinFrequency
+                )
+            )
+        }
 
         SliderSetting(
             label = "Resting Band High",
@@ -1096,7 +1118,15 @@ private fun FrequencySettingsSection(
             unit = "Hz",
             help = "Lower bound for action tremor",
             isModified = config.activeBandLowHz != TremorDetectionConfig().activeBandLowHz
-        ) { onConfigChange(config.copy(activeBandLowHz = it)) }
+        ) {
+            val nextMinFrequency = minOf(config.minFrequencyHz, config.restingBandLowHz, it)
+            onConfigChange(
+                config.copy(
+                    activeBandLowHz = it,
+                    minFrequencyHz = nextMinFrequency
+                )
+            )
+        }
 
         SliderSetting(
             label = "Active Band High",

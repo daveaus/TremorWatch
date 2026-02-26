@@ -20,7 +20,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         MedicationIngestionEntity::class,
         TrainingLabelEntity::class
     ],
-    version = 8,
+    version = 9,
     exportSchema = false
 )
 abstract class TremorRoomDatabase : RoomDatabase() {
@@ -165,7 +165,8 @@ abstract class TremorRoomDatabase : RoomDatabase() {
                     MIGRATION_4_5,
                     MIGRATION_5_6,
                     MIGRATION_6_7,
-                    MIGRATION_7_8
+                    MIGRATION_7_8,
+                    MIGRATION_8_9
                 )
                 .build()
                 INSTANCE = instance
@@ -261,6 +262,33 @@ abstract class TremorRoomDatabase : RoomDatabase() {
                 )
                 database.execSQL(
                     "CREATE INDEX IF NOT EXISTS index_training_labels_label ON training_labels(label)"
+                )
+            }
+        }
+
+        /**
+         * Migration from v8 to v9: adds fixed-band power columns used by expanded auto-tune.
+         * Additive-only migration to avoid destructive table recreation and preserve labels.
+         */
+        private val MIGRATION_8_9 = object : Migration(8, 9) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL(
+                    "ALTER TABLE training_labels ADD COLUMN bandPower2to4Hz REAL NOT NULL DEFAULT 0.0"
+                )
+                database.execSQL(
+                    "ALTER TABLE training_labels ADD COLUMN bandPower4to6Hz REAL NOT NULL DEFAULT 0.0"
+                )
+                database.execSQL(
+                    "ALTER TABLE training_labels ADD COLUMN bandPower6to8Hz REAL NOT NULL DEFAULT 0.0"
+                )
+                database.execSQL(
+                    "ALTER TABLE training_labels ADD COLUMN bandPower8to10Hz REAL NOT NULL DEFAULT 0.0"
+                )
+                database.execSQL(
+                    "ALTER TABLE training_labels ADD COLUMN bandPower10to12Hz REAL NOT NULL DEFAULT 0.0"
+                )
+                database.execSQL(
+                    "ALTER TABLE training_labels ADD COLUMN bandPower12to14Hz REAL NOT NULL DEFAULT 0.0"
                 )
             }
         }

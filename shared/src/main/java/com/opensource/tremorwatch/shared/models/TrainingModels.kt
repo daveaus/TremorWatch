@@ -63,7 +63,14 @@ data class FeedbackFeatureSnapshot(
     // Context
     val activityType: String = "unknown",
     val activityConfidence: Float = 0f,
-    val isResting: Boolean = true
+    val isResting: Boolean = true,
+    // Compact fixed-band powers for offline boundary simulation
+    val bandPower2to4Hz: Float = 0f,
+    val bandPower4to6Hz: Float = 0f,
+    val bandPower6to8Hz: Float = 0f,
+    val bandPower8to10Hz: Float = 0f,
+    val bandPower10to12Hz: Float = 0f,
+    val bandPower12to14Hz: Float = 0f
 )
 
 /**
@@ -99,6 +106,13 @@ data class TrainingSample(
     val activityType: String = "unknown",
     val activityConfidence: Float = 0f,
     val isResting: Boolean = true,
+    // Compact fixed-band powers for offline boundary simulation
+    val bandPower2to4Hz: Float = 0f,
+    val bandPower4to6Hz: Float = 0f,
+    val bandPower6to8Hz: Float = 0f,
+    val bandPower8to10Hz: Float = 0f,
+    val bandPower10to12Hz: Float = 0f,
+    val bandPower12to14Hz: Float = 0f,
     // Detection outcomes at prompt time
     val productionIsTremor: Boolean = false,
     val shadowIsTremor: Boolean = false,

@@ -47,6 +47,20 @@ data class TrainingLabelEntity(
     val activityConfidence: Float = 0f,
     val isResting: Boolean = true,
 
+    // Fixed-band powers used for offline boundary simulation
+    @ColumnInfo(defaultValue = "0.0")
+    val bandPower2to4Hz: Float = 0f,
+    @ColumnInfo(defaultValue = "0.0")
+    val bandPower4to6Hz: Float = 0f,
+    @ColumnInfo(defaultValue = "0.0")
+    val bandPower6to8Hz: Float = 0f,
+    @ColumnInfo(defaultValue = "0.0")
+    val bandPower8to10Hz: Float = 0f,
+    @ColumnInfo(defaultValue = "0.0")
+    val bandPower10to12Hz: Float = 0f,
+    @ColumnInfo(defaultValue = "0.0")
+    val bandPower12to14Hz: Float = 0f,
+
     // Detection outcomes at prompt time
     val productionIsTremor: Boolean = false,
     val shadowIsTremor: Boolean = false,

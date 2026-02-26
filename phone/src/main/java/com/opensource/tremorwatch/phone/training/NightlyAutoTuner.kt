@@ -173,6 +173,8 @@ class NightlyAutoTuner(
                         trainedProfileActive = false,
                         syncedToWatch = false,
                         hasRollbackSnapshot = tuneState.hasRollbackSnapshot,
+                        changedParamsSummary = "",
+                        tunePhase = "none",
                         appliedNow = false
                     )
                     return@withLock Result.success()
@@ -190,6 +192,8 @@ class NightlyAutoTuner(
                         trainedProfileActive = false,
                         syncedToWatch = false,
                         hasRollbackSnapshot = tuneState.hasRollbackSnapshot,
+                        changedParamsSummary = "",
+                        tunePhase = "none",
                         appliedNow = false
                     )
                     return@withLock Result.success()
@@ -209,6 +213,8 @@ class NightlyAutoTuner(
                         trainedProfileActive = false,
                         syncedToWatch = false,
                         hasRollbackSnapshot = tuneState.hasRollbackSnapshot,
+                        changedParamsSummary = "",
+                        tunePhase = "none",
                         appliedNow = false
                     )
                     return@withLock Result.success()
@@ -216,7 +222,13 @@ class NightlyAutoTuner(
 
                 val currentConfig = configBridge.getCurrentConfig()
                 val optimizer = TrainingParameterOptimizer()
-                val optimization = optimizer.optimize(currentConfig, labels)
+                val optimization = optimizer.optimize(
+                    currentConfig = currentConfig,
+                    labels = labels,
+                    enableExpandedPowerGate = false
+                )
+                val changedSummary = formatChangedParams(optimization.changedParams)
+                val phaseLabel = optimization.phase.name.lowercase()
 
                 if (!optimization.applied) {
                     TrainingTuneStateStore.markRunResult(
@@ -230,6 +242,8 @@ class NightlyAutoTuner(
                         trainedProfileActive = false,
                         syncedToWatch = false,
                         hasRollbackSnapshot = tuneState.hasRollbackSnapshot,
+                        changedParamsSummary = changedSummary,
+                        tunePhase = phaseLabel,
                         appliedNow = false
                     )
                     return@withLock Result.success()
@@ -248,6 +262,8 @@ class NightlyAutoTuner(
                         trainedProfileActive = false,
                         syncedToWatch = false,
                         hasRollbackSnapshot = tuneState.hasRollbackSnapshot,
+                        changedParamsSummary = changedSummary,
+                        tunePhase = phaseLabel,
                         appliedNow = false
                     )
                     return@withLock Result.success()
@@ -267,6 +283,8 @@ class NightlyAutoTuner(
                         trainedProfileActive = false,
                         syncedToWatch = false,
                         hasRollbackSnapshot = applyResult.hasRollbackSnapshot,
+                        changedParamsSummary = changedSummary,
+                        tunePhase = phaseLabel,
                         appliedNow = false
                     )
                     return@withLock if (applyResult.retriableFailure) Result.retry() else Result.failure()
@@ -276,13 +294,15 @@ class NightlyAutoTuner(
                     context = applicationContext,
                     reason = runReason,
                     outcome = TrainingTuneOutcome.APPLIED,
-                    message = applyResult.detail,
+                    message = "${applyResult.detail}. ${optimization.reason}",
                     samplesUsed = optimization.samplesUsed,
                     beforeJ = optimization.beforeJ,
                     afterJ = optimization.afterJ,
                     trainedProfileActive = true,
                     syncedToWatch = applyResult.syncedToWatch,
                     hasRollbackSnapshot = applyResult.hasRollbackSnapshot,
+                    changedParamsSummary = changedSummary,
+                    tunePhase = phaseLabel,
                     appliedNow = true
                 )
 
@@ -307,6 +327,8 @@ class NightlyAutoTuner(
                     trainedProfileActive = false,
                     syncedToWatch = false,
                     hasRollbackSnapshot = TrainingTuneStateStore.read(applicationContext).hasRollbackSnapshot,
+                    changedParamsSummary = "",
+                    tunePhase = "none",
                     appliedNow = false
                 )
                 if (isTransient(e)) Result.retry() else Result.failure()
@@ -325,5 +347,12 @@ class NightlyAutoTuner(
 
     private fun isTransient(e: Exception): Boolean {
         return e is IOException || e is SQLiteException
+    }
+
+    private fun formatChangedParams(changed: List<TrainingParameterOptimizer.ParamDelta>): String {
+        if (changed.isEmpty()) return ""
+        return changed.joinToString(", ") {
+            "${it.key}: ${"%.3f".format(it.before)} -> ${"%.3f".format(it.after)}"
+        }
     }
 }
