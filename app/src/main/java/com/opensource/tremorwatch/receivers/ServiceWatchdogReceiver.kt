@@ -109,12 +109,11 @@ class ServiceWatchdogReceiver : BroadcastReceiver() {
                         return@withTimeoutOrNull
                     }
 
-                    // ES-08: Skip restart if service is already healthy and running.
-                    if (TremorService.isRunning) {
-                        Timber.d("Service is already running - watchdog ping skipped")
-                        scheduleNextWatchdog(appContext, HEALTH_CHECK_INTERVAL_MS)
-                        return@withTimeoutOrNull
-                    }
+                    // ES-08: RACE CONDITION FIX: Always ping service to perform health checks
+                    // The isRunning flag can't reliably indicate service health (sensors could be frozen)
+                    // Always calling startService will trigger onStartCommand which performs health checks
+                    // and handles the case where service is already running (just calls onStartCommand again)
+                    Timber.d("Watchdog pinging service for health check")
 
                     // Always try to ping/restart the service to keep it alive (triggers onStartCommand).
                     try {

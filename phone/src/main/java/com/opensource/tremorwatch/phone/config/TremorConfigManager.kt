@@ -24,6 +24,8 @@ import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import timber.log.Timber
 import java.io.File
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 
 /**
  * Manages tremor detection configuration profiles.
@@ -188,8 +190,10 @@ class TremorConfigManager(private val context: Context) {
      */
     suspend fun requestTrainingStateFromWatch(): Boolean {
         return try {
+            // [M4] All Tasks.await() calls use 10s timeout to prevent indefinite blocking
+            // on BT stack hangs, which are non-trivial on WearOS.
             val nodes = withContext(Dispatchers.IO) {
-                Tasks.await(nodeClient.connectedNodes)
+                Tasks.await(nodeClient.connectedNodes, 10L, TimeUnit.SECONDS)
             }
             if (nodes.isEmpty()) {
                 Timber.w("No connected watch nodes for training status request")
@@ -208,10 +212,13 @@ class TremorConfigManager(private val context: Context) {
                                 node.id,
                                 Constants.MESSAGE_PATH_TRAINING_STATE_REQUEST,
                                 payload
-                            )
+                            ),
+                            10L, TimeUnit.SECONDS
                         )
                     }
                     sentToAnyNode = true
+                } catch (e: TimeoutException) {
+                    Timber.w("Timed out requesting training state from node ${node.displayName}")
                 } catch (e: Exception) {
                     Timber.w(e, "Failed to request training state from node ${node.displayName}")
                 }
@@ -467,9 +474,12 @@ class TremorConfigManager(private val context: Context) {
                     dataMap.putInt("version", config.version)
                 }
 
-                // Synchronous call with Tasks API
+                // [M4] 10s timeout prevents indefinite block on BT stack hang
                 val result = withContext(Dispatchers.IO) {
-                    Tasks.await(dataClient.putDataItem(request.asPutDataRequest().setUrgent()))
+                    Tasks.await(
+                        dataClient.putDataItem(request.asPutDataRequest().setUrgent()),
+                        10L, TimeUnit.SECONDS
+                    )
                 }
 
                 Timber.i("Config synced to watch successfully: ${config.profileName}")
@@ -536,8 +546,9 @@ class TremorConfigManager(private val context: Context) {
 
     private suspend fun sendTrainingModeToWatch(enabled: Boolean): Boolean {
         return try {
+            // [M4] 10s timeout prevents indefinite coroutine block on BT stack hang
             val nodes = withContext(Dispatchers.IO) {
-                Tasks.await(nodeClient.connectedNodes)
+                Tasks.await(nodeClient.connectedNodes, 10L, TimeUnit.SECONDS)
             }
             if (nodes.isEmpty()) {
                 Timber.w("No connected watch nodes for training mode sync")
@@ -550,6 +561,8 @@ class TremorConfigManager(private val context: Context) {
             var sentToAnyNode = false
             for (node in nodes) {
                 var sentToNode = false
+                // [M4] 10s timeout on all Tasks.await() to prevent indefinite blocking
+                // on BT stack hangs (non-trivial on WearOS).
                 try {
                     withContext(Dispatchers.IO) {
                         Tasks.await(
@@ -557,10 +570,13 @@ class TremorConfigManager(private val context: Context) {
                                 node.id,
                                 Constants.MESSAGE_PATH_TRAINING_CONFIG_UPDATE,
                                 payload
-                            )
+                            ),
+                            10L, TimeUnit.SECONDS
                         )
                     }
                     sentToNode = true
+                } catch (e: TimeoutException) {
+                    Timber.w("Timed out sending training mode update (new path) to node ${node.displayName}")
                 } catch (e: Exception) {
                     Timber.w(e, "Failed to send training mode update (new path) to node ${node.displayName}")
                 }
@@ -573,10 +589,13 @@ class TremorConfigManager(private val context: Context) {
                                 node.id,
                                 Constants.MESSAGE_PATH_TRAINING_STATE,
                                 payload
-                            )
+                            ),
+                            10L, TimeUnit.SECONDS
                         )
                     }
                     sentToNode = true
+                } catch (e: TimeoutException) {
+                    Timber.w("Timed out sending training mode update (legacy path) to node ${node.displayName}")
                 } catch (e: Exception) {
                     Timber.w(e, "Failed to send training mode update (legacy path) to node ${node.displayName}")
                 }
