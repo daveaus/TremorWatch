@@ -1,15 +1,20 @@
 package com.opensource.tremorwatch.phone.stats
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -18,6 +23,8 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -40,7 +47,8 @@ import java.util.Locale
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun StatsScreen(
-    onNavigateBack: () -> Unit
+    onNavigateBack: () -> Unit,
+    onNavigateToSeverityProfile: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -57,6 +65,16 @@ fun StatsScreen(
     var medicationLoading by remember { mutableStateOf(true) }
     var medicationError by remember { mutableStateOf<String?>(null) }
     val ingestionTimeFormatter = remember { DateTimeFormatter.ofPattern("MM-dd HH:mm") }
+
+    // Frequency profile state (date-reactive)
+    var frequencyProfile by remember { mutableStateOf<FrequencyProfileResult?>(null) }
+    var frequencyLoading by remember { mutableStateOf(false) }
+    var frequencyError by remember { mutableStateOf<String?>(null) }
+
+    // Compact severity timeline state (always last 6 hours, date-independent)
+    var compactTimeline by remember { mutableStateOf<SeverityTimelineResult?>(null) }
+    var compactLoading by remember { mutableStateOf(false) }
+    var compactError by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(Unit) {
         isLoading = true
@@ -83,6 +101,35 @@ fun StatsScreen(
 
         if (selectedDate == null) {
             selectedDate = history.firstOrNull()?.date
+        }
+    }
+
+    // Load frequency profile when selected date changes
+    LaunchedEffect(selectedDate) {
+        val date = selectedDate ?: return@LaunchedEffect
+        frequencyLoading = true
+        frequencyError = null
+        frequencyProfile = try {
+            repo.computeFrequencyProfile(date, zoneId)
+        } catch (e: Exception) {
+            frequencyError = e.message ?: "Failed to load frequency data"
+            null
+        } finally {
+            frequencyLoading = false
+        }
+    }
+
+    // Load compact severity timeline (last 6 hours, independent of date)
+    LaunchedEffect(Unit) {
+        compactLoading = true
+        compactError = null
+        compactTimeline = try {
+            repo.computeCompactSeverityTimeline(hoursBack = 6, zoneId = zoneId)
+        } catch (e: Exception) {
+            compactError = e.message ?: "Failed to load timeline"
+            null
+        } finally {
+            compactLoading = false
         }
     }
 
@@ -254,6 +301,21 @@ fun StatsScreen(
                 }
             }
         }
+
+        // ==================== Frequency Profile Card ====================
+        FrequencyProfileCard(
+            profile = frequencyProfile,
+            isLoading = frequencyLoading,
+            error = frequencyError
+        )
+
+        // ==================== Compact Severity Timeline Card ====================
+        CompactSeverityCard(
+            timeline = compactTimeline,
+            isLoading = compactLoading,
+            error = compactError,
+            onViewFullTimeline = onNavigateToSeverityProfile
+        )
 
         Card(
             modifier = Modifier.fillMaxWidth(),
@@ -467,6 +529,31 @@ fun StatsScreen(
                             } finally {
                                 medicationLoading = false
                             }
+
+                            // Recompute frequency profile & compact severity timeline
+                            val recomputeDate = selectedDate ?: Instant.ofEpochMilli(System.currentTimeMillis())
+                                .atZone(zoneId).toLocalDate()
+                            frequencyLoading = true
+                            frequencyError = null
+                            frequencyProfile = try {
+                                repo.computeFrequencyProfile(recomputeDate, zoneId)
+                            } catch (e: Exception) {
+                                frequencyError = e.message
+                                null
+                            } finally {
+                                frequencyLoading = false
+                            }
+
+                            compactLoading = true
+                            compactError = null
+                            compactTimeline = try {
+                                repo.computeCompactSeverityTimeline(hoursBack = 6, zoneId = zoneId)
+                            } catch (e: Exception) {
+                                compactError = e.message
+                                null
+                            } finally {
+                                compactLoading = false
+                            }
                         }
                     }
                 ) {
@@ -474,5 +561,232 @@ fun StatsScreen(
                 }
             }
         }
+    }
+}
+
+// ==================== Frequency Profile Card ====================
+
+@Composable
+private fun FrequencyProfileCard(
+    profile: FrequencyProfileResult?,
+    isLoading: Boolean,
+    error: String?
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Text(
+                text = "Frequency Profile",
+                style = MaterialTheme.typography.titleMedium
+            )
+
+            when {
+                isLoading -> {
+                    Text(
+                        text = "Loading frequency data...",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                error != null -> {
+                    Text(
+                        text = error,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
+                profile == null || profile.entries.isEmpty() -> {
+                    Text(
+                        text = profile?.message ?: "No frequency data available",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                else -> {
+                    // Header row
+                    Row(modifier = Modifier.fillMaxWidth()) {
+                        Text("Frequency", Modifier.weight(1f), style = MaterialTheme.typography.labelSmall)
+                        Text("Count", Modifier.weight(0.7f), style = MaterialTheme.typography.labelSmall)
+                        Text("Pct", Modifier.weight(0.5f), style = MaterialTheme.typography.labelSmall)
+                        Text("Classification", Modifier.weight(1.5f), style = MaterialTheme.typography.labelSmall)
+                    }
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+                    profile.entries.take(10).forEachIndexed { idx, entry ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 2.dp)
+                        ) {
+                            Text(
+                                String.format(Locale.US, "%.2f Hz", entry.frequencyHz),
+                                Modifier.weight(1f),
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                            Text(
+                                "%,d".format(entry.count),
+                                Modifier.weight(0.7f),
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                            Text(
+                                String.format(Locale.US, "%.1f%%", entry.percentage),
+                                Modifier.weight(0.5f),
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                            Text(
+                                entry.classification,
+                                Modifier.weight(1.5f),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        if (idx != profile.entries.take(10).lastIndex) {
+                            HorizontalDivider(
+                                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "Total tremor samples: %,d".format(profile.totalTremorSamples),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+    }
+}
+
+// ==================== Compact Severity Card ====================
+
+@Composable
+private fun CompactSeverityCard(
+    timeline: SeverityTimelineResult?,
+    isLoading: Boolean,
+    error: String?,
+    onViewFullTimeline: () -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "Severity (Last 6h)",
+                    style = MaterialTheme.typography.titleMedium
+                )
+                TextButton(onClick = onViewFullTimeline) {
+                    Text("Full Timeline")
+                }
+            }
+
+            when {
+                isLoading -> {
+                    Text(
+                        text = "Loading...",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                error != null -> {
+                    Text(text = error, style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error)
+                }
+                timeline == null || timeline.buckets.isEmpty() -> {
+                    Text(
+                        text = timeline?.message ?: "No recent data",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                else -> {
+                    // Column headers
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Text("Time", style = MaterialTheme.typography.labelSmall, modifier = Modifier.width(40.dp))
+                        Text("Sev", style = MaterialTheme.typography.labelSmall, modifier = Modifier.width(30.dp))
+                        Text("Tremor", style = MaterialTheme.typography.labelSmall, modifier = Modifier.width(55.dp))
+                        Spacer(modifier = Modifier.weight(1f))
+                    }
+
+                    val maxSeverity = timeline.buckets.maxOfOrNull { it.avgSeverity }
+                        ?.coerceAtLeast(1.0) ?: 10.0
+
+                    timeline.buckets.forEach { bucket ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Text(bucket.timeLabel, style = MaterialTheme.typography.bodySmall, modifier = Modifier.width(40.dp))
+                            Text(
+                                String.format(Locale.US, "%.1f", bucket.avgSeverity),
+                                style = MaterialTheme.typography.bodySmall,
+                                modifier = Modifier.width(30.dp)
+                            )
+                            Text(
+                                "${bucket.tremorCount}/${bucket.totalCount}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.width(55.dp)
+                            )
+                            val fraction = (bucket.avgSeverity / maxSeverity)
+                                .coerceIn(0.0, 1.0).toFloat()
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(12.dp)
+                                    .clip(RoundedCornerShape(2.dp))
+                                    .background(MaterialTheme.colorScheme.surface)
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth(fraction)
+                                        .fillMaxHeight()
+                                        .background(severityColor(bucket.avgSeverity))
+                                )
+                            }
+                        }
+                    }
+
+                    // Peak/trough summary
+                    timeline.peakBucket?.let { peak ->
+                        Text(
+                            text = "${peak.timeLabel} Peak: ${String.format(Locale.US, "%.1f", peak.avgSeverity)}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun severityColor(severity: Double): Color {
+    return when {
+        severity >= 7.0 -> MaterialTheme.colorScheme.error
+        severity >= 4.0 -> MaterialTheme.colorScheme.tertiary
+        else -> MaterialTheme.colorScheme.primary
     }
 }

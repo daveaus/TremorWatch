@@ -13,6 +13,7 @@ import org.json.JSONObject
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 import kotlin.math.pow
 import kotlin.math.roundToInt
 
@@ -159,6 +160,144 @@ class StatsRepository(context: Context) {
         val isoBrier = ConfidenceCalibration.brierScore(rawScores, labels, isotonic)
 
         if (isoBrier.isFinite() && isoBrier < plattBrier) isotonic else platt
+    }
+
+    suspend fun computeFrequencyProfile(
+        date: LocalDate,
+        zoneId: ZoneId = ZoneId.systemDefault()
+    ): FrequencyProfileResult = withContext(Dispatchers.Default) {
+        val startMs = startOfDayMs(date, zoneId)
+        val endMs = endOfDayInclusive(date, zoneId)
+
+        val rows = withContext(Dispatchers.IO) {
+            dao.getFrequencyDistribution(startMs, endMs, limit = 20)
+        }
+
+        if (rows.isEmpty()) {
+            return@withContext FrequencyProfileResult(
+                entries = emptyList(),
+                totalTremorSamples = 0,
+                message = "No frequency data for this day"
+            )
+        }
+
+        val totalCount = rows.sumOf { it.count }
+
+        val entries = rows.map { row ->
+            FrequencyProfileEntry(
+                frequencyHz = row.roundedFrequency,
+                count = row.count,
+                percentage = if (totalCount > 0) (row.count.toDouble() / totalCount) * 100.0 else 0.0,
+                classification = classifyFrequency(row.roundedFrequency)
+            )
+        }
+
+        FrequencyProfileResult(
+            entries = entries,
+            totalTremorSamples = totalCount,
+            message = null
+        )
+    }
+
+    /**
+     * Compact severity timeline: last N hours, merged to 1-hour buckets.
+     * Used on the Stats summary page for a quick glance.
+     */
+    suspend fun computeCompactSeverityTimeline(
+        hoursBack: Int = 6,
+        zoneId: ZoneId = ZoneId.systemDefault()
+    ): SeverityTimelineResult = withContext(Dispatchers.Default) {
+        val now = System.currentTimeMillis()
+        val startMs = now - hoursBack * 3_600_000L
+        val timeFormatter = DateTimeFormatter.ofPattern("HH:mm")
+
+        val rows = withContext(Dispatchers.IO) {
+            dao.getFifteenMinuteBuckets(startMs, now)
+        }
+
+        if (rows.isEmpty()) {
+            return@withContext SeverityTimelineResult(
+                buckets = emptyList(),
+                peakBucket = null,
+                troughBucket = null,
+                message = "No recent data"
+            )
+        }
+
+        val fifteenMinBuckets = rows.map { row ->
+            SeverityBucket(
+                bucketTimestamp = row.bucketTimestamp,
+                avgSeverity = row.avgSeverity,
+                tremorCount = row.tremorSampleCount,
+                totalCount = row.totalSampleCount,
+                minSeverity = row.minSeverity,
+                maxSeverity = row.maxSeverity,
+                timeLabel = Instant.ofEpochMilli(row.bucketTimestamp)
+                    .atZone(zoneId)
+                    .format(timeFormatter)
+            )
+        }
+
+        val hourlyBuckets = fifteenMinBuckets.mergeToGranularity(TimelineGranularity.ONE_HOUR)
+        val tremorBuckets = hourlyBuckets.filter { it.tremorCount > 0 }
+
+        SeverityTimelineResult(
+            buckets = hourlyBuckets,
+            peakBucket = tremorBuckets.maxByOrNull { it.avgSeverity },
+            troughBucket = tremorBuckets.minByOrNull { it.avgSeverity },
+            message = null
+        )
+    }
+
+    /**
+     * Full severity timeline for a date at the requested granularity.
+     * Used on the dedicated SeverityProfileScreen.
+     */
+    suspend fun computeSeverityTimelineForDate(
+        date: LocalDate,
+        granularity: TimelineGranularity = TimelineGranularity.ONE_HOUR,
+        zoneId: ZoneId = ZoneId.systemDefault()
+    ): SeverityTimelineResult = withContext(Dispatchers.Default) {
+        val startMs = startOfDayMs(date, zoneId)
+        val endMs = endOfDayInclusive(date, zoneId)
+        val timeFormatter = DateTimeFormatter.ofPattern("HH:mm")
+
+        val rows = withContext(Dispatchers.IO) {
+            dao.getFifteenMinuteBuckets(startMs, endMs)
+        }
+
+        if (rows.isEmpty()) {
+            return@withContext SeverityTimelineResult(
+                buckets = emptyList(),
+                peakBucket = null,
+                troughBucket = null,
+                message = "No data for this day"
+            )
+        }
+
+        val fifteenMinBuckets = rows.map { row ->
+            SeverityBucket(
+                bucketTimestamp = row.bucketTimestamp,
+                avgSeverity = row.avgSeverity,
+                tremorCount = row.tremorSampleCount,
+                totalCount = row.totalSampleCount,
+                minSeverity = row.minSeverity,
+                maxSeverity = row.maxSeverity,
+                timeLabel = Instant.ofEpochMilli(row.bucketTimestamp)
+                    .atZone(zoneId)
+                    .format(timeFormatter)
+            )
+        }
+
+        val mergedBuckets = fifteenMinBuckets.mergeToGranularity(granularity)
+        val tremorBuckets = mergedBuckets.filter { it.tremorCount > 0 }
+
+        SeverityTimelineResult(
+            buckets = mergedBuckets,
+            peakBucket = tremorBuckets.maxByOrNull { it.avgSeverity },
+            troughBucket = tremorBuckets.minByOrNull { it.avgSeverity },
+            message = null
+        )
     }
 
     private suspend fun computeDailyStatsStreaming(

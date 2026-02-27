@@ -30,6 +30,20 @@ interface TremorDao {
         val notes: String?,
         val payloadJson: String?
     )
+
+    data class FrequencyDistributionRow(
+        val roundedFrequency: Double,
+        val count: Int
+    )
+
+    data class FifteenMinuteBucketRow(
+        val bucketTimestamp: Long,
+        val avgSeverity: Double,
+        val tremorSampleCount: Int,
+        val totalSampleCount: Int,
+        val minSeverity: Double,
+        val maxSeverity: Double
+    )
     
     /**
      * Get all samples after a cutoff timestamp.
@@ -186,6 +200,64 @@ interface TremorDao {
     """)
     suspend fun getAggregatedChartData(cutoffTime: Long): List<AggregatedChartData>
     
+    // ==================== Frequency & Severity Aggregations ====================
+
+    /**
+     * Frequency distribution: group tremor-positive, worn, not-charging samples
+     * by rounded dominantFrequency. Uses timestamp index for range filter.
+     */
+    @Query(
+        """
+        SELECT
+            ROUND(dominantFrequency, 2) AS roundedFrequency,
+            COUNT(*) AS count
+        FROM tremor_samples
+        WHERE timestamp >= :startTime
+          AND timestamp <= :endTime
+          AND tremorCount > 0
+          AND dominantFrequency IS NOT NULL
+          AND dominantFrequency > 0
+          AND isWorn = 1
+          AND (isCharging IS NULL OR isCharging = 0)
+        GROUP BY ROUND(dominantFrequency, 2)
+        ORDER BY count DESC
+        LIMIT :limit
+        """
+    )
+    suspend fun getFrequencyDistribution(
+        startTime: Long,
+        endTime: Long,
+        limit: Int = 20
+    ): List<FrequencyDistributionRow>
+
+    /**
+     * 15-minute severity buckets for severity timeline.
+     * Groups by timestamp / 900000 (15 min in ms).
+     * Returns at most 96 rows for a full day.
+     */
+    @Query(
+        """
+        SELECT
+            (timestamp / 900000) * 900000 AS bucketTimestamp,
+            AVG(severity) AS avgSeverity,
+            SUM(CASE WHEN tremorCount > 0 THEN 1 ELSE 0 END) AS tremorSampleCount,
+            COUNT(*) AS totalSampleCount,
+            MIN(severity) AS minSeverity,
+            MAX(severity) AS maxSeverity
+        FROM tremor_samples
+        WHERE timestamp >= :startTime
+          AND timestamp <= :endTime
+          AND isWorn = 1
+          AND (isCharging IS NULL OR isCharging = 0)
+        GROUP BY timestamp / 900000
+        ORDER BY bucketTimestamp ASC
+        """
+    )
+    suspend fun getFifteenMinuteBuckets(
+        startTime: Long,
+        endTime: Long
+    ): List<FifteenMinuteBucketRow>
+
     // ==================== Subjective Ratings ====================
     
     /**

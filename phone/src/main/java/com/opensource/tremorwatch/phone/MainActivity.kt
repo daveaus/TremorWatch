@@ -109,6 +109,7 @@ import com.opensource.tremorwatch.phone.typicalday.SubjectiveOverlayMode
 import com.opensource.tremorwatch.phone.stats.DailyStatsResult
 import com.opensource.tremorwatch.phone.stats.QuickStatsCard
 import com.opensource.tremorwatch.phone.stats.StatsRepository
+import com.opensource.tremorwatch.phone.stats.SeverityProfileScreen
 import com.opensource.tremorwatch.phone.stats.StatsScreen
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -287,7 +288,10 @@ fun TremorWatchApp() {
     } else {
         // Handle back button press
         BackHandler(enabled = currentScreen != "main") {
-            currentScreen = "main"
+            currentScreen = when (currentScreen) {
+                "severity_profile" -> "stats"
+                else -> "main"
+            }
         }
 
         when (currentScreen) {
@@ -310,7 +314,11 @@ fun TremorWatchApp() {
                 onNavigateBack = { currentScreen = "settings" }
             )
             "stats" -> StatsScreen(
-                onNavigateBack = { currentScreen = "main" }
+                onNavigateBack = { currentScreen = "main" },
+                onNavigateToSeverityProfile = { currentScreen = "severity_profile" }
+            )
+            "severity_profile" -> SeverityProfileScreen(
+                onNavigateBack = { currentScreen = "stats" }
             )
         }
     }

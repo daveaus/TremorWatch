@@ -5,6 +5,39 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ---
 
+## [Unreleased] — 2026-02-28 (in-app tremor analytics)
+
+### Added — Frequency Profile & Severity Timeline on Stats screen
+
+- **Frequency Profile card** (`StatsScreen.kt`, `TremorDao.kt`, `StatsModels.kt`, `StatsRepository.kt`):
+  New card on the Stats screen showing dominant tremor frequency distribution with counts,
+  percentages, and clinical classifications (resting tremor 4-6 Hz, essential/kinetic 6-8 Hz, etc.).
+  Uses SQL `GROUP BY ROUND(dominantFrequency, 2)` aggregation — no raw rows loaded into memory.
+  Filters to worn, not-charging, tremor-positive samples only.
+
+### Changed — Severity Timeline redesigned for performance and usability
+
+- **Compact Severity card on Stats page** (`StatsScreen.kt`, `StatsRepository.kt`):
+  Replaced the full-day 15-min timeline (up to 96 rows, slow to load) with a compact
+  6-hour hourly summary (max 6 rows). Includes a "Full Timeline" button to navigate
+  to the dedicated Severity Profile screen.
+
+- **New Severity Profile screen** (`SeverityProfileScreen.kt`, `MainActivity.kt`):
+  Dedicated screen with date navigation (back/forward arrows), granularity selector
+  (15 min / 30 min / 1 hr via Material3 SegmentedButtons), proper column headers
+  (Time, Sev, Tremor) with tap-to-explain tooltips, severity-colored visual bars,
+  PEAK/LOW annotations, and Day Arc Summary.
+
+- **TimelineGranularity model** (`StatsModels.kt`):
+  Added `TimelineGranularity` enum and `mergeToGranularity()` extension function
+  that aggregates 15-min SQL buckets into 30-min or 1-hour buckets in Kotlin
+  (weighted severity averaging, min/max preservation). No new DAO queries needed.
+
+- No database migration required — queries use existing columns (`dominantFrequency`, `severity`,
+  `tremorCount`, `isWorn`, `isCharging`, `timestamp`).
+
+---
+
 ## [Unreleased] — 2026-02-27 (log review hardening)
 
 ### Fixed — Log-review-driven improvements across watch and phone modules

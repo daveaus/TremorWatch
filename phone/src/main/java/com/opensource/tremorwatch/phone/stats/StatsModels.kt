@@ -64,6 +64,84 @@ data class DailyStatsResult(
     val baselineRestSeverity: Double?
 )
 
+// ==================== Frequency Profile ====================
+
+data class FrequencyProfileEntry(
+    val frequencyHz: Double,
+    val count: Int,
+    val percentage: Double,
+    val classification: String
+)
+
+data class FrequencyProfileResult(
+    val entries: List<FrequencyProfileEntry>,
+    val totalTremorSamples: Int,
+    val message: String?
+)
+
+fun classifyFrequency(hz: Double): String = when {
+    hz < 3.0  -> "Sub-tremor / artifact"
+    hz < 4.0  -> "Low-frequency tremor / artifact"
+    hz < 6.0  -> "Classic resting tremor"
+    hz < 8.0  -> "Essential / kinetic tremor"
+    hz < 12.0 -> "High-frequency / physiological"
+    else      -> "Very high / likely artifact"
+}
+
+// ==================== Severity Timeline ====================
+
+enum class TimelineGranularity(val label: String, val bucketsToMerge: Int) {
+    FIFTEEN_MIN("15 min", 1),
+    THIRTY_MIN("30 min", 2),
+    ONE_HOUR("1 hr", 4)
+}
+
+data class SeverityBucket(
+    val bucketTimestamp: Long,
+    val avgSeverity: Double,
+    val tremorCount: Int,
+    val totalCount: Int,
+    val minSeverity: Double,
+    val maxSeverity: Double,
+    val timeLabel: String
+)
+
+data class SeverityTimelineResult(
+    val buckets: List<SeverityBucket>,
+    val peakBucket: SeverityBucket?,
+    val troughBucket: SeverityBucket?,
+    val message: String?
+)
+
+/**
+ * Merge 15-min SeverityBuckets into wider buckets by grouping adjacent ones.
+ * For THIRTY_MIN: merge pairs. For ONE_HOUR: merge groups of 4.
+ * For FIFTEEN_MIN: returns unchanged.
+ */
+fun List<SeverityBucket>.mergeToGranularity(granularity: TimelineGranularity): List<SeverityBucket> {
+    if (granularity == TimelineGranularity.FIFTEEN_MIN || isEmpty()) return this
+    val groupSize = granularity.bucketsToMerge
+    val bucketDurationMs = groupSize * 900_000L
+    return groupBy { it.bucketTimestamp / bucketDurationMs }.values.map { group ->
+        val totalSamples = group.sumOf { it.totalCount }
+        val totalTremor = group.sumOf { it.tremorCount }
+        val weightedSeverity = if (totalSamples > 0) {
+            group.sumOf { it.avgSeverity * it.totalCount } / totalSamples
+        } else 0.0
+        SeverityBucket(
+            bucketTimestamp = group.first().bucketTimestamp,
+            avgSeverity = weightedSeverity,
+            tremorCount = totalTremor,
+            totalCount = totalSamples,
+            minSeverity = group.minOf { it.minSeverity },
+            maxSeverity = group.maxOf { it.maxSeverity },
+            timeLabel = group.first().timeLabel
+        )
+    }
+}
+
+// ==================== Utilities ====================
+
 fun formatMinutesAsHoursMinutes(minutes: Double): String {
     if (!minutes.isFinite() || minutes <= 0.0) return "0h 0m"
     val totalMinutes = floor(minutes).toInt().coerceAtLeast(0)
