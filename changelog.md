@@ -869,3 +869,14 @@ Implementation note:
   - `.\gradlew.bat :app:assembleDebug :phone:assembleDebug`
 
 
+
+## [Unreleased] - 2026-02-27 (watchdog restart-limit hotfix)
+
+### Fixed
+- ServiceWatchdogReceiver now records restart-window attempts only when recovering a stopped service or when foreground-service ping fails.
+- Healthy-running keepalive pings no longer increment restart counters.
+- Watchdog re-arm cadence now stays at 5 minutes for healthy service pings and 2 minutes for recovery/failure paths.
+- Prevents false repeated "Tap to restart Monitoring - Service restart limit reached" notifications while monitoring is active.
+
+**Files changed**:
+- app/src/main/java/com/opensource/tremorwatch/receivers/ServiceWatchdogReceiver.kt

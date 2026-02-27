@@ -109,11 +109,27 @@ class ServiceWatchdogReceiver : BroadcastReceiver() {
                         return@withTimeoutOrNull
                     }
 
+                    val serviceWasRunning = TremorService.isRunning
+                    var nextWatchdogDelayMs = if (serviceWasRunning) {
+                        HEALTH_CHECK_INTERVAL_MS
+                    } else {
+                        RESTART_RETRY_INTERVAL_MS
+                    }
+
+                    suspend fun persistRestartAttempt(reason: String) {
+                        try {
+                            prefsRepo.updateRestartAttempt(now, actualRestartCount + 1)
+                            Timber.w("$reason; restart attempt ${actualRestartCount + 1}/$MAX_RESTARTS_IN_WINDOW in current window")
+                        } catch (e: Exception) {
+                            Timber.e(e, "Failed to update watchdog restart tracking: ${e.message}")
+                        }
+                    }
+
                     // ES-08: RACE CONDITION FIX: Always ping service to perform health checks
                     // The isRunning flag can't reliably indicate service health (sensors could be frozen)
                     // Always calling startService will trigger onStartCommand which performs health checks
                     // and handles the case where service is already running (just calls onStartCommand again)
-                    Timber.d("Watchdog pinging service for health check")
+                    Timber.d("Watchdog pinging service for health check (serviceRunning=$serviceWasRunning)")
 
                     // Always try to ping/restart the service to keep it alive (triggers onStartCommand).
                     try {
@@ -124,21 +140,24 @@ class ServiceWatchdogReceiver : BroadcastReceiver() {
                             appContext.startService(serviceIntent)
                         }
                         Timber.d("Pinged service successfully")
+
+                        if (!serviceWasRunning) {
+                            persistRestartAttempt("Watchdog restarted service from stopped state")
+                        } else if (actualRestartCount > 0) {
+                            // Service is healthy again; clear stale restart-window counters.
+                            prefsRepo.updateRestartAttempt(0L, 0)
+                            Timber.d("Watchdog restart counter reset after healthy ping")
+                        }
                     } catch (e: Exception) {
+                        nextWatchdogDelayMs = RESTART_RETRY_INTERVAL_MS
                         // On Android 12+, foreground service start from background might fail.
                         Timber.e(e, "Failed to ping/restart service: ${e.message}")
                         showRestartNotification(appContext, "Monitoring stopped - tap to restart")
-                    } finally {
-                        // Count the attempt even on failure (boot loop protection).
-                        try {
-                            prefsRepo.updateRestartAttempt(now, actualRestartCount + 1)
-                        } catch (e: Exception) {
-                            Timber.e(e, "Failed to update watchdog restart tracking: ${e.message}")
-                        }
+                        persistRestartAttempt("Watchdog ping failed")
                     }
 
                     // Keep watchdog continuity even if service start fails or onStartCommand is delayed.
-                    scheduleNextWatchdog(appContext, RESTART_RETRY_INTERVAL_MS)
+                    scheduleNextWatchdog(appContext, nextWatchdogDelayMs)
                 }
 
                 if (completed == null) {
