@@ -3,6 +3,9 @@
     <string name="complication_rating_name">Rate Tremor</string>
     <string name="complication_rating_short">Rate</string>
     <string name="complication_rating_desc">Open the tremor rating screen</string>
+    <!-- Attribution labels for AppOps tracking -->
+    <string name="attribution_sensor">Tremor sensor access</string>
+    <string name="attribution_training">Tremor training data</string>
     <!--
     This string is used for square devices and overridden by hello_world in
     values-round/strings.xml for round devices.

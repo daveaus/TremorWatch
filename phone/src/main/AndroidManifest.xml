@@ -64,10 +64,7 @@
             android:name="com.google.android.wearable.standalone"
             android:value="false" />
 
-        <!-- Capability: Advertise as tremor data receiver for watch discovery -->
-        <meta-data
-            android:name="com.google.android.gms.wearable.CAPABILITY"
-            android:value="tremor_watch_receiver" />
+        <!-- Capability declared via res/values/wear.xml (android_wear_capabilities) -->
 
         <!-- Wearable library for Data Layer API -->
         <uses-library

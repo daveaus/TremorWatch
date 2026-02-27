@@ -1,6 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!-- Attribution tags for AppOps tracking (suppresses attributionTag-not-declared warnings) -->
+    <attribution android:tag="tremor_sensor" android:label="@string/attribution_sensor" />
+    <attribution android:tag="tremor_training" android:label="@string/attribution_training" />
+
     <!-- ===== Permissions ===== -->
     <!-- Sensors & background access -->
     <uses-permission android:name="android.permission.BODY_SENSORS" />

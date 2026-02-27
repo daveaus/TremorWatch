@@ -147,6 +147,7 @@ class TremorMonitoringEngine(
     private var inTremorEpisode = false
     private var currentEpisodeStartTime = 0L
     private var currentEpisodeTremorCount = 0
+    private var episodeStartLogged = false  // deferred START log for minEpisodeDurationMs filter
     
     // Phase 5: Rolling baseline and severity calculation (opus45 review)
     // Provided by the service (constructed with applicationContext) to keep engine testable.
@@ -670,9 +671,14 @@ class TremorMonitoringEngine(
                 inTremorEpisode = true
                 currentEpisodeStartTime = System.currentTimeMillis()
                 currentEpisodeTremorCount = consecutiveTremorSamples
-                Timber.i("★ Tremor episode STARTED (${consecutiveTremorSamples} consecutive samples)")
+                episodeStartLogged = false  // defer START log until minEpisodeDurationMs passed
             } else if (inTremorEpisode) {
                 currentEpisodeTremorCount++
+                // Deferred START log: emit once episode survives past minimum duration
+                if (!episodeStartLogged && (System.currentTimeMillis() - currentEpisodeStartTime) >= config.minEpisodeDurationMs) {
+                    Timber.i("★ Tremor episode STARTED (${currentEpisodeTremorCount} tremor samples, confirmed after ${config.minEpisodeDurationMs}ms)")
+                    episodeStartLogged = true
+                }
             }
         } else {
             consecutiveNonTremorSamples++
@@ -680,7 +686,11 @@ class TremorMonitoringEngine(
             // End episode only after config.maxGapSamples consecutive non-tremor
             if (inTremorEpisode && consecutiveNonTremorSamples > config.maxGapSamples) {
                 val episodeDuration = System.currentTimeMillis() - currentEpisodeStartTime
-                Timber.i("★ Tremor episode ENDED (duration: ${episodeDuration}ms, ${currentEpisodeTremorCount} tremor samples)")
+                if (episodeDuration >= config.minEpisodeDurationMs) {
+                    Timber.i("★ Tremor episode ENDED (duration: ${episodeDuration}ms, ${currentEpisodeTremorCount} tremor samples)")
+                } else {
+                    Timber.d("★ Micro-episode discarded (duration: ${episodeDuration}ms < ${config.minEpisodeDurationMs}ms threshold, ${currentEpisodeTremorCount} samples)")
+                }
                 inTremorEpisode = false
                 consecutiveTremorSamples = 0
                 currentEpisodeStartTime = 0L

@@ -5,6 +5,59 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ---
 
+## [Unreleased] — 2026-02-27 (log review hardening)
+
+### Fixed — Log-review-driven improvements across watch and phone modules
+
+- **L1 — Capability declaration bug** (`phone/res/values/wear.xml`, `phone/AndroidManifest.xml`):
+  The phone app declared `tremor_watch_receiver` capability via `<meta-data>` in AndroidManifest,
+  but the Wearable Data Layer API requires it in `res/values/wear.xml` as a `<string-array>`
+  named `android_wear_capabilities`. Created the resource file and removed the ineffective
+  meta-data tag. This was causing every `CapabilityClient` lookup to return zero capable nodes,
+  forcing all data sends through the generic connected-nodes fallback path.
+
+- **L2 — TrainingManager suppression log spam (~1/sec)** (`TrainingManager.kt`):
+  Added per-reason throttling that batches suppression log lines to at most one per reason per
+  60 seconds with an accumulated count. Previously each guardrail rejection logged individually,
+  producing ~3,600 lines/hr of near-identical debug output. Added `suppressionCounts`,
+  `lastSuppressionLogMs` maps and `logThrottledSuppression()` method.
+
+- **L3 — Episode boundary oscillation (micro-episodes)** (`TremorDetectionConfig.kt`,
+  `TremorMonitoringEngine.kt`):
+  Added `minEpisodeDurationMs: Long = 5_000L` to `TremorDetectionConfig`. Engine now defers
+  the START log until an episode survives past the minimum duration, and downgrades END logs for
+  micro-episodes (< threshold) to debug level. Prevents rapid start/stop cycling near the
+  detection threshold from inflating episode counts and log noise. Added `episodeStartLogged`
+  deferred-log flag.
+
+- **L4 — Training prompt fires with screen off** (`TrainingManager.kt`):
+  `launchPromptActivity()` now checks `PowerManager.isInteractive` before setting
+  `setFullScreenIntent`. When screen is off, posts a notification-only prompt (user taps when
+  ready) instead of waking the screen with a full-screen activity — reducing battery drain and
+  avoiding unexpected screen-on during sleep/pocket carry.
+
+- **L5 — Watch manifest missing `<attribution>` tags** (`app/AndroidManifest.xml`,
+  `app/res/values/strings.xml`):
+  Added `<attribution>` declarations for `tremor_sensor` and `tremor_training` tags with
+  string-resource labels. Suppresses `attributionTag-not-declared` warnings from AppOps
+  on API 31+ devices.
+
+### No Change Required
+
+- **L6 — Consolidated storage rotation**: Verified cleanup exists at `TremorService:837-905`
+  with configurable retention (48h watch-side, 168h phone-side). ~38MB/day growth with 48h
+  retention yields ~76MB max — within budget. No change needed.
+
+**Files changed**: `phone/src/main/AndroidManifest.xml`,
+`phone/src/main/res/values/wear.xml` (new),
+`app/src/main/AndroidManifest.xml`,
+`app/src/main/res/values/strings.xml`,
+`app/src/main/java/com/opensource/tremorwatch/training/TrainingManager.kt`,
+`app/src/main/java/com/opensource/tremorwatch/engine/TremorMonitoringEngine.kt`,
+`shared/src/main/java/com/opensource/tremorwatch/shared/models/TremorDetectionConfig.kt`
+
+---
+
 ## [Unreleased] — 2026-02-27 (detection quality pass)
 
 ### Fixed — Additional detection and optimizer quality improvements

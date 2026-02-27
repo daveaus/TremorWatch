@@ -68,6 +68,9 @@ data class TremorDetectionConfig(
     val minEpisodeDurationSamples: Int = 3,
     /** Maximum gap in samples that can be bridged in a tremor episode (temporal coherence) */
     val maxGapSamples: Int = 2,
+    /** Minimum episode duration in ms to report — shorter episodes are silently discarded to
+     *  suppress boundary oscillation (rapid start/stop cycling near detection threshold). */
+    val minEpisodeDurationMs: Long = 5_000L,
 
     // === Confidence Calculation ===
     /** Minimum confidence score required to register detection (0-1 range) */

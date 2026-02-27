@@ -227,6 +227,12 @@ class TrainingManager(
     private var trainingCompletedTimeMs: Long? = null
     private var lastFeedbackTimeMs: Long? = null
     private var lastFeedbackLabel: FeedbackLabel? = null
+
+    // Suppression log throttle — one log line per reason per 60s instead of per-sample
+    private val suppressionCounts = mutableMapOf<String, Int>()
+    private val lastSuppressionLogMs = mutableMapOf<String, Long>()
+    private val SUPPRESSION_LOG_INTERVAL_MS = 60_000L
+
     private var lastStatusSyncFingerprint: String? = null
     private var lastStatusSyncTimeMs: Long = 0L
 
@@ -423,7 +429,7 @@ class TrainingManager(
 
         val promptDecision = evaluatePromptEligibility(timestamp)
         if (!promptDecision.allowed) {
-            Timber.d("Prompt suppressed by guardrails: ${promptDecision.reason}")
+            logThrottledSuppression(promptDecision.reason)
             return
         }
 
@@ -517,6 +523,20 @@ class TrainingManager(
         return PromptDecision(allowed = true, reason = "allowed")
     }
 
+    /** Throttle suppression logs to at most one per reason per SUPPRESSION_LOG_INTERVAL_MS. */
+    private fun logThrottledSuppression(reason: String) {
+        val reasonKey = reason.substringBefore(' ')  // e.g. "cooldown_active"
+        val now = System.currentTimeMillis()
+        val count = (suppressionCounts[reasonKey] ?: 0) + 1
+        suppressionCounts[reasonKey] = count
+        val lastLog = lastSuppressionLogMs[reasonKey] ?: 0L
+        if (now - lastLog >= SUPPRESSION_LOG_INTERVAL_MS) {
+            Timber.d("Prompt suppressed: reason=$reasonKey count=$count (last ${SUPPRESSION_LOG_INTERVAL_MS / 1000}s)")
+            suppressionCounts[reasonKey] = 0
+            lastSuppressionLogMs[reasonKey] = now
+        }
+    }
+
     private fun resetCountersIfNeeded() {
         val now = LocalTime.now()
         var changed = false
@@ -562,22 +582,31 @@ class TrainingManager(
             val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             ensurePromptChannel(notificationManager)
 
-            val notification = NotificationCompat.Builder(context, TRAINING_PROMPT_CHANNEL_ID)
+            // Only use fullScreenIntent (immediate activity launch) when display is interactive.
+            // When screen is off, post notification-only to avoid activity churn/timeouts.
+            val powerManager = context.getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+            val isScreenOn = powerManager.isInteractive
+
+            val builder = NotificationCompat.Builder(context, TRAINING_PROMPT_CHANNEL_ID)
                 .setSmallIcon(android.R.drawable.ic_dialog_alert)
                 .setContentTitle("Tremor Check")
                 .setContentText("Detected movement at $eventTimeText. Tap to answer.")
                 .setPriority(NotificationCompat.PRIORITY_HIGH)
                 .setCategory(NotificationCompat.CATEGORY_REMINDER)
                 .setContentIntent(pendingIntent)
-                .setFullScreenIntent(pendingIntent, true)
                 .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
                 .setAutoCancel(true)
                 .setOngoing(true)
                 .setTimeoutAfter(PROMPT_TIMEOUT_MS + 5_000L)
-                .build()
+
+            if (isScreenOn) {
+                builder.setFullScreenIntent(pendingIntent, true)
+            }
+
+            val notification = builder.build()
 
             notificationManager.notify(notificationId, notification)
-            Timber.i("Training prompt notification posted for sample $sampleId at $eventTimeText")
+            Timber.i("Training prompt notification posted for sample $sampleId at $eventTimeText (fullScreen=${isScreenOn})")
         } catch (e: Exception) {
             Timber.e(e, "Failed to post training prompt notification")
         }
