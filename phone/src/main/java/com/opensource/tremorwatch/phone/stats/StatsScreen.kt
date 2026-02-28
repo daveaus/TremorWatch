@@ -722,7 +722,7 @@ private fun CompactSeverityCard(
                     ) {
                         Text("Time", style = MaterialTheme.typography.labelSmall, modifier = Modifier.width(40.dp))
                         Text("Sev", style = MaterialTheme.typography.labelSmall, modifier = Modifier.width(30.dp))
-                        Text("Tremor", style = MaterialTheme.typography.labelSmall, modifier = Modifier.width(55.dp))
+                        Text("Tremor", style = MaterialTheme.typography.labelSmall, modifier = Modifier.width(75.dp))
                         Spacer(modifier = Modifier.weight(1f))
                     }
 
@@ -730,6 +730,7 @@ private fun CompactSeverityCard(
                         ?.coerceAtLeast(1.0) ?: 10.0
 
                     timeline.buckets.forEach { bucket ->
+                        val isPeak = bucket == timeline.peakBucket
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -747,14 +748,14 @@ private fun CompactSeverityCard(
                                 "${bucket.tremorCount}/${bucket.totalCount}",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.width(55.dp)
+                                modifier = Modifier.width(75.dp)
                             )
                             val fraction = (bucket.avgSeverity / maxSeverity)
                                 .coerceIn(0.0, 1.0).toFloat()
                             Box(
                                 modifier = Modifier
-                                    .weight(1f)
-                                    .height(12.dp)
+                                    .weight(0.8f)
+                                    .height(14.dp)
                                     .clip(RoundedCornerShape(2.dp))
                                     .background(MaterialTheme.colorScheme.surface)
                             ) {
@@ -764,18 +765,20 @@ private fun CompactSeverityCard(
                                         .fillMaxHeight()
                                         .background(severityColor(bucket.avgSeverity))
                                 )
+                                if (isPeak) {
+                                    Text(
+                                        "PEAK",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = Color.White,
+                                        modifier = Modifier
+                                            .align(Alignment.CenterStart)
+                                            .padding(start = 4.dp)
+                                    )
+                                }
                             }
                         }
                     }
 
-                    // Peak/trough summary
-                    timeline.peakBucket?.let { peak ->
-                        Text(
-                            text = "${peak.timeLabel} Peak: ${String.format(Locale.US, "%.1f", peak.avgSeverity)}",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.error
-                        )
-                    }
                 }
             }
         }

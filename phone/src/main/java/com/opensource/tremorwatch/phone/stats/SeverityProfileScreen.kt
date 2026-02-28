@@ -38,6 +38,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -216,7 +217,7 @@ fun SeverityProfileScreen(
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.primary,
                                 modifier = Modifier
-                                    .width(55.dp)
+                                    .width(75.dp)
                                     .clickable {
                                         showTooltip = if (showTooltip == "tremor") null else "tremor"
                                     }
@@ -246,6 +247,11 @@ fun SeverityProfileScreen(
                             ?.coerceAtLeast(1.0) ?: 10.0
 
                         tl.buckets.forEach { bucket ->
+                            val annotation = when (bucket) {
+                                tl.peakBucket -> "PEAK"
+                                tl.troughBucket -> "LOW"
+                                else -> null
+                            }
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -267,15 +273,15 @@ fun SeverityProfileScreen(
                                     "${bucket.tremorCount}/${bucket.totalCount}",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    modifier = Modifier.width(55.dp)
+                                    modifier = Modifier.width(75.dp)
                                 )
-                                // Visual bar
+                                // Visual bar with PEAK/LOW inside
                                 val fraction = (bucket.avgSeverity / maxSeverity)
                                     .coerceIn(0.0, 1.0).toFloat()
                                 Box(
                                     modifier = Modifier
-                                        .weight(1f)
-                                        .height(12.dp)
+                                        .weight(0.8f)
+                                        .height(14.dp)
                                         .clip(RoundedCornerShape(2.dp))
                                         .background(MaterialTheme.colorScheme.surface)
                                 ) {
@@ -285,22 +291,18 @@ fun SeverityProfileScreen(
                                             .fillMaxHeight()
                                             .background(severityColor(bucket.avgSeverity))
                                     )
+                                    if (annotation != null) {
+                                        Text(
+                                            text = annotation,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = if (annotation == "PEAK") Color.White
+                                                else MaterialTheme.colorScheme.tertiary,
+                                            modifier = Modifier
+                                                .align(Alignment.CenterStart)
+                                                .padding(start = 4.dp)
+                                        )
+                                    }
                                 }
-                                // Peak/trough annotation
-                                val annotation = when (bucket) {
-                                    tl.peakBucket -> "PEAK"
-                                    tl.troughBucket -> "LOW"
-                                    else -> ""
-                                }
-                                Text(
-                                    text = annotation,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = if (annotation == "PEAK")
-                                        MaterialTheme.colorScheme.error
-                                    else
-                                        MaterialTheme.colorScheme.tertiary,
-                                    modifier = Modifier.width(32.dp)
-                                )
                             }
                         }
 
